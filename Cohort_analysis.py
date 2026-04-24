@@ -103,10 +103,10 @@ for indicator, ind_cases in cases.groupby("indicator"):
 
     # Cutoff for "recent" cohorts — last 6 months
     current_yyyymm  = int(TODAY.strftime("%Y%m"))
-        _rc_yr, _rc_mo  = TODAY.year, TODAY.month - 6
-        if _rc_mo <= 0:
-            _rc_mo += 12; _rc_yr -= 1
-        recent_cutoff   = _rc_yr * 100 + _rc_mo
+    _rc_yr, _rc_mo  = TODAY.year, TODAY.month - 6
+    if _rc_mo <= 0:
+        _rc_mo += 12; _rc_yr -= 1
+    recent_cutoff   = _rc_yr * 100 + _rc_mo
     for cohort_periode in cohort_months:
         cohort_cases = ind_cases[
             ind_cases["cohort_period_int"] == cohort_periode
