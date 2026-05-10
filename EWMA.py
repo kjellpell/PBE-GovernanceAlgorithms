@@ -70,51 +70,51 @@ print("ewma_results table ready")
 monthly_frist = spark.sql(f"""
         SELECT
                 pr.Indikator,
-                (YEAR(pr.seneste_stoppmilepael_dato) * 100 + MONTH(pr.seneste_stoppmilepael_dato)) AS period,
+                (YEAR(pr.sluttdato) * 100 + MONTH(pr.sluttdato)) AS period,
                 CASE
                         WHEN COUNT(CASE WHEN pr.Frist IS NOT NULL THEN 1 END) = 0 THEN NULL
                         ELSE COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0
                                  / COUNT(CASE WHEN pr.Frist IS NOT NULL THEN 1 END)
                 END AS verdi
         FROM Prosesser pr
-        WHERE pr.seneste_stoppmilepael_dato IS NOT NULL
+        WHERE pr.sluttdato IS NOT NULL
             AND pr.Frist IS NOT NULL
             AND pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(pr.seneste_stoppmilepael_dato) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(pr.seneste_stoppmilepael_dato), MONTH(pr.seneste_stoppmilepael_dato)
-        ORDER BY pr.Indikator, YEAR(pr.seneste_stoppmilepael_dato), MONTH(pr.seneste_stoppmilepael_dato)
+            AND YEAR(pr.sluttdato) >= {START_YEAR}
+        GROUP BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
+        ORDER BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
 """).toPandas()
 
 # Monthly average Tidsbruk per indicator
 monthly_tid = spark.sql(f"""
         SELECT
                 pr.Indikator,
-                (YEAR(pr.seneste_stoppmilepael_dato) * 100 + MONTH(pr.seneste_stoppmilepael_dato)) AS period,
+                (YEAR(pr.sluttdato) * 100 + MONTH(pr.sluttdato)) AS period,
                 AVG(pr.Tidsbruk) AS verdi
         FROM Prosesser pr
-        WHERE pr.seneste_stoppmilepael_dato IS NOT NULL
+        WHERE pr.sluttdato IS NOT NULL
             AND pr.Tidsbruk IS NOT NULL
             AND pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(pr.seneste_stoppmilepael_dato) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(pr.seneste_stoppmilepael_dato), MONTH(pr.seneste_stoppmilepael_dato)
-        ORDER BY pr.Indikator, YEAR(pr.seneste_stoppmilepael_dato), MONTH(pr.seneste_stoppmilepael_dato)
+            AND YEAR(pr.sluttdato) >= {START_YEAR}
+        GROUP BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
+        ORDER BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
 """).toPandas()
 
 # Monthly production balance per indicator (Mottatt - Produsert)
 monthly_prod = spark.sql(f"""
         SELECT
                 pr.Indikator,
-                (YEAR(COALESCE(pr.seneste_stoppmilepael_dato, pr.tidligste_startmilepael_dato)) * 100 +
-                 MONTH(COALESCE(pr.seneste_stoppmilepael_dato, pr.tidligste_startmilepael_dato))) AS period,
-                COUNT(CASE WHEN pr.tidligste_startmilepael_dato IS NOT NULL THEN 1 END)
-                - COUNT(CASE WHEN pr.seneste_stoppmilepael_dato IS NOT NULL THEN 1 END) AS verdi
+                (YEAR(COALESCE(pr.sluttdato, pr.startdato)) * 100 +
+                 MONTH(COALESCE(pr.sluttdato, pr.startdato))) AS period,
+                COUNT(CASE WHEN pr.startdato IS NOT NULL THEN 1 END)
+                - COUNT(CASE WHEN pr.sluttdato IS NOT NULL THEN 1 END) AS verdi
         FROM Prosesser pr
         WHERE pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(COALESCE(pr.seneste_stoppmilepael_dato, pr.tidligste_startmilepael_dato)) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(COALESCE(pr.seneste_stoppmilepael_dato, pr.tidligste_startmilepael_dato)),
-                         MONTH(COALESCE(pr.seneste_stoppmilepael_dato, pr.tidligste_startmilepael_dato))
-        ORDER BY pr.Indikator, YEAR(COALESCE(pr.seneste_stoppmilepael_dato, pr.tidligste_startmilepael_dato)),
-                         MONTH(COALESCE(pr.seneste_stoppmilepael_dato, pr.tidligste_startmilepael_dato))
+            AND YEAR(COALESCE(pr.sluttdato, pr.startdato)) >= {START_YEAR}
+        GROUP BY pr.Indikator, YEAR(COALESCE(pr.sluttdato, pr.startdato)),
+                         MONTH(COALESCE(pr.sluttdato, pr.startdato))
+        ORDER BY pr.Indikator, YEAR(COALESCE(pr.sluttdato, pr.startdato)),
+                         MONTH(COALESCE(pr.sluttdato, pr.startdato))
 """).toPandas()
 
 print(f"frist:    {monthly_frist['Indikator'].nunique()} indicators, "

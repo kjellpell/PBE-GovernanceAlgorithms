@@ -63,16 +63,16 @@ print("projection_results table ready")
 monthly = spark.sql(f"""
     SELECT
         pr.Indikator,
-        YEAR(pr.seneste_stoppmilepael_dato)                         AS år,
-        MONTH(pr.seneste_stoppmilepael_dato)                        AS mnd,
+        YEAR(pr.sluttdato)                         AS år,
+        MONTH(pr.sluttdato)                        AS mnd,
         COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END)           AS innenfor,
         COUNT(CASE WHEN pr.aggregert_frist IS NOT NULL THEN 1 END)   AS total
     FROM Prosesser pr
-    WHERE pr.seneste_stoppmilepael_dato IS NOT NULL
-      AND pr.aggregert_frist IS NOT NULL
-      AND pr.Indikator NOT LIKE '%avtalt%'
-      AND YEAR(pr.seneste_stoppmilepael_dato) >= {START_YEAR}
-    GROUP BY pr.Indikator, YEAR(pr.seneste_stoppmilepael_dato), MONTH(pr.seneste_stoppmilepael_dato)
+        WHERE pr.sluttdato IS NOT NULL
+            AND pr.aggregert_frist IS NOT NULL
+            AND pr.Indikator NOT LIKE '%avtalt%'
+            AND YEAR(pr.sluttdato) >= {START_YEAR}
+        GROUP BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
     ORDER BY pr.Indikator, år, mnd
 """).toPandas()
 

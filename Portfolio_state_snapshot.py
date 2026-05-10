@@ -80,21 +80,21 @@ print(f"Snapshot month: {SNAPSHOT_MONTH}")
 # CELL 2 — Load open cases at month-end
 # =============================================================================
 # A case is open at month-end if:
-#   tidligste_startmilepael_dato <= SNAPSHOT_MONTH
-#   AND (Sluttdato IS NULL OR Sluttdato > SNAPSHOT_MONTH)
+#   startdato <= SNAPSHOT_MONTH
+#   AND (sluttdato IS NULL OR sluttdato > SNAPSHOT_MONTH)
 
 open_cases = spark.sql(f"""
     SELECT
         Prosess_id,
         Indikator
     FROM Prosesser
-    WHERE Indikator IS NOT NULL
-      AND tidligste_startmilepael_dato IS NOT NULL
-      AND tidligste_startmilepael_dato <= '{snapshot_str}'
-      AND (
-            siste_stoppmilepael_dato IS NULL
-            OR siste_stoppmilepael_dato > '{snapshot_str}'
-          )
+        WHERE Indikator IS NOT NULL
+            AND startdato IS NOT NULL
+            AND startdato <= '{snapshot_str}'
+            AND (
+                        sluttdato IS NULL
+                        OR sluttdato > '{snapshot_str}'
+                    )
 """)
 
 print(f"Open cases at {SNAPSHOT_MONTH}: {open_cases.count():,}")
@@ -304,10 +304,10 @@ print(f"Total rows in {OUTPUT_TABLE}: "
 #             SUM(portefolje_snapshot[tidligbehandling_count]),
 #             CALCULATE(
 #                 COUNTROWS(Prosesser),
-#                 NOT ISBLANK(Prosesser[tidligste_startmilepael_dato]),
-#                 MONTH(Prosesser[tidligste_startmilepael_dato])
+#                 NOT ISBLANK(Prosesser[startdato]),
+#                 MONTH(Prosesser[startdato])
 #                     = MONTH(MAX(portefolje_snapshot[snapshot_month])),
-#                 YEAR(Prosesser[tidligste_startmilepael_dato])
+#                 YEAR(Prosesser[startdato])
 #                     = YEAR(MAX(portefolje_snapshot[snapshot_month]))
 #             )
 #         )

@@ -56,28 +56,28 @@ print("cohort_results table ready")
 # CELL 2 — Load case data
 # =============================================================================
 # One row per case with intake month and days to resolution (or NULL if open).
-# Uses tidligste_startmilepael_dato for intake, Sluttdato for resolution.
+# Uses startdato for intake, sluttdato for resolution.
 # Excludes avtalt indicators — no fixed deadline to measure against.
 
 cases = spark.sql(f"""
     SELECT
         pr.Indikator                                 AS indicator,
-        DATE_FORMAT(pr.tidligste_startmilepael_dato, 'yyyyMM')  AS cohort_period,
-        YEAR(pr.tidligste_startmilepael_dato) * 100
-            + MONTH(pr.tidligste_startmilepael_dato)            AS cohort_period_int,
-        pr.tidligste_startmilepael_dato                         AS intake_date,
-        pr.siste_stoppmilepael_dato                              AS end_date,
+        DATE_FORMAT(pr.startdato, 'yyyyMM')  AS cohort_period,
+        YEAR(pr.startdato) * 100
+            + MONTH(pr.startdato)            AS cohort_period_int,
+        pr.startdato                         AS intake_date,
+        pr.sluttdato                         AS end_date,
         CASE
-            WHEN pr.siste_stoppmilepael_dato IS NOT NULL
-            THEN DATEDIFF(pr.siste_stoppmilepael_dato, pr.tidligste_startmilepael_dato)
+            WHEN pr.sluttdato IS NOT NULL
+            THEN DATEDIFF(pr.sluttdato, pr.startdato)
             ELSE NULL
         END                                                     AS dager_til_ferdig,
         CASE
-            WHEN pr.seneste_stoppmilepael_dato IS NULL THEN 1 ELSE 0
+            WHEN pr.sluttdato IS NULL THEN 1 ELSE 0
         END                                                     AS is_open
     FROM Prosesser pr
-    WHERE pr.tidligste_startmilepael_dato IS NOT NULL
-      AND YEAR(pr.tidligste_startmilepael_dato) >= {START_YEAR}
+        WHERE pr.startdato IS NOT NULL
+            AND YEAR(pr.startdato) >= {START_YEAR}
 """).toPandas()
 
 cases["cohort_period_int"] = cases["cohort_period_int"].astype(int)
