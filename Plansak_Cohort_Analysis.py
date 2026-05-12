@@ -44,6 +44,19 @@ TODAY    = pd.Timestamp(date.today())
 # regularly exceed the legal deadlines. Update these if the portfolio changes.
 # =============================================================================
 
+# ── System strings — update here if the case management system renames these ──
+# Milepeler.Milepel values
+M_OM    = "Oppstartsmøte"
+M_PF    = "Planforslag mottatt"
+
+# Prosesser.Indikator values
+IND_OE    = "Offentlig ettersyn"           # canonical phase name (mapped from 3 variants)
+IND_HOER  = "Høringsperiode"
+IND_POLIT = "Sendt til politisk behandling"
+
+# Internal phase name for Utarbeidingsfasen (derived from OM→PF milestones, not a Prosesser row)
+PHASE_UTARB = "Utarbeidingsfasen Kostra"
+
 CONFIG = {
     "cohort_start":          "2026-01-01",
     # Each case's deadline = its own OM date + rolling_deadline_years
@@ -58,15 +71,15 @@ CONFIG = {
     # Calendar-time stalled-phase thresholds (forward-looking intervention).
     # Fires when a phase is "In Progress" longer than this — independent of Tidsbruk.
     "stalled_phase_days": {
-        "Offentlig ettersyn":             180,
-        "Høringsperiode":                 120,
-        "Sendt til politisk behandling":  365,
+        IND_OE:    180,
+        IND_HOER:  120,
+        IND_POLIT: 365,
     },
 
     # Fallback Frist (statutory) when Prosesser.Frist is NULL — same units (days)
     "frist_default_days": {
-        "Offentlig ettersyn":              84,   # 12 weeks
-        "Sendt til politisk behandling":  126,   # 18 weeks
+        IND_OE:     84,   # 12 weeks
+        IND_POLIT: 126,   # 18 weeks
     },
 
     # Høringsperiode statutory minimum (6 weeks)
@@ -76,9 +89,9 @@ CONFIG = {
     # and to derive the Utarbeidingsfasen budget.
     # Phases 2–4 realistic (exceeds legal minimums where practice shows overrun):
     "expected_phase_days": {
-        "Offentlig ettersyn":             84,   # 12 weeks (legal = 12 wk, met in practice)
-        "Høringsperiode":                 63,   # ~9 weeks (above statutory minimum)
-        "Sendt til politisk behandling": 245,   # 35 weeks (18-wk legal deadline rarely met)
+        IND_OE:     84,   # 12 weeks (legal = 12 wk, met in practice)
+        IND_HOER:   63,   # ~9 weeks (above statutory minimum)
+        IND_POLIT: 245,   # 35 weeks (18-wk legal deadline rarely met)
     },
 
     # Historical average days OM→OE by complexity (from PlanningConfig calibration).
@@ -137,12 +150,7 @@ OUT_PHASE     = CONFIG["out_phase_detail"]
 OUT_CASES     = CONFIG["out_dim_cases"]
 OUT_KPI       = CONFIG["out_kpi_snapshot"]
 
-PHASE_ORDER = [
-    "Utarbeidingsfasen Kostra",
-    "Offentlig ettersyn",
-    "Høringsperiode",
-    "Sendt til politisk behandling",
-]
+PHASE_ORDER = [PHASE_UTARB, IND_OE, IND_HOER, IND_POLIT]
 
 print(f"3-year window:            {_TOTAL_DAYS} days")
 print(f"Expected phases 2–4:      {_PHASES_2_4} days")
@@ -240,7 +248,7 @@ cohort_start = CONFIG["cohort_start"]
 cohort_spark = spark.sql(f"""
     SELECT DISTINCT Saksnummer
     FROM {MILEPELER}
-    WHERE Milepel    = 'Oppstartsmøte'
+    WHERE Milepel    = '{M_OM}'
       AND Sluttdato >= '{cohort_start}'
       AND Saksnummer IS NOT NULL
       AND Sluttdato  IS NOT NULL
@@ -260,19 +268,19 @@ milepeler_cohort = spark.sql(f"""
            CAST(m.Sluttdato AS DATE) AS Sluttdato
     FROM {MILEPELER} m
     JOIN _cohort_cases c ON m.Saksnummer = c.Saksnummer
-    WHERE m.Milepel IN ('Oppstartsmøte', 'Planforslag mottatt')
+    WHERE m.Milepel IN ('{M_OM}', '{M_PF}')
       AND m.Sluttdato IS NOT NULL
 """).toPandas()
 
 milepeler_cohort["Sluttdato"] = pd.to_datetime(milepeler_cohort["Sluttdato"])
 
 om_date = (
-    milepeler_cohort[milepeler_cohort["Milepel"] == "Oppstartsmøte"]
+    milepeler_cohort[milepeler_cohort["Milepel"] == M_OM]
     .set_index("Saksnummer")["Sluttdato"]
     .to_dict()
 )
 pf_date = (
-    milepeler_cohort[milepeler_cohort["Milepel"] == "Planforslag mottatt"]
+    milepeler_cohort[milepeler_cohort["Milepel"] == M_PF]
     .set_index("Saksnummer")["Sluttdato"]
     .to_dict()
 )
@@ -347,10 +355,7 @@ if complexity_map:
 # CELL 4 — Phases 2–4 from Prosesser
 # =============================================================================
 
-_all_indicators = CONFIG["offentlig_ettersyn_variants"] + [
-    "Høringsperiode",
-    "Sendt til politisk behandling",
-]
+_all_indicators = CONFIG["offentlig_ettersyn_variants"] + [IND_HOER, IND_POLIT]
 _ind_sql = ",".join(f"'{i}'" for i in _all_indicators)
 
 prosesser_raw = spark.sql(f"""
@@ -372,10 +377,10 @@ prosesser_raw["Sluttdato"] = pd.to_datetime(prosesser_raw["Sluttdato"])
 
 oe_set = set(CONFIG["offentlig_ettersyn_variants"])
 prosesser_raw["Phase_Name"] = prosesser_raw["Indikator"].apply(
-    lambda i: "Offentlig ettersyn" if i in oe_set else i
+    lambda i: IND_OE if i in oe_set else i
 )
 prosesser_raw["Phase_Variant"] = prosesser_raw.apply(
-    lambda r: r["Indikator"] if r["Phase_Name"] == "Offentlig ettersyn" else None,
+    lambda r: r["Indikator"] if r["Phase_Name"] == IND_OE else None,
     axis=1,
 )
 
@@ -458,7 +463,7 @@ for saksnummer in sorted(cohort_saksnummer):
 
     phase_rows.append({
         "Saksnummer":           saksnummer,
-        "Phase_Name":           "Utarbeidingsfasen Kostra",
+        "Phase_Name":           PHASE_UTARB,
         "Phase_Variant":        None,
         "Phase_Startdato":      p1_start if pd.notna(p1_start) else None,
         "Phase_Sluttdato":      p1_end   if pd.notna(p1_end)   else None,
@@ -482,7 +487,7 @@ for saksnummer in sorted(cohort_saksnummer):
     })
 
     # ── Phases 2–4: from Prosesser ─────────────────────────────────────────────
-    for phase_name in ("Offentlig ettersyn", "Høringsperiode", "Sendt til politisk behandling"):
+    for phase_name in (IND_OE, IND_HOER, IND_POLIT):
         key = (saksnummer, phase_name)
         if key not in prosesser_dedup.index:
             phase_rows.append({
@@ -519,14 +524,14 @@ for saksnummer in sorted(cohort_saksnummer):
             status   = "Not Started"
 
         alerts = []
-        if phase_name in ("Offentlig ettersyn", "Sendt til politisk behandling"):
+        if phase_name in (IND_OE, IND_POLIT):
             # Frist null fallback to statutory default so alerts still fire
             effective_frist = frist if pd.notna(frist) else CONFIG["frist_default_days"].get(phase_name)
             if pd.notna(tidsbruk) and effective_frist is not None and tidsbruk > effective_frist:
                 overshoot = int(tidsbruk - effective_frist)
                 via = "" if pd.notna(frist) else " (statutory default)"
                 alerts.append(f"{phase_name} overskrider Frist med {overshoot} dager{via}")
-        elif phase_name == "Høringsperiode":
+        elif phase_name == IND_HOER:
             if status == "Completed" and cal_days is not None and cal_days < HOER_MIN:
                 alerts.append(
                     f"Høringsperiode under lovpålagt minimum ({cal_days} av {HOER_MIN} dager)"
@@ -582,7 +587,7 @@ print(phase_detail.groupby("Phase_Name")["Phase_Status"].value_counts().to_strin
 # ── Build dim_cases ────────────────────────────────────────────────────────────
 # Precompute per-case rollups so the inner loop is O(1) per case.
 alert_counts_by_case = phase_detail.groupby("Saksnummer")["Alert_Flag"].sum().to_dict()
-utarb_rows = phase_detail[phase_detail["Phase_Name"] == "Utarbeidingsfasen Kostra"]
+utarb_rows = phase_detail[phase_detail["Phase_Name"] == PHASE_UTARB]
 days_since_am_by_case = (
     utarb_rows.set_index("Saksnummer")["Days_Since_Last_AM"].to_dict()
 )
@@ -591,8 +596,8 @@ for saksnummer in sorted(cohort_saksnummer):
     case_start = om_date.get(saksnummer, pd.NaT)
     complexity = complexity_map.get(saksnummer, "Unknown")
 
-    # Case end = Sluttdato of "Sendt til politisk behandling"
-    p4_key = (saksnummer, "Sendt til politisk behandling")
+    # Case end = Sluttdato of last phase
+    p4_key = (saksnummer, IND_POLIT)
     if p4_key in _pd_idx.index:
         case_end = _pd_idx.loc[p4_key, "Phase_Sluttdato"]
         case_end = case_end if pd.notna(case_end) else pd.NaT
@@ -624,7 +629,7 @@ for saksnummer in sorted(cohort_saksnummer):
         projected_days = 0
         for ph in PHASE_ORDER:
             expected = (
-                UTARB_BUDGET if ph == "Utarbeidingsfasen Kostra"
+                UTARB_BUDGET if ph == PHASE_UTARB
                 else CONFIG["expected_phase_days"].get(ph, 90)
             )
             key = (saksnummer, ph)
@@ -716,10 +721,10 @@ def _phase_counts(name):
     ph = phase_detail[phase_detail["Phase_Name"] == name]
     return int((ph["Phase_Status"] == "In Progress").sum()), int(ph["Alert_Flag"].sum())
 
-p1_ip, p1_al = _phase_counts("Utarbeidingsfasen Kostra")
-p2_ip, p2_al = _phase_counts("Offentlig ettersyn")
-p3_ip, p3_al = _phase_counts("Høringsperiode")
-p4_ip, p4_al = _phase_counts("Sendt til politisk behandling")
+p1_ip, p1_al = _phase_counts(PHASE_UTARB)
+p2_ip, p2_al = _phase_counts(IND_OE)
+p3_ip, p3_al = _phase_counts(IND_HOER)
+p4_ip, p4_al = _phase_counts(IND_POLIT)
 
 kpi_row = {
     "Snapshot_Date":      date.today(),
@@ -852,7 +857,7 @@ spark.sql(f"""
 #    Shows: Phase_Status, Calendar_Days, Tidsbruk vs Frist,
 #           AM_Count vs AM_Expected_Avg, Last_AM_Date, KS_Date, Structural_Risk
 #
-# 5. UTARBEIDINGSFASEN SCATTER (phase_detail, Phase_Name = 'Utarbeidingsfasen Kostra'):
+# 5. UTARBEIDINGSFASEN SCATTER (phase_detail, Phase_Name = PHASE_UTARB):
 #    X axis: Calendar_Days  |  Y axis: AM_Count
 #    Color: Structural_Risk  |  Reference line: Utarb_Budget_Days
 #    Shows: cases using too many days with too few AMs → stuck cases
