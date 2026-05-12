@@ -2,8 +2,9 @@
 # Plansak_Cohort_Analysis.py
 #
 # Tracks the 2026 planning-case cohort (Oppstartsmøte >= 01.01.2026) against
-# a hard goal: every case must reach "Sendt til politisk behandling" by
-# 01.01.2029 (3 years from cohort start).
+# a rolling per-case goal: every case must reach "Sendt til politisk behandling"
+# within 3 years of its own Oppstartsmøte date (Case_Deadline = OM + 3 years).
+# Cases entering the cohort later in time get correspondingly later deadlines.
 #
 # Four phases are measured per case:
 #   1. Utarbeidingsfasen Kostra  — OM to Planforslag mottatt (Milepeler)
@@ -51,8 +52,22 @@ CONFIG = {
     # Cases projected to miss their deadline by fewer than this many days → "At Risk"
     "at_risk_buffer_days": 180,
 
-    # Phase 1 inactivity: no invoiced AM in this many days → activity alert
-    "inactivity_alert_days": 90,
+    # KS milestone reached but Planforslag mottatt missing for this long → alert
+    "ks_to_pf_max_days": 60,
+
+    # Calendar-time stalled-phase thresholds (forward-looking intervention).
+    # Fires when a phase is "In Progress" longer than this — independent of Tidsbruk.
+    "stalled_phase_days": {
+        "Offentlig ettersyn":             180,
+        "Høringsperiode":                 120,
+        "Sendt til politisk behandling":  365,
+    },
+
+    # Fallback Frist (statutory) when Prosesser.Frist is NULL — same units (days)
+    "frist_default_days": {
+        "Offentlig ettersyn":              84,   # 12 weeks
+        "Sendt til politisk behandling":  126,   # 18 weeks
+    },
 
     # Høringsperiode statutory minimum (6 weeks)
     "høringsperiode_min_days": 42,
@@ -180,13 +195,14 @@ CREATE TABLE IF NOT EXISTS {OUT_CASES} (
     Total_Elapsed_Days          INT,
     Projected_Completion_Date   DATE,
     Days_To_Deadline            INT,
+    Days_Since_Last_AM_Utarb    INT,
     Overall_Status              STRING      NOT NULL,
     Alert_Count                 INT         NOT NULL,
     computed_at                 TIMESTAMP   NOT NULL,
     batch_id                    STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'One row per Saksnummer in the 2026 cohort. Case_Deadline = OM date + 3 years (rolling per case). Days_To_Deadline negative means projected to miss the individual case deadline.'
+COMMENT 'One row per Saksnummer in the 2026 cohort. Case_Deadline = OM date + 3 years (rolling per case). Days_To_Deadline negative means projected to miss the individual case deadline. Days_Since_Last_AM_Utarb rolled up from phase 1 for slicing.'
 """)
 
 spark.sql(f"""
@@ -413,7 +429,14 @@ for saksnummer in sorted(cohort_saksnummer):
         p1_status = "Not Started"
 
     # Days since last AM — informational only (AM is customer-driven, not controlled by us)
-    days_since_last_am = (TODAY - am_last).days if pd.notna(am_last) else None
+    # For completed phase 1, freeze at phase end so the value doesn't grow forever.
+    if pd.notna(am_last):
+        if p1_status == "Completed" and pd.notna(p1_end):
+            days_since_last_am = (p1_end - am_last).days
+        else:
+            days_since_last_am = (TODAY - am_last).days
+    else:
+        days_since_last_am = None
 
     p1_alerts = []
     if structural_risk:
@@ -425,6 +448,13 @@ for saksnummer in sorted(cohort_saksnummer):
         p1_alerts.append(
             f"Utarbeidingsfasen overskrider budsjett ({p1_cal} av {UTARB_BUDGET} dager)"
         )
+    # KS reached but Planforslag not yet submitted → stuck on customer side
+    if pd.notna(ks_val) and pd.isna(p1_end):
+        days_since_ks = (TODAY - ks_val).days
+        if days_since_ks > CONFIG["ks_to_pf_max_days"]:
+            p1_alerts.append(
+                f"Dokumentasjon klar (KS) men Planforslag ikke mottatt på {days_since_ks} dager"
+            )
 
     phase_rows.append({
         "Saksnummer":           saksnummer,
@@ -490,14 +520,23 @@ for saksnummer in sorted(cohort_saksnummer):
 
         alerts = []
         if phase_name in ("Offentlig ettersyn", "Sendt til politisk behandling"):
-            if pd.notna(tidsbruk) and pd.notna(frist) and tidsbruk > frist:
-                overshoot = int(tidsbruk - frist)
-                alerts.append(f"{phase_name} overskrider Frist med {overshoot} dager")
+            # Frist null fallback to statutory default so alerts still fire
+            effective_frist = frist if pd.notna(frist) else CONFIG["frist_default_days"].get(phase_name)
+            if pd.notna(tidsbruk) and effective_frist is not None and tidsbruk > effective_frist:
+                overshoot = int(tidsbruk - effective_frist)
+                via = "" if pd.notna(frist) else " (statutory default)"
+                alerts.append(f"{phase_name} overskrider Frist med {overshoot} dager{via}")
         elif phase_name == "Høringsperiode":
             if status == "Completed" and cal_days is not None and cal_days < HOER_MIN:
                 alerts.append(
                     f"Høringsperiode under lovpålagt minimum ({cal_days} av {HOER_MIN} dager)"
                 )
+
+        # Forward-looking: stalled phase open longer than calendar threshold
+        stalled_max = CONFIG["stalled_phase_days"].get(phase_name)
+        if status == "In Progress" and cal_days is not None and stalled_max is not None \
+                and cal_days > stalled_max:
+            alerts.append(f"{phase_name} åpen i {cal_days} dager uten avslutning (terskel {stalled_max})")
 
         variant = r.get("Phase_Variant")
 
@@ -541,6 +580,13 @@ print(f"\nPhase detail rows: {len(phase_detail):,}")
 print(phase_detail.groupby("Phase_Name")["Phase_Status"].value_counts().to_string())
 
 # ── Build dim_cases ────────────────────────────────────────────────────────────
+# Precompute per-case rollups so the inner loop is O(1) per case.
+alert_counts_by_case = phase_detail.groupby("Saksnummer")["Alert_Flag"].sum().to_dict()
+utarb_rows = phase_detail[phase_detail["Phase_Name"] == "Utarbeidingsfasen Kostra"]
+days_since_am_by_case = (
+    utarb_rows.set_index("Saksnummer")["Days_Since_Last_AM"].to_dict()
+)
+
 for saksnummer in sorted(cohort_saksnummer):
     case_start = om_date.get(saksnummer, pd.NaT)
     complexity = complexity_map.get(saksnummer, "Unknown")
@@ -553,23 +599,14 @@ for saksnummer in sorted(cohort_saksnummer):
     else:
         case_end = pd.NaT
 
-    # Current phase: first In Progress, else next after last Completed, else Phase 1
+    # Current phase: first In Progress or Not Started; otherwise last (Completed).
+    # phase_detail always has a row per (Saksnummer × Phase), so no missing-key branch needed.
     current_phase = PHASE_ORDER[0]
     for ph in PHASE_ORDER:
-        key = (saksnummer, ph)
-        if key not in _pd_idx.index:
-            current_phase = ph
-            break
-        st = _pd_idx.loc[key, "Phase_Status"]
-        if st == "In Progress":
-            current_phase = ph
-            break
-        if st == "Not Started":
-            current_phase = ph
-            break
-        # Completed → continue to next phase
+        st = _pd_idx.loc[(saksnummer, ph), "Phase_Status"]
         current_phase = ph
-    # If all completed, current_phase stays as the last one (Phase 4)
+        if st in ("In Progress", "Not Started"):
+            break
 
     # Total elapsed days
     if pd.notna(case_start) and pd.notna(case_end):
@@ -612,17 +649,17 @@ for saksnummer in sorted(cohort_saksnummer):
         if pd.notna(case_start) else pd.NaT
     )
 
-    # Days to deadline: positive = buffer remaining, negative = projected overrun
-    if projected is not None and pd.notna(case_deadline):
-        days_to_deadline = (case_deadline - projected).days
-    elif pd.notna(case_end) and pd.notna(case_deadline):
+    # Days to deadline: prefer actual case_end for completed cases (accurate),
+    # fall back to projected for open cases (estimate).
+    if pd.notna(case_end) and pd.notna(case_deadline):
         days_to_deadline = (case_deadline - case_end).days
+    elif projected is not None and pd.notna(case_deadline):
+        days_to_deadline = (case_deadline - projected).days
     else:
         days_to_deadline = None
 
-    # Alert count from phase_detail
-    case_alerts = phase_detail[phase_detail["Saksnummer"] == saksnummer]
-    alert_count = int(case_alerts["Alert_Flag"].sum())
+    # Alert count — O(1) lookup from precomputed dict
+    alert_count = int(alert_counts_by_case.get(saksnummer, 0))
 
     # Overall status
     at_risk_threshold = (
@@ -631,12 +668,18 @@ for saksnummer in sorted(cohort_saksnummer):
     )
     if pd.notna(case_end):
         overall_status = "Completed"
+        current_phase = "Completed"   # override so Power BI doesn't show "Sendt til politisk"
     elif alert_count > 0:
         overall_status = "Off Track"
     elif projected is not None and pd.notna(at_risk_threshold) and projected > at_risk_threshold:
         overall_status = "At Risk"
     else:
         overall_status = "On Track"
+
+    # Days since last AM, rolled up from phase 1 for slicing
+    days_since_am_utarb = days_since_am_by_case.get(saksnummer)
+    if days_since_am_utarb is not None and pd.isna(days_since_am_utarb):
+        days_since_am_utarb = None
 
     dim_rows.append({
         "Saksnummer":               saksnummer,
@@ -648,6 +691,7 @@ for saksnummer in sorted(cohort_saksnummer):
         "Total_Elapsed_Days":       total_elapsed,
         "Projected_Completion_Date": projected if projected is not None else None,
         "Days_To_Deadline":         days_to_deadline,
+        "Days_Since_Last_AM_Utarb": days_since_am_utarb,
         "Overall_Status":           overall_status,
         "Alert_Count":              alert_count,
     })
@@ -708,8 +752,11 @@ print(f"{OUT_PHASE} written: {len(phase_detail):,} rows")
 spark.createDataFrame(dim_cases).write.mode("overwrite").saveAsTable(OUT_CASES)
 print(f"{OUT_CASES} written: {len(dim_cases):,} rows")
 
+# Idempotent: drop any existing row for today's Snapshot_Date before appending,
+# so same-day re-runs don't create duplicates.
+spark.sql(f"DELETE FROM {OUT_KPI} WHERE Snapshot_Date = DATE('{kpi_row['Snapshot_Date']}')")
 spark.createDataFrame(kpi_snapshot).write.mode("append").saveAsTable(OUT_KPI)
-print(f"{OUT_KPI} appended: snapshot {kpi_row['Snapshot_Date']}")
+print(f"{OUT_KPI} upserted: snapshot {kpi_row['Snapshot_Date']}")
 
 
 # =============================================================================
@@ -792,24 +839,32 @@ spark.sql(f"""
 #    Sort: Days_To_Deadline (from dim_cases, via Saksnummer join)
 #    Use: daily intervention list for case officers
 #
-# 3. PROJECTED COMPLETION HISTOGRAM (dim_cases):
-#    X axis: Projected_Completion_Date (month buckets)
+# 3. DAYS-TO-DEADLINE HISTOGRAM (dim_cases):
+#    X axis: Days_To_Deadline (bucketed: <0, 0–180, 180–365, 365+)
 #    Y axis: count of cases
-#    Reference line at 2029-01-01
-#    Color: Overall_Status
-#    Slicer: Case_Complexity
+#    Reference line at Days_To_Deadline = 0 (deadline reached)
+#    Color: Overall_Status  |  Slicer: Case_Complexity
+#    Shows: how much buffer the portfolio has against rolling deadlines.
+#    Alternative: scatter of Projected_Completion_Date vs Case_Deadline.
 #
 # 4. CASE DRILL-THROUGH (dim_cases → phase_detail):
 #    Click any Saksnummer → drill to 4 phase rows.
 #    Shows: Phase_Status, Calendar_Days, Tidsbruk vs Frist,
-#           AM_Count vs AM_Expected_Avg, Last_AM_Date, Structural_Risk
+#           AM_Count vs AM_Expected_Avg, Last_AM_Date, KS_Date, Structural_Risk
 #
 # 5. UTARBEIDINGSFASEN SCATTER (phase_detail, Phase_Name = 'Utarbeidingsfasen Kostra'):
 #    X axis: Calendar_Days  |  Y axis: AM_Count
 #    Color: Structural_Risk  |  Reference line: Utarb_Budget_Days
 #    Shows: cases using too many days with too few AMs → stuck cases
 #
-# 6. TREND OVER TIME (kpi_snapshot):
+# 6. STALLED-CASE TABLE (dim_cases):
+#    Filter: Overall_Status IN ('Off Track', 'At Risk')
+#    Columns: Saksnummer, Current_Phase, Case_Complexity,
+#             Days_Since_Last_AM_Utarb, Days_To_Deadline, Alert_Count
+#    Sort: Days_To_Deadline ASC
+#    Use: triage view — cases closest to (or past) their individual deadlines.
+#
+# 7. TREND OVER TIME (kpi_snapshot):
 #    X axis: Snapshot_Date
 #    Y axis: stacked bar — On Track / At Risk / Off Track
 #    Shows: is the portfolio improving or deteriorating over time?
