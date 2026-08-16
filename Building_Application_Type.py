@@ -3,9 +3,9 @@
 #
 # For each process recorded in Fakturalinjer, identifies the product code
 # that accounts for the largest total invoice amount. This is the generalized,
-# unfiltered version of the application_group concept used in BuildingForecast —
+# unfiltered version of the soeknadsgruppe concept used in BuildingForecast —
 # expressed as a raw product code so downstream semantic models can join
-# Pricelist_items for names and categories, and Prosesser for case metadata.
+# prisliste_varer for names and categories, and Prosesser for case metadata.
 #
 # No date filter is applied — all rows in Fakturalinjer are included.
 # No indicator filter — covers all case types, not just building permits.
@@ -32,13 +32,13 @@ OUTPUT_TABLE = "building_application_type"
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {OUTPUT_TABLE} (
-    prosess_id           STRING    NOT NULL,
+    pk_faser           STRING    NOT NULL,
     primary_product_code STRING    NOT NULL,
-    computed_at          TIMESTAMP NOT NULL,
-    batch_id             STRING    NOT NULL
+    kjoert_tidspunkt          TIMESTAMP NOT NULL,
+    kjoere_id            STRING    NOT NULL
 )
 USING DELTA
-COMMENT 'Primary product code per Prosess_id, derived from the largest total invoice amount in Fakturalinjer. Join primary_product_code -> Pricelist_items.varenr for description and category. Join prosess_id -> Prosesser for case metadata.'
+COMMENT 'Primary product code per Prosess_id, derived from the largest total invoice amount in Fakturalinjer. Join primary_product_code -> prisliste_varer.varenummer for description and category. Join prosess_id -> Prosesser for case metadata.'
 """)
 
 print(f"Output table {OUTPUT_TABLE} ready")
@@ -52,14 +52,19 @@ print(f"Output table {OUTPUT_TABLE} ready")
 
 totals = spark.sql("""
     SELECT
-        CAST(Prosess_id AS STRING) AS prosess_id,
-        CAST(Produktnr  AS STRING) AS produktnr,
-        SUM(Linje_belop)           AS total_belop
-    FROM Fakturalinjer
-    WHERE Prosess_id  IS NOT NULL
-      AND Produktnr   IS NOT NULL
-      AND Linje_belop IS NOT NULL
-    GROUP BY Prosess_id, Produktnr
+        CAST(fk_faser AS STRING) AS fk_faser,
+        CAST(p  roduktnr  AS STRING) AS produktnr,
+        SUM(linjebeloep)           AS total_belop
+        FROM Fakturalinjer fakturalinjer
+        INNER JOIN saksbehandling.faser faser
+                ON faser.pk_faser = fakturalinjer.fk_faser
+        INNER JOIN felles.indikatorer indikatorer
+                ON indikatorer.pk_indikator = faser.indikator
+    WHERE fk_faser  IS NOT NULL
+      AND produktnr   IS NOT NULL
+      AND linjebeloep IS NOT NULL
+            AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak')
+    GROUP BY fk_faser, produktnr
 """)
 
 print(f"Unique (Prosess_id, Produktnr) pairs: {totals.count():,}")
@@ -70,7 +75,7 @@ print(f"Unique (Prosess_id, Produktnr) pairs: {totals.count():,}")
 # =============================================================================
 # Tie-break by Produktnr DESC for determinism — mirrors BuildingForecast logic.
 
-w_rank = Window.partitionBy("prosess_id").orderBy(
+w_rank = Window.partitionBy("fk_faser").orderBy(
     F.col("total_belop").desc(),
     F.col("produktnr").desc(),
 )
@@ -79,18 +84,18 @@ result = (
     totals
     .withColumn("rn", F.row_number().over(w_rank))
     .filter(F.col("rn") == 1)
-    .withColumn("computed_at", F.lit(datetime.now()).cast("timestamp"))
-    .withColumn("batch_id",    F.lit(BATCH_ID))
+    .withColumn("kjoert_tidspunkt", F.lit(datetime.now()).cast("timestamp"))
+    .withColumn("kjoere_id",       F.lit(BATCH_ID))
     .select(
-        "prosess_id",
+        F.col("fk_faser"),
         F.col("produktnr").alias("primary_product_code"),
-        "computed_at",
-        "batch_id",
+        "kjoert_tidspunkt",
+        "kjoere_id",
     )
 )
 
 print(f"Rows to write (one per Prosess_id): {result.count():,}")
-result.orderBy("prosess_id").show(10, truncate=False)
+result.orderBy("fk_faser").show(10, truncate=False)
 
 
 # =============================================================================
@@ -102,10 +107,10 @@ result.write.mode("overwrite").saveAsTable(OUTPUT_TABLE)
 written = spark.sql(f"""
     SELECT
         COUNT(*)                             AS total_rows,
-        COUNT(DISTINCT prosess_id)           AS unique_prosess_ids,
+        COUNT(DISTINCT fk_faser)           AS unique_prosess_ids,
         COUNT(DISTINCT primary_product_code) AS unique_product_codes
     FROM {OUTPUT_TABLE}
-    WHERE batch_id = '{BATCH_ID}'
+        WHERE kjoere_id = '{BATCH_ID}'
 """)
 print("Written:")
 written.show()
@@ -121,21 +126,21 @@ written.show()
 # RECOMMENDED JOINS IN SEMANTIC MODEL (Power BI / Direct Lake)
 #
 #   building_application_type.primary_product_code
-#       → Pricelist_items.varenr
+#       → prisliste_varer.varenummer
 #   Gives: product description, application size category (small/medium/large),
-#          fee type, and any other dimensions on Pricelist_items.
+#          fee type, and any other dimensions on prisliste_varer.
 #
-#   building_application_type.prosess_id
-#       → Prosesser.Prosess_id
+#   building_application_type.fk_faser
+#       → Prosesser.pk_faser
 #   Gives: Indikator, Saksnummer, Sluttdato, Tidsbruk, Frist, etc.
 #
 # STACKED BAR — Case volume by application type over time
 #   X axis:  case close year/month (from Prosesser.Sluttdato via join)
-#   Stacks:  product description or size category (from Pricelist_items)
+#   Stacks:  product description or size category (from prisliste_varer)
 #   Filter:  Indikator (e.g. Byggesak 12 uker, Byggesak 3 uker)
 #
 # BAR CHART — Application size distribution
-#   Categories: small / medium / large (from Pricelist_items category column)
+#   Categories: small / medium / large (from prisliste_varer category column)
 #   Values:     COUNTROWS per category
 #   Slicer:     year, Indikator
 #
@@ -143,7 +148,7 @@ written.show()
 #     Andel store søknader =
 #         DIVIDE(
 #             CALCULATE(COUNTROWS(building_application_type),
-#                       Pricelist_items[category] = "Large"),
+#                       prisliste_varer[category] = "Large"),
 #             COUNTROWS(building_application_type)
 #         )
 #
@@ -162,5 +167,5 @@ written.show()
 #             Prosesser[Tidsbruk]
 #         )
 #
-# NOTE: Apply category filters through Pricelist_items in the semantic model,
+# NOTE: Apply category filters through prisliste_varer in the semantic model,
 # not directly on primary_product_code — keeps filter logic in one place.
