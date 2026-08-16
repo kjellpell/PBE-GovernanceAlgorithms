@@ -9,7 +9,6 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse` | Nightly after main pipeline |
 | `EWMA.py` | `ewma_analyse` | Nightly after main pipeline |
 | `Cohort_analysis.py` | `cohort_results` | Nightly after main pipeline |
-| `Portfolio_state_snapshot.py` | `portefolje_snapshot` | First working day of each month |
 | `Seasonal_YTD_ratio_extrapolation.py` | `projection_results` | Nightly after main pipeline |
 
 ## CUSUM_Changepoint.py
@@ -42,14 +41,6 @@ Tracks resolution rate of cases grouped by intake month. Compares recent cohorts
 - `is_recent_cohort = TRUE` for the last 6 full months
 - `delta_historical`: positive = resolving slower than historical average
 
-## Portfolio_state_snapshot.py
-
-Classifies all open cases at month-end by milestone state: workable, paused, mini-hearing (Begrenset høring), and tidligbehandling. Requires `Milepeler` (milestone event log).
-
-- **Snapshot date:** last day of previous calendar month (override: `SNAPSHOT_MONTH`)
-- Append-only table — idempotent via delete-then-append per snapshot month
-- `indikator NOT LIKE '%avtalt%'` for tidligbehandling count
-
 ## Seasonal_YTD_ratio_extrapolation.py
 
 Projects year-end `frist%` from current YTD using trimmed seasonal ratios from historical years.
@@ -61,4 +52,4 @@ Projects year-end `frist%` from current YTD using trimmed seasonal ratios from h
 
 ## Configuration
 
-All scripts share `START_YEAR = 2015` at the top. Adjust to match the earliest reliable data in your Lakehouse. Milestone names in `Portfolio_state_snapshot.py` (`PAUSED_MILESTONES`, `RESUME_MILESTONES`, etc.) must match the actual values in `Milepeler.Milepel`.
+All scripts share `START_YEAR = 2015` at the top. Adjust to match the earliest reliable data in your Lakehouse.
