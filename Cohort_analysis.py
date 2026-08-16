@@ -3,7 +3,7 @@
 # Answers: are cases received recently resolving at the same rate as
 # historical cohorts, or are they accumulating?
 #
-# Output table: cohort_results
+# Output table: kohortanalyse
 # Power BI visual: heatmap — cohort month on Y axis, weeks since intake
 # on X axis, cell colour = fraction still open. Dark = slow resolution.
 #
@@ -32,61 +32,60 @@ START_YEAR      = 2015  # exclude data before this year — adjust if older data
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS cohort_results (
-    indicator               STRING      NOT NULL,
-    cohort_period           INT         NOT NULL,  -- YYYYMM intake month
-    cohort_size             INT         NOT NULL,  -- cases received that month
-    weeks_since_intake      INT         NOT NULL,  -- weeks since cohort intake
-    open_count              INT         NOT NULL,  -- cases still open at this week
-    pct_open                DOUBLE      NOT NULL,  -- fraction still open (0-1)
-    pct_open_historical     DOUBLE,                -- historical avg at same week
-    delta_historical        DOUBLE,                -- current - historical
-    is_recent_cohort        BOOLEAN     NOT NULL,  -- last 6 months = TRUE
-    computed_at             TIMESTAMP   NOT NULL,
-    batch_id                STRING      NOT NULL
+CREATE TABLE IF NOT EXISTS kohortanalyse (
+    indikator                   STRING      NOT NULL,
+    kohort_periode              INT         NOT NULL,  -- AAAAMM for mottaksmåned
+    kohortstoerrelse            INT         NOT NULL,  -- saker mottatt den måneden
+    uker_siden_mottak           INT         NOT NULL,  -- uker siden kohortmottak
+    aapne_saker_antall          INT         NOT NULL,  -- saker fortsatt åpne denne uken
+    andel_aapne                 DOUBLE      NOT NULL,  -- andel åpne saker (0-1)
+    andel_aapne_historisk       DOUBLE,                -- historisk gjennomsnitt for samme uke
+    avvik_historisk             DOUBLE,                -- nåværende minus historisk
+    er_nylig_kohort             BOOLEAN     NOT NULL,  -- siste seks måneder = true
+    kjoert_tidspunkt            TIMESTAMP   NOT NULL,
+    kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Cohort resolution rates by intake month. One row per cohort × week combination.'
+COMMENT 'Kohorters ferdigstillingsrate per mottaksmåned. Én rad per kombinasjon av kohort og uke.'
 """)
 
-print("cohort_results table ready")
+print("kohortanalyse-tabellen er klar")
 
 
 # =============================================================================
 # CELL 2 — Load case data
 # =============================================================================
 # One row per case with intake month and days to resolution (or NULL if open).
-# Uses startdato for intake, sluttdato for resolution.
-# Excludes avtalt indicators — no fixed deadline to measure against.
+# Uses startmilepaeldato for intake, sluttmilepaeldato for resolution.
 
 cases = spark.sql(f"""
     SELECT
-        pr.Indikator                                 AS indicator,
-        DATE_FORMAT(pr.startdato, 'yyyyMM')  AS cohort_period,
-        YEAR(pr.startdato) * 100
-            + MONTH(pr.startdato)            AS cohort_period_int,
-        pr.startdato                         AS intake_date,
-        pr.sluttdato                         AS end_date,
+        pr.indikator                          AS indikator,
+        DATE_FORMAT(pr.startmilepaeldato, 'yyyyMM') AS kohort_periode,
+        YEAR(pr.startmilepaeldato) * 100
+            + MONTH(pr.startmilepaeldato)     AS kohort_periode_int,
+        pr.startmilepaeldato                  AS mottaksdato,
+        pr.sluttmilepaeldato                  AS sluttdato,
         CASE
-            WHEN pr.sluttdato IS NOT NULL
-            THEN DATEDIFF(pr.sluttdato, pr.startdato)
+            WHEN pr.sluttmilepaeldato IS NOT NULL
+            THEN DATEDIFF(pr.sluttmilepaeldato, pr.startmilepaeldato)
             ELSE NULL
-        END                                                     AS dager_til_ferdig,
+        END                                    AS dager_til_ferdig,
         CASE
-            WHEN pr.sluttdato IS NULL THEN 1 ELSE 0
-        END                                                     AS is_open
-    FROM Prosesser pr
-        WHERE pr.startdato IS NOT NULL
-            AND YEAR(pr.startdato) >= {START_YEAR}
+            WHEN pr.sluttmilepaeldato IS NULL THEN 1 ELSE 0
+        END                                    AS er_aapen
+    FROM saksbehandling.faser pr
+        WHERE pr.startmilepaeldato IS NOT NULL
+            AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
 """).toPandas()
 
-cases["cohort_period_int"] = cases["cohort_period_int"].astype(int)
-cases["intake_date"]        = pd.to_datetime(cases["intake_date"])
-cases["end_date"]           = pd.to_datetime(cases["end_date"])
+cases["kohort_periode_int"] = cases["kohort_periode_int"].astype(int)
+cases["mottaksdato"]        = pd.to_datetime(cases["mottaksdato"])
+cases["sluttdato"]          = pd.to_datetime(cases["sluttdato"])
 
-print(f"Cases loaded: {len(cases):,}")
-print(f"Indicators:   {cases['indicator'].nunique()}")
-print(f"Date range:   {cases['intake_date'].min().date()} → {cases['intake_date'].max().date()}")
+print(f"Saker lastet: {len(cases):,}")
+print(f"Indikatorer:  {cases['indikator'].nunique()}")
+print(f"Datointervall: {cases['mottaksdato'].min().date()} → {cases['mottaksdato'].max().date()}")
 
 
 # =============================================================================
@@ -96,10 +95,10 @@ print(f"Date range:   {cases['intake_date'].min().date()} → {cases['intake_dat
 results = []
 today_ts = pd.Timestamp(TODAY)
 
-for indicator, ind_cases in cases.groupby("indicator"):
+for indikator, ind_cases in cases.groupby("indikator"):
 
     # All distinct cohort months for this indicator
-    cohort_months = sorted(ind_cases["cohort_period_int"].unique())
+    cohort_months = sorted(ind_cases["kohort_periode_int"].unique())
 
     # Cutoff for "recent" cohorts — last 6 months
     current_yyyymm  = int(TODAY.strftime("%Y%m"))
@@ -108,12 +107,12 @@ for indicator, ind_cases in cases.groupby("indicator"):
         _rc_mo += 12; _rc_yr -= 1
     recent_cutoff   = _rc_yr * 100 + _rc_mo
     for cohort_periode in cohort_months:
-        cohort_cases = ind_cases[
-            ind_cases["cohort_period_int"] == cohort_periode
+        kohort_saker = ind_cases[
+            ind_cases["kohort_periode_int"] == cohort_periode
         ].copy()
 
-        cohort_size = len(cohort_cases)
-        if cohort_size < MIN_COHORT_SIZE:
+        kohortstoerrelse = len(kohort_saker)
+        if kohortstoerrelse < MIN_COHORT_SIZE:
             continue
 
         # Cohort intake reference date — first day of intake month
@@ -133,21 +132,21 @@ for indicator, ind_cases in cases.groupby("indicator"):
 
             # Cases still open at reference_date:
             # either never finished, or finished after reference_date
-            open_count = len(cohort_cases[
-                cohort_cases["end_date"].isna() |
-                (cohort_cases["end_date"] > reference_date)
+            aapne_saker_antall = len(kohort_saker[
+                kohort_saker["sluttdato"].isna() |
+                (kohort_saker["sluttdato"] > reference_date)
             ])
 
-            pct_open = open_count / cohort_size
+            andel_aapne = aapne_saker_antall / kohortstoerrelse
 
             results.append({
-                "indicator":            indicator,
-                "cohort_period":       cohort_periode,
-                "cohort_size":          cohort_size,
-                "weeks_since_intake":   uke,
-                "open_count":           open_count,
-                "pct_open":             round(pct_open, 4),
-                "is_recent_cohort":     is_recent,
+                "indikator":             indikator,
+                "kohort_periode":        cohort_periode,
+                "kohortstoerrelse":      kohortstoerrelse,
+                "uker_siden_mottak":     uke,
+                "aapne_saker_antall":    aapne_saker_antall,
+                "andel_aapne":           round(andel_aapne, 4),
+                "er_nylig_kohort":       is_recent,
             })
 
 print(f"Cohort rows computed: {len(results):,}")
@@ -163,22 +162,22 @@ print(f"Cohort rows computed: {len(results):,}")
 df = pd.DataFrame(results)
 
 historical = (
-    df[~df["is_recent_cohort"]]
-    .groupby(["indicator", "weeks_since_intake"]) ["pct_open"]
+    df[~df["er_nylig_kohort"]]
+    .groupby(["indikator", "uker_siden_mottak"]) ["andel_aapne"]
     .apply(lambda x: float(np.mean(
         np.sort(x.values)[
             max(0, int(len(x) * 0.1)) : max(1, int(len(x) * 0.9))
         ]
     )) if len(x) >= 5 else float(x.mean()))
     .reset_index()
-    .rename(columns={"pct_open": "pct_open_historical"})
+    .rename(columns={"andel_aapne": "andel_aapne_historisk"})
 )
 
-df = df.merge(historical, on=["indicator", "weeks_since_intake"], how="left")
-df["delta_historical"] = df["pct_open"] - df["pct_open_historical"]
-df["delta_historical"] = df["delta_historical"].round(4)
+df = df.merge(historical, on=["indikator", "uker_siden_mottak"], how="left")
+df["avvik_historisk"] = df["andel_aapne"] - df["andel_aapne_historisk"]
+df["avvik_historisk"] = df["avvik_historisk"].round(4)
 
-print(f"Historical baseline computed for {historical['indicator'].nunique()} indicators")
+print(f"Historisk grunnlinje beregnet for {historical['indikator'].nunique()} indikatorer")
 
 
 # =============================================================================
@@ -186,36 +185,36 @@ print(f"Historical baseline computed for {historical['indicator'].nunique()} ind
 # =============================================================================
 
 if df.empty:
-    print("No cohort results to write.")
+    print("Ingen kohortresultater å skrive.")
 else:
-    df["computed_at"] = datetime.now()
-    df["batch_id"]    = BATCH_ID
+    df["kjoert_tidspunkt"] = datetime.now()
+    df["kjoere_id"]        = BATCH_ID
 
     # Idempotent — full overwrite since cohort history is recomputed each run.
     # Open cases change as they resolve, so historical rows can change too.
     results_spark = spark.createDataFrame(df)
-    results_spark.write.mode("overwrite").saveAsTable("cohort_results")
+    results_spark.write.mode("overwrite").saveAsTable("kohortanalyse")
 
-    print(f"\ncohort_results written: {len(df):,} rows")
-    print(f"Indicators: {df['indicator'].nunique()}")
-    print(f"Cohorts:    {df['cohort_period'].nunique()}")
-    print(f"Recent cohorts flagged: {df[df['er_nylig_kohort']]['cohort_periode'].nunique()}")
+    print(f"\nkohortanalyse skrevet: {len(df):,} rader")
+    print(f"Indikatorer: {df['indikator'].nunique()}")
+    print(f"Kohorter:    {df['kohort_periode'].nunique()}")
+    print(f"Nylige kohorter markert: {df[df['er_nylig_kohort']]['kohort_periode'].nunique()}")
 
     # Summary — recent cohorts vs historical baseline at week 12
     print("\n=== RECENT COHORTS VS BASELINE AT WEEK 12 ===")
     spark.sql("""
         SELECT
-            indicator,
-            cohort_period,
-            cohort_size,
-            ROUND(pct_open * 100, 1)             AS pct_open,
-            ROUND(pct_open_historical * 100, 1)  AS pct_open_historical,
-            ROUND(delta_historical * 100, 1)     AS delta_pct
-        FROM cohort_results
-        WHERE weeks_since_intake = 12
-          AND is_recent_cohort   = TRUE
-          AND pct_open_historical IS NOT NULL
-        ORDER BY delta_historical DESC, indicator
+                        indikator,
+                        kohort_periode,
+                        kohortstoerrelse,
+                        ROUND(andel_aapne * 100, 1)             AS andel_aapne,
+                        ROUND(andel_aapne_historisk * 100, 1)   AS andel_aapne_historisk,
+                        ROUND(avvik_historisk * 100, 1)         AS avvik_prosentpoeng
+                FROM kohortanalyse
+                WHERE uker_siden_mottak = 12
+                    AND er_nylig_kohort = TRUE
+                    AND andel_aapne_historisk IS NOT NULL
+                ORDER BY avvik_historisk DESC, indikator
     """).show(30, truncate=False)
 
 
@@ -223,9 +222,9 @@ else:
 # CELL 6 — Power BI visual notes
 # =============================================================================
 # HEATMAP (primary visual):
-#   Rows:    cohort_periode (intake month) — recent at top
+#   Rows:    kohort_periode (mottaksmåned) — nyere kohorter øverst
 #   Columns: uker_siden_mottak (1 to 26)
-#   Values:  andel_åpen — format as %
+#   Values:  andel_aapne — format as %
 #   Colour:  gradient dark (high %) → light (low %)
 #            Dark cell = many cases still open at that week = slow resolution
 #   Filter:  er_nylig_kohort = TRUE for governance team view
@@ -233,8 +232,8 @@ else:
 #
 # LINE CHART (secondary visual — recent vs historical):
 #   X axis:  uker_siden_mottak
-#   Lines:   andel_åpen per recent cohort_periode (one line per month)
-#            andel_åpen_historisk as a single reference line (trimmed mean)
+#   Lines:   andel_aapne per nyere kohort_periode (one line per month)
+#            andel_aapne_historisk as a single reference line (trimmed mean)
 #   Shading: area between recent lines and historical line
 #            Above historical = resolving slower than normal
 #            Below historical = resolving faster than normal

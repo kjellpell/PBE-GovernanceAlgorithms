@@ -14,8 +14,8 @@
 #   weekly for early detection.
 #
 # Output tables:
-#   cusum_results       — running CUSUM values and signal flags
-#   changepoint_results — detected changepoints with before/after means
+#   cusum_analyse — løpende CUSUM-verdier og signalflagg
+#   pelt_analyse  — oppdagede endringspunkter med gjennomsnitt før/etter
 #
 # Schedule: nightly, after main data pipeline.
 # Requires: pip install ruptures --break-system-packages
@@ -41,40 +41,40 @@ START_YEAR    = 2015  # exclude data before this year — adjust if older data i
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS cusum_results (
-    indicator       STRING      NOT NULL,
-    metric          STRING      NOT NULL,
-    granularity     STRING      NOT NULL,
-    period          INT         NOT NULL,
-    value           DOUBLE,
-    cusum_pos       DOUBLE,
-    cusum_neg       DOUBLE,
-    signal          BOOLEAN     NOT NULL,
-    signal_direction STRING,
-    computed_at     TIMESTAMP   NOT NULL,
-    batch_id        STRING      NOT NULL
+CREATE TABLE IF NOT EXISTS cusum_analyse (
+    indikator        STRING      NOT NULL,
+    maaltall         STRING      NOT NULL,
+    granularitet     STRING      NOT NULL,
+    periode          INT         NOT NULL,
+    verdi            DOUBLE,
+    cusum_positiv    DOUBLE,
+    cusum_negativ    DOUBLE,
+    signal           BOOLEAN     NOT NULL,
+    signalretning    STRING,
+    kjoert_tidspunkt TIMESTAMP   NOT NULL,
+    kjoere_id        STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'CUSUM drift detection per indicator per metric. signal=True means statistically significant persistent drift detected. signal_direction: OPP=improving, NED=deteriorating.'
+COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Økning eller Nedgang.'
 """)
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS changepoint_results (
-    indicator           STRING      NOT NULL,
-    metric              STRING      NOT NULL,
-    granularity         STRING      NOT NULL,
-    changepoint_period  INT         NOT NULL,
-    mean_before         DOUBLE,
-    mean_after          DOUBLE,
-    shift_magnitude     DOUBLE,
-    shift_direction     STRING,
-    n_obs_before        INT,
-    n_obs_after         INT,
-    computed_at         TIMESTAMP   NOT NULL,
-    batch_id            STRING      NOT NULL
+CREATE TABLE IF NOT EXISTS pelt_analyse (
+    indikator                   STRING      NOT NULL,
+    maaltall                    STRING      NOT NULL,
+    granularitet                STRING      NOT NULL,
+    pelt_periode                INT         NOT NULL,
+    gjennomsnitt_foer           DOUBLE,
+    gjennomsnitt_etter          DOUBLE,
+    endringsstoerrelse          DOUBLE,
+    endringsretning             STRING,
+    antall_observasjoner_foer   INT,
+    antall_observasjoner_etter  INT,
+    kjoert_tidspunkt            TIMESTAMP   NOT NULL,
+    kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Detected structural changepoints per indicator per metric. shift_magnitude = mean_after - mean_before. shift_direction: OPP or NED.'
+COMMENT 'Oppdagede strukturelle endringspunkter per indikator og måltall. endringsstoerrelse er gjennomsnitt_etter minus gjennomsnitt_foer. endringsretning er Økning eller Nedgang.'
 """)
 
 print("Output tables ready")
@@ -87,95 +87,97 @@ print("Output tables ready")
 # Monthly frist% per indicator
 monthly_frist = spark.sql(f"""
     SELECT
-        pr.Indikator,
-        (YEAR(pr.sluttdato) * 100 + MONTH(pr.sluttdato)) AS period,
+        pr.indikator,
+        (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
         CASE
-            WHEN COUNT(CASE WHEN pr.Frist IS NOT NULL THEN 1 END) = 0 THEN NULL
+            WHEN COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END) = 0 THEN NULL
             ELSE COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0
-                 / COUNT(CASE WHEN pr.Frist IS NOT NULL THEN 1 END)
+                 / COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END)
         END AS verdi
-    FROM Prosesser pr
-        WHERE pr.sluttdato IS NOT NULL
-            AND pr.Frist IS NOT NULL
-            AND YEAR(pr.sluttdato) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
-        ORDER BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
+    FROM saksbehandling.faser pr
+        WHERE pr.sluttmilepaeldato IS NOT NULL
+            AND pr.frist IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
+        ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
 # Monthly average Tidsbruk per indicator
 monthly_tid = spark.sql(f"""
         SELECT
-                pr.Indikator,
-                (YEAR(pr.sluttdato) * 100 + MONTH(pr.sluttdato)) AS period,
-                AVG(pr.Tidsbruk) AS verdi
-        FROM Prosesser pr
-        WHERE pr.sluttdato IS NOT NULL
-            AND pr.Tidsbruk IS NOT NULL
-            AND YEAR(pr.sluttdato) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
-        ORDER BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
+                pr.indikator,
+                (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
+                AVG(pr.tidsbruk) AS verdi
+        FROM saksbehandling.faser pr
+        WHERE pr.sluttmilepaeldato IS NOT NULL
+            AND pr.tidsbruk IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
+        ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
 # Monthly production balance per indicator
 monthly_prod = spark.sql(f"""
         SELECT
-                pr.Indikator,
-                (YEAR(COALESCE(pr.sluttdato, pr.startdato)) * 100 +
-                 MONTH(COALESCE(pr.sluttdato, pr.startdato))) AS period,
-                COUNT(CASE WHEN pr.startdato IS NOT NULL THEN 1 END)
-                - COUNT(CASE WHEN pr.sluttdato IS NOT NULL THEN 1 END) AS verdi
-        FROM Prosesser pr
-        WHERE pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(COALESCE(pr.sluttdato, pr.startdato)) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(COALESCE(pr.sluttdato, pr.startdato)),
-                         MONTH(COALESCE(pr.sluttdato, pr.startdato))
-        ORDER BY pr.Indikator, YEAR(COALESCE(pr.sluttdato, pr.startdato)),
-                         MONTH(COALESCE(pr.sluttdato, pr.startdato))
+                pr.indikator,
+                (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100 +
+                 MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
+                COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
+                - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
+        FROM saksbehandling.faser pr
+        WHERE pr.indikator NOT LIKE '%avtalt%'
+            AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
+                         MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
+        ORDER BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
+                         MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
 """).toPandas()
 
 # Weekly frist% per indicator
 weekly_frist = spark.sql(f"""
     SELECT
-        pr.Indikator,
-        (YEAR(pr.sluttdato) * 100
-         + WEEKOFYEAR(pr.sluttdato))               AS period,
+        pr.indikator,
+        (YEAR(pr.sluttmilepaeldato) * 100
+         + WEEKOFYEAR(pr.sluttmilepaeldato))       AS period,
         CASE
-            WHEN COUNT(CASE WHEN pr.Frist IS NOT NULL
+            WHEN COUNT(CASE WHEN pr.frist IS NOT NULL
                             THEN 1 END) = 0 THEN NULL
             ELSE COUNT(CASE WHEN pr.innenfor_frist = 1
                             THEN 1 END) * 1.0
-                 / COUNT(CASE WHEN pr.Frist IS NOT NULL
+                 / COUNT(CASE WHEN pr.frist IS NOT NULL
                               THEN 1 END)
         END                                                         AS verdi
-    FROM Prosesser pr
-        WHERE pr.sluttdato IS NOT NULL
-            AND pr.Frist IS NOT NULL
-            AND pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(pr.sluttdato) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(pr.sluttdato), WEEKOFYEAR(pr.sluttdato)
-        ORDER BY pr.Indikator, YEAR(pr.sluttdato), WEEKOFYEAR(pr.sluttdato)
+    FROM saksbehandling.faser pr
+        WHERE pr.sluttmilepaeldato IS NOT NULL
+            AND pr.frist IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
+        ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
 """).toPandas()
 
 # Weekly production balance
 weekly_prod = spark.sql(f"""
         SELECT
-                pr.Indikator,
-                (YEAR(COALESCE(pr.sluttdato, pr.startdato)) * 100 +
-                         WEEKOFYEAR(COALESCE(pr.sluttdato, pr.startdato))) AS period,
-                        COUNT(CASE WHEN pr.startdato IS NOT NULL THEN 1 END)
-                        - COUNT(CASE WHEN pr.sluttdato IS NOT NULL THEN 1 END) AS verdi
-                FROM Prosesser pr
-                WHERE pr.Indikator NOT LIKE '%avtalt%'
-                    AND YEAR(COALESCE(pr.sluttdato, pr.startdato)) >= {START_YEAR}
-                GROUP BY pr.Indikator, YEAR(COALESCE(pr.sluttdato, pr.startdato)),
-                                 WEEKOFYEAR(COALESCE(pr.sluttdato, pr.startdato))
-                ORDER BY pr.Indikator, YEAR(COALESCE(pr.sluttdato, pr.startdato)),
-                                 WEEKOFYEAR(COALESCE(pr.sluttdato, pr.startdato))
+                pr.indikator,
+                (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100 +
+                         WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
+                        COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
+                        - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
+                FROM saksbehandling.faser pr
+                WHERE pr.indikator NOT LIKE '%avtalt%'
+                    AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
+                GROUP BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
+                                 WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
+                ORDER BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
+                                 WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
 """).toPandas()
 
 print("Data loaded")
-print(f"  Monthly frist: {monthly_frist['Indikator'].nunique()} indicators")
-print(f"  Weekly frist:  {weekly_frist['Indikator'].nunique()} indicators")
+print(f"  Månedlig frist: {monthly_frist['indikator'].nunique()} indikatorer")
+print(f"  Ukentlig frist: {weekly_frist['indikator'].nunique()} indikatorer")
 
 
 # =============================================================================
@@ -212,8 +214,8 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H):
         cusum_neg[i] = max(0, cusum_neg[i-1] - standardised[i] - k)
 
     signal     = (cusum_pos > h) | (cusum_neg > h)
-    retning    = np.where(cusum_pos > h, "OPP",
-                 np.where(cusum_neg > h, "NED", None))
+    retning    = np.where(cusum_pos > h, "Økning",
+                 np.where(cusum_neg > h, "Nedgang", None))
 
     return pd.DataFrame({
         "cusum_pos":       cusum_pos,
@@ -240,7 +242,7 @@ def run_changepoint(series, granularitet):
         return []
 
     values = series.dropna().values
-    min_obs = MIN_MONTHLY if granularitet == "monthly" else MIN_WEEKLY
+    min_obs = MIN_MONTHLY if granularitet == "Månedlig" else MIN_WEEKLY
 
     if len(values) < min_obs:
         return []
@@ -281,13 +283,13 @@ def extract_changepoint_stats(series, breakpoints):
         shift       = mean_after - mean_before
 
         results.append({
-            "changepoint_period":  int(periods[bp]) if bp < len(periods) else None,
-            "mean_before":         round(mean_before, 4),
-            "mean_after":          round(mean_after, 4),
-            "shift_magnitude":     round(shift, 4),
-            "shift_direction":     "OPP" if shift > 0 else "NED",
-            "n_obs_before":        len(before),
-            "n_obs_after":         len(after),
+            "pelt_periode":                int(periods[bp]) if bp < len(periods) else None,
+            "gjennomsnitt_foer":           round(mean_before, 4),
+            "gjennomsnitt_etter":          round(mean_after, 4),
+            "endringsstoerrelse":          round(shift, 4),
+            "endringsretning":             "Økning" if shift > 0 else "Nedgang",
+            "antall_observasjoner_foer":   len(before),
+            "antall_observasjoner_etter":  len(after),
         })
         prev = bp
 
@@ -301,11 +303,11 @@ def extract_changepoint_stats(series, breakpoints):
 # Define what to process
 # (label, dataframe, granularitet, min_obs)
 series_configs = [
-    ("frist_pct",     monthly_frist, "monthly", MIN_MONTHLY),
-    ("tidsbruk",      monthly_tid,   "monthly", MIN_MONTHLY),
-    ("prod_diff",     monthly_prod,  "monthly", MIN_MONTHLY),
-    ("frist_pct",     weekly_frist,  "weekly",  MIN_WEEKLY),
-    ("prod_diff",     weekly_prod,   "weekly",  MIN_WEEKLY),
+    ("Fristprosent",            monthly_frist, "Månedlig", MIN_MONTHLY),
+    ("Behandlingstid",          monthly_tid,   "Månedlig", MIN_MONTHLY),
+    ("Produksjonsdifferanse",   monthly_prod,  "Månedlig", MIN_MONTHLY),
+    ("Fristprosent",            weekly_frist,  "Ukentlig", MIN_WEEKLY),
+    ("Produksjonsdifferanse",   weekly_prod,   "Ukentlig", MIN_WEEKLY),
 ]
 
 cusum_rows       = []
@@ -313,9 +315,9 @@ changepoint_rows = []
 
 for metrikk, df, granularitet, min_obs in series_configs:
 
-    for indikator in df["Indikator"].unique():
+    for indikator in df["indikator"].unique():
         ind_data = (
-            df[df["Indikator"] == indikator]
+            df[df["indikator"] == indikator]
             .sort_values("period")
             .set_index("period")["verdi"]
         )
@@ -328,43 +330,43 @@ for metrikk, df, granularitet, min_obs in series_configs:
         if cusum is not None:
             for idx, row in cusum.iterrows():
                         cusum_rows.append({
-                            "indicator":       indikator,
-                            "metric":          metrikk,
-                            "granularity":     granularitet,
-                            "period":          int(idx),
-                            "value":           float(ind_data[idx]) if idx in ind_data else None,
-                            "cusum_pos":       round(float(row["cusum_pos"]), 4),
-                            "cusum_neg":       round(float(row["cusum_neg"]), 4),
+                            "indikator":       indikator,
+                            "maaltall":        metrikk,
+                            "granularitet":    granularitet,
+                            "periode":         int(idx),
+                            "verdi":           float(ind_data[idx]) if idx in ind_data else None,
+                            "cusum_positiv":   round(float(row["cusum_pos"]), 4),
+                            "cusum_negativ":   round(float(row["cusum_neg"]), 4),
                             "signal":          bool(row["signal"]),
-                            "signal_direction": row["signal_direction"],
-                            "computed_at":     datetime.now(),
-                            "batch_id":        BATCH_ID,
+                            "signalretning":   row["signal_direction"],
+                            "kjoert_tidspunkt": datetime.now(),
+                            "kjoere_id":       BATCH_ID,
                         })
 
         # ── Changepoint (monthly only for stability) ───────────────
-        if granularitet == "monthly":
+        if granularitet == "Månedlig":
             breakpoints = run_changepoint(ind_data, granularitet)
             for cp in extract_changepoint_stats(ind_data, breakpoints):
                         changepoint_rows.append({
-                            "indicator":    indikator,
-                            "metric":       metrikk,
-                            "granularity":  granularitet,
+                            "indikator":    indikator,
+                            "maaltall":     metrikk,
+                            "granularitet": granularitet,
                             **cp,
-                            "computed_at":  datetime.now(),
-                            "batch_id":     BATCH_ID,
+                            "kjoert_tidspunkt": datetime.now(),
+                            "kjoere_id":    BATCH_ID,
                         })
 
         # Weekly changepoints — separate pass
-        if granularitet == "weekly":
+        if granularitet == "Ukentlig":
             breakpoints = run_changepoint(ind_data, granularitet)
             for cp in extract_changepoint_stats(ind_data, breakpoints):
                 changepoint_rows.append({
-                    "indicator":    indikator,
-                    "metric":       metrikk,
-                    "granularity":  granularitet,
+                    "indikator":    indikator,
+                    "maaltall":     metrikk,
+                    "granularitet": granularitet,
                     **cp,
-                    "computed_at":  datetime.now(),
-                    "batch_id":     BATCH_ID,
+                    "kjoert_tidspunkt": datetime.now(),
+                    "kjoere_id":    BATCH_ID,
                 })
 
 print(f"CUSUM rows computed:       {len(cusum_rows)}")
@@ -382,39 +384,39 @@ now = datetime.now()
 if cusum_rows:
     cusum_df = pd.DataFrame(cusum_rows)
     cusum_spark = spark.createDataFrame(cusum_df)
-    cusum_spark.write.mode("overwrite").saveAsTable("cusum_results")
-    print(f"cusum_results written: {len(cusum_rows)} rows")
+    cusum_spark.write.mode("overwrite").saveAsTable("cusum_analyse")
+    print(f"cusum_analyse skrevet: {len(cusum_rows)} rader")
 
 if changepoint_rows:
     cp_df = pd.DataFrame(changepoint_rows)
     cp_spark = spark.createDataFrame(cp_df)
-    cp_spark.write.mode("overwrite").saveAsTable("changepoint_results")
-    print(f"changepoint_results written: {len(changepoint_rows)} rows")
+    cp_spark.write.mode("overwrite").saveAsTable("pelt_analyse")
+    print(f"pelt_analyse skrevet: {len(changepoint_rows)} rader")
 
 # Summary — active signals
 if cusum_rows:
     spark.sql(f"""
-                SELECT indicator, metric, granularity,
-                             MAX(period) AS last_signal_period,
-                             MAX(signal_direction) AS direction
-                FROM cusum_results
+                SELECT indikator, maaltall, granularitet,
+                             MAX(periode) AS siste_signalperiode,
+                             MAX(signalretning) AS retning
+                FROM cusum_analyse
                 WHERE signal = TRUE
-                    AND batch_id = '{BATCH_ID}'
-                GROUP BY indicator, metric, granularity
-                ORDER BY metric, indicator
+                    AND kjoere_id = '{BATCH_ID}'
+                GROUP BY indikator, maaltall, granularitet
+                ORDER BY maaltall, indikator
     """).show(50, truncate=False)
 
 if changepoint_rows:
     spark.sql(f"""
-     SELECT indicator, metric, granularity,
-         changepoint_period,
-         ROUND(mean_before, 3) AS before,
-         ROUND(mean_after,  3) AS after,
-         ROUND(shift_magnitude, 3) AS change,
-         shift_direction
-     FROM changepoint_results
-     WHERE batch_id = '{BATCH_ID}'
-     ORDER BY ABS(shift_magnitude) DESC
+     SELECT indikator, maaltall, granularitet,
+         pelt_periode,
+         ROUND(gjennomsnitt_foer, 3) AS foer,
+         ROUND(gjennomsnitt_etter, 3) AS etter,
+         ROUND(endringsstoerrelse, 3) AS endring,
+         endringsretning
+     FROM pelt_analyse
+     WHERE kjoere_id = '{BATCH_ID}'
+     ORDER BY ABS(endringsstoerrelse) DESC
     """).show(50, truncate=False)
 
 
@@ -424,15 +426,15 @@ if changepoint_rows:
 #
 # OUTPUT TABLES → VISUALS
 #
-# cusum_results:
+# cusum_analyse:
 #
 #   LINE CHART — CUSUM values over time
 #     X axis:  periode (Regnskapsperiode or Ukenummer)
-#     Y axis:  cusum_pos (upper line), cusum_neg (lower line, negate for display)
+#     Y axis:  cusum_positiv (upper line), cusum_negativ (lower line, negate for display)
 #     Ref line: constant at CUSUM_H threshold (default 5.0) — horizontal line
-#     Filter:  indikator slicer, metrikk slicer (frist_pct / tidsbruk / prod_diff)
-#              granularitet slicer (monthly / weekly)
-#     Colour:  cusum_pos in blue, cusum_neg in red
+#     Filter:  indikator slicer, maaltall slicer (Fristprosent / Behandlingstid / Produksjonsdifferanse)
+#              granularitet slicer (Månedlig / Ukentlig)
+#     Colour:  cusum_positiv in blue, cusum_negativ in red
 #     Signal:  conditional format background on data points where signal = TRUE
 #              — amber fill so active signals stand out on the line
 #     Reading: lines drifting toward the threshold = gradual deterioration
@@ -440,63 +442,63 @@ if changepoint_rows:
 #              Lines returning to zero = process stabilised.
 #
 #   TABLE — Active CUSUM signals
-#     Columns: indikator | metrikk | granularitet | signal_retning | periode
+#     Columns: indikator | maaltall | granularitet | signalretning | periode
 #     Filter:  signal = TRUE, most recent periode per indicator
 #     Sort:    metrikk, then indikator
 #     Purpose: governance team morning check — which indicators have
 #              active drift signals right now
 #
-# changepoint_results:
+# pelt_analyse:
 #
 #   LINE CHART with changepoint markers — overlay on existing frist% or
 #   behandlingstid time series charts
-#     Add a vertical reference line at changepoint_periode
-#     Show mean_before as a horizontal segment before the changepoint
-#     Show mean_after as a horizontal segment after the changepoint
-#     The visual gap between the two horizontal segments = shift_magnitude
+#     Add a vertical reference line at pelt_periode
+#     Show gjennomsnitt_foer as a horizontal segment before the changepoint
+#     Show gjennomsnitt_etter as a horizontal segment after the changepoint
+#     The visual gap between the two horizontal segments = endringsstoerrelse
 #     In Power BI: use a calculated column or measure to draw segments,
 #     or use the Analytics pane "average line" filtered to pre/post periods
 #
 #   TABLE — Detected changepoints
-#     Columns: indikator | metrikk | changepoint_periode | mean_before
-#              | mean_after | shift_magnitude | shift_retning | granularitet
-#     Sort:    ABS(shift_magnitude) DESC — largest shifts first
-#     Filter:  granularitet slicer so team can toggle monthly/weekly view
+#     Columns: indikator | maaltall | pelt_periode | gjennomsnitt_foer
+#              | gjennomsnitt_etter | endringsstoerrelse | endringsretning | granularitet
+#     Sort:    ABS(endringsstoerrelse) DESC — largest shifts first
+#     Filter:  granularitet slicer so team can toggle Månedlig/Ukentlig view
 #
-# DAX MEASURES — add to cusum_results table in semantic model
+# DAX MEASURES — add to cusum_analyse table in semantic model
 
 # Filters to most recent period per indicator for use in summary visuals.
 
 # Har aktiv CUSUM signal =
 # VAR SistePeriode =
 #     CALCULATE(
-#         MAX(cusum_results[period]),
-#         ALLEXCEPT(cusum_results, cusum_results[indicator], cusum_results[metric])
+#         MAX(cusum_analyse[periode]),
+#         ALLEXCEPT(cusum_analyse, cusum_analyse[indikator], cusum_analyse[maaltall])
 #     )
 # RETURN
 #     CALCULATE(
-#         MAX(cusum_results[signal]),
-#         cusum_results[period] = LatestPeriod
+#         MAX(cusum_analyse[signal]),
+#         cusum_analyse[periode] = SistePeriode
 #     ) = TRUE()
 
 # Antall aktive signaler =
 # CALCULATE(
-#     DISTINCTCOUNT(cusum_results[indicator]),
-#     cusum_results[signal] = TRUE(),
-#     cusum_results[period] = MAX(cusum_results[period])
+#     DISTINCTCOUNT(cusum_analyse[indikator]),
+#     cusum_analyse[signal] = TRUE(),
+#     cusum_analyse[periode] = MAX(cusum_analyse[periode])
 # )
 
-# DAX MEASURES — add to changepoint_results table
+# DAX MEASURES — add to pelt_analyse table
 
 # Siste endringspunkt periode =
 # CALCULATE(
-#     MAX(changepoint_results[changepoint_period]),
-#     ALLEXCEPT(changepoint_results, changepoint_results[indicator],
-#               changepoint_results[metric])
+#     MAX(pelt_analyse[pelt_periode]),
+#     ALLEXCEPT(pelt_analyse, pelt_analyse[indikator],
+#               pelt_analyse[maaltall])
 # )
 
 # Endringspunkt størrelse =
 # CALCULATE(
-#     MAX(changepoint_results[shift_magnitude]),
-#     changepoint_results[changepoint_period] = [Latest changepoint period]
+#     MAX(pelt_analyse[endringsstoerrelse]),
+#     pelt_analyse[pelt_periode] = [Siste endringspunkt periode]
 # )
