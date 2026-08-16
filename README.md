@@ -6,8 +6,8 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 
 | File | Output table(s) | Schedule |
 |---|---|---|
-| `CUSUM_Changepoint.py` | `cusum_results`, `changepoint_results` | Nightly after main pipeline |
-| `EWMA.py` | `ewma_results` | Nightly after main pipeline |
+| `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse` | Nightly after main pipeline |
+| `EWMA.py` | `ewma_analyse` | Nightly after main pipeline |
 | `Cohort_analysis.py` | `cohort_results` | Nightly after main pipeline |
 | `Portfolio_state_snapshot.py` | `portefolje_snapshot` | First working day of each month |
 | `Seasonal_YTD_ratio_extrapolation.py` | `projection_results` | Nightly after main pipeline |
@@ -16,20 +16,21 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 
 Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per indicator.
 
-- **Metrics:** `frist_pct`, `tidsbruk`, `prod_diff`
-- **Granularity:** monthly and weekly
-- **Minimum history:** 24 monthly / 52 weekly observations
+- **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
+- **Granularitet:** `Månedlig` og `Ukentlig`
+- **Minimum historikk:** 24 månedlige / 52 ukentlige observasjoner
 - **External dependency:** `pip install ruptures` (PELT only — CUSUM runs without it)
 - **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `START_YEAR`
-- `signal_direction` values: `OPP` (improving), `NED` (deteriorating)
+- `signalretning` og `endringsretning` har verdiene `Økning` og `Nedgang`.
+- `signal` er en boolsk verdi.
 
 ## EWMA.py
 
 Exponentially weighted moving average smoothing for trend lines in board and governance reports.
 
-- **Metrics:** `frist_pct`, `tidsbruk`, `prod_diff`
-- **Two speeds:** `ewma_slow` (α=0.1, board), `ewma_fast` (α=0.3, governance team)
-- `trend_direction` values: `Stigende`, `Synkende`, `Stabil`
+- **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
+- **To hastigheter:** `ewma_sakte` (α=0.1, styret), `ewma_rask` (α=0.3, virksomhetsoppfølging)
+- `trendretning` har verdiene `Stigende`, `Synkende`, `Stabil`.
 - Full overwrite each run (EWMA depends on full history)
 
 ## Cohort_analysis.py

@@ -9,7 +9,7 @@
 # a frist% chart signals deteriorating momentum before the raw monthly
 # values make it obvious.
 #
-# Output table: ewma_results
+# Output table: ewma_analyse
 # Power BI: plot EWMA line alongside raw monthly values on the same
 # chart. The raw line shows actual performance, the EWMA line shows
 # the underlying trend direction.
@@ -42,24 +42,24 @@ ALPHA_FAST  = 0.3
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS ewma_results (
-    indicator       STRING      NOT NULL,
-    metric          STRING      NOT NULL,  -- frist_pct / tidsbruk / prod_diff
-    period          INT         NOT NULL,  -- YYYYMM
-    value_raw       DOUBLE,                -- raw monthly value
-    ewma_slow       DOUBLE,                -- alpha=0.1 smoothed value
-    ewma_fast       DOUBLE,                -- alpha=0.3 smoothed value
-    ewma_slope_slow DOUBLE,                -- month-on-month change in ewma_slow
-    ewma_slope_fast DOUBLE,                -- month-on-month change in ewma_fast
-    trend_direction STRING,                -- Rising / Falling / Stable
-    computed_at     TIMESTAMP   NOT NULL,
-    batch_id        STRING      NOT NULL
+CREATE TABLE IF NOT EXISTS ewma_analyse (
+    indikator           STRING      NOT NULL,
+    maaltall            STRING      NOT NULL,  -- Fristprosent / Behandlingstid / Produksjonsdifferanse
+    periode             INT         NOT NULL,  -- AAAAMM
+    verdi               DOUBLE,                -- rå månedlig verdi
+    ewma_sakte          DOUBLE,                -- alfa=0.1 utjevnet verdi
+    ewma_rask           DOUBLE,                -- alfa=0.3 utjevnet verdi
+    ewma_helning_sakte  DOUBLE,                -- endring fra måned til måned i ewma_sakte
+    ewma_helning_rask   DOUBLE,                -- endring fra måned til måned i ewma_rask
+    trendretning        STRING,                -- Stigende / Synkende / Stabil
+    kjoert_tidspunkt    TIMESTAMP   NOT NULL,
+    id                  STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'EWMA smoothed trend lines per indicator and metric. Used for board and governance report trend charts.'
+COMMENT 'EWMA-utjevnede trendlinjer per indikator og måltall. Brukes i trenddiagrammer for styre- og virksomhetsoppfølging.'
 """)
 
-print("ewma_results table ready")
+print("ewma_analyse-tabellen er klar")
 
 
 # =============================================================================
@@ -69,58 +69,58 @@ print("ewma_results table ready")
 # Monthly frist% per indicator
 monthly_frist = spark.sql(f"""
         SELECT
-                pr.Indikator,
-                (YEAR(pr.sluttdato) * 100 + MONTH(pr.sluttdato)) AS period,
+                pr.indikator,
+                (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
                 CASE
-                        WHEN COUNT(CASE WHEN pr.Frist IS NOT NULL THEN 1 END) = 0 THEN NULL
+                    WHEN COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END) = 0 THEN NULL
                         ELSE COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0
-                                 / COUNT(CASE WHEN pr.Frist IS NOT NULL THEN 1 END)
+                         / COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END)
                 END AS verdi
-        FROM Prosesser pr
-        WHERE pr.sluttdato IS NOT NULL
-            AND pr.Frist IS NOT NULL
-            AND pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(pr.sluttdato) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
-        ORDER BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
+            FROM saksbehandling.faser pr
+            WHERE pr.sluttmilepaeldato IS NOT NULL
+                AND pr.frist IS NOT NULL
+                AND pr.indikator NOT LIKE '%avtalt%'
+                AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
+            ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
 # Monthly average Tidsbruk per indicator
 monthly_tid = spark.sql(f"""
         SELECT
-                pr.Indikator,
-                (YEAR(pr.sluttdato) * 100 + MONTH(pr.sluttdato)) AS period,
-                AVG(pr.Tidsbruk) AS verdi
-        FROM Prosesser pr
-        WHERE pr.sluttdato IS NOT NULL
-            AND pr.Tidsbruk IS NOT NULL
-            AND pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(pr.sluttdato) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
-        ORDER BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
+                pr.indikator,
+                (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
+                AVG(pr.tidsbruk) AS verdi
+        FROM saksbehandling.faser pr
+        WHERE pr.sluttmilepaeldato IS NOT NULL
+            AND pr.tidsbruk IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
+        ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
 # Monthly production balance per indicator (Mottatt - Produsert)
 monthly_prod = spark.sql(f"""
         SELECT
-                pr.Indikator,
-                (YEAR(COALESCE(pr.sluttdato, pr.startdato)) * 100 +
-                 MONTH(COALESCE(pr.sluttdato, pr.startdato))) AS period,
-                COUNT(CASE WHEN pr.startdato IS NOT NULL THEN 1 END)
-                - COUNT(CASE WHEN pr.sluttdato IS NOT NULL THEN 1 END) AS verdi
-        FROM Prosesser pr
-        WHERE pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(COALESCE(pr.sluttdato, pr.startdato)) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(COALESCE(pr.sluttdato, pr.startdato)),
-                         MONTH(COALESCE(pr.sluttdato, pr.startdato))
-        ORDER BY pr.Indikator, YEAR(COALESCE(pr.sluttdato, pr.startdato)),
-                         MONTH(COALESCE(pr.sluttdato, pr.startdato))
+                pr.indikator,
+                (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100 +
+                 MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
+                COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
+                - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
+        FROM saksbehandling.faser pr
+        WHERE pr.indikator NOT LIKE '%avtalt%'
+            AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
+                         MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
+        ORDER BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
+                         MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
 """).toPandas()
 
-print(f"frist:    {monthly_frist['Indikator'].nunique()} indicators, "
-            f"{monthly_frist['period'].nunique()} months")
-print(f"tidsbruk: {monthly_tid['Indikator'].nunique()} indicators")
-print(f"prod_diff:{monthly_prod['Indikator'].nunique()} indicators")
+print(f"frist:    {monthly_frist['indikator'].nunique()} indikatorer, "
+            f"{monthly_frist['period'].nunique()} måneder")
+print(f"tidsbruk: {monthly_tid['indikator'].nunique()} indikatorer")
+print(f"produksjonsdifferanse: {monthly_prod['indikator'].nunique()} indikatorer")
 
 
 # =============================================================================
@@ -154,13 +154,13 @@ def trend_label(slope, threshold=0.002):
     return "Stabil"
 
 
-def process_metric(df, metrikk_navn, slope_threshold=0.002):
+def process_metric(df, maaltall_navn, slope_threshold=0.002):
     """
     Compute EWMA for all indicators in a monthly dataframe.
     Returns list of result dicts ready for output table.
     """
     rows = []
-    for indikator, group in df.groupby("Indikator"):
+    for indikator, group in df.groupby("indikator"):
         g = group.sort_values("period").copy()
 
         if len(g) < 3:
@@ -180,20 +180,22 @@ def process_metric(df, metrikk_navn, slope_threshold=0.002):
 
         for _, row in g.iterrows():
             rows.append({
-                "indicator":       indikator,
-                "metric":          metrikk_navn,
-                "period":          int(row["period"]),
-                "value_raw":       round(float(row["verdi"]), 4)
+                "indikator":       indikator,
+                "maaltall":        maaltall_navn,
+                "periode":         int(row["period"]),
+                "verdi":           round(float(row["verdi"]), 4)
                                    if pd.notna(row["verdi"]) else None,
-                "ewma_slow":       round(float(row["ewma_slow"]), 4)
+                "ewma_sakte":      round(float(row["ewma_slow"]), 4)
                                    if pd.notna(row["ewma_slow"]) else None,
-                "ewma_fast":       round(float(row["ewma_fast"]), 4)
+                "ewma_rask":       round(float(row["ewma_fast"]), 4)
                                    if pd.notna(row["ewma_fast"]) else None,
-                "ewma_slope_slow": round(float(row["ewma_slope_slow"]), 4)
+                "ewma_helning_sakte": round(float(row["ewma_slope_slow"]), 4)
                                    if pd.notna(row["ewma_slope_slow"]) else None,
-                "ewma_slope_fast": round(float(row["ewma_slope_fast"]), 4)
+                "ewma_helning_rask": round(float(row["ewma_slope_fast"]), 4)
                                    if pd.notna(row["ewma_slope_fast"]) else None,
-                "trend_direction": row["trend_retning"],
+                "trendretning":    row["trend_retning"],
+                "kjoert_tidspunkt": datetime.now(),
+                "id":              BATCH_ID,
             })
     return rows
 
@@ -206,22 +208,22 @@ def process_metric(df, metrikk_navn, slope_threshold=0.002):
 # tidsbruk:   values are days, threshold 0.5 = half day change per month
 # prod_diff:  values are case counts, threshold 5 = 5 cases per month
 
-frist_rows = process_metric(monthly_frist, "frist_pct",  slope_threshold=0.002)
-tid_rows   = process_metric(monthly_tid,   "tidsbruk",   slope_threshold=0.5)
-prod_rows  = process_metric(monthly_prod,  "prod_diff",  slope_threshold=5.0)
+frist_rows = process_metric(monthly_frist, "Fristprosent", slope_threshold=0.002)
+tid_rows   = process_metric(monthly_tid,   "Behandlingstid", slope_threshold=0.5)
+prod_rows  = process_metric(monthly_prod,  "Produksjonsdifferanse", slope_threshold=5.0)
 
 all_rows = frist_rows + tid_rows + prod_rows
 
-print(f"EWMA rows computed: {len(all_rows):,}")
-print(f"  frist_pct:  {len(frist_rows):,} rows")
-print(f"  tidsbruk:   {len(tid_rows):,} rows")
-print(f"  prod_diff:  {len(prod_rows):,} rows")
+print(f"EWMA-rader beregnet: {len(all_rows):,}")
+print(f"  Fristprosent: {len(frist_rows):,} rader")
+print(f"  Behandlingstid: {len(tid_rows):,} rader")
+print(f"  Produksjonsdifferanse: {len(prod_rows):,} rader")
 
 # Trend summary for most recent period
 df = pd.DataFrame(all_rows)
-latest = df[df["period"] == df["period"].max()]
-print(f"\n=== TREND SUMMARY — LATEST PERIOD {df['period'].max()} ===")
-print(latest.groupby(["metric", "trend_direction"]) ["indicator"].count()
+latest = df[df["periode"] == df["periode"].max()]
+print(f"\n=== TRENDSAMMENDRAG — SISTE PERIODE {df['periode'].max()} ===")
+print(latest.groupby(["maaltall", "trendretning"]) ["indikator"].count()
     .unstack(fill_value=0).to_string())
 
 
@@ -230,28 +232,28 @@ print(latest.groupby(["metric", "trend_direction"]) ["indicator"].count()
 # =============================================================================
 
 if not all_rows:
-    print("No EWMA results to write.")
+    print("Ingen EWMA-resultater å skrive.")
 else:
     results_spark = spark.createDataFrame(df)
 
     # Full overwrite — EWMA recalculated from scratch each run since
     # it depends on the full history (each value depends on all prior values)
-    results_spark.write.mode("overwrite").saveAsTable("ewma_results")
+    results_spark.write.mode("overwrite").saveAsTable("ewma_analyse")
 
-    print(f"ewma_results written: {len(all_rows):,} rows")
+    print(f"ewma_analyse skrevet: {len(all_rows):,} rader")
 
     # Active trends for current period
     spark.sql(f"""
-            SELECT indicator, metric,
-                            ROUND(value_raw,   3) AS value,
-                            ROUND(ewma_slow,   3) AS ewma_slow,
-                            ROUND(ewma_fast,   3) AS ewma_fast,
-                            trend_direction
-            FROM ewma_results
-            WHERE period = (SELECT MAX(period) FROM ewma_results)
-                AND metric = 'frist_pct'
-                AND trend_direction != 'Stabil'
-            ORDER BY trend_direction, indicator
+            SELECT indikator, maaltall,
+                            ROUND(verdi,       3) AS verdi,
+                            ROUND(ewma_sakte,  3) AS ewma_sakte,
+                            ROUND(ewma_rask,   3) AS ewma_rask,
+                            trendretning
+            FROM ewma_analyse
+            WHERE periode = (SELECT MAX(periode) FROM ewma_analyse)
+                AND maaltall = 'Fristprosent'
+                AND trendretning != 'Stabil'
+            ORDER BY trendretning, indikator
     """).show(30, truncate=False)
 
 
@@ -261,20 +263,17 @@ else:
 #
 # OUTPUT TABLE → VISUALS
 #
-# ewma_results contains raw monthly values AND smoothed EWMA lines
-# for all three metrics. One row per indicator per month per metric.
+# ewma_analyse inneholder rå månedlige verdier og utjevnede EWMA-linjer
+# for alle tre måltall. Én rad per indikator per måned per måltall.
 #
 # LINE CHART — Raw + EWMA trend overlay (primary visual, board report)
 #   X axis:  periode (Regnskapsperiode)
 #   Lines:
-#     Thin line, low opacity: verdi_raa — actual monthly value
-#                             Shows real variance, confirms EWMA direction
-#     Bold line:              ewma_slow — smoothed trend (alpha=0.1)
-#                             This is the line the board reads
-#     Optional dashed line:   ewma_fast — faster signal (alpha=0.3)
-#                             Add for governance team view only
-#   Filter:  metrikk = 'frist_pct' for board report
-#            metrikk slicer for governance team
+#     Thin line, low opacity: verdi — faktisk månedlig verdi
+#     Bold line:              ewma_sakte — utjevnet trend (alfa=0.1)
+#     Optional dashed line:   ewma_rask — raskere signal (alfa=0.3)
+#   Filter:  maaltall = 'Fristprosent' for styreoversikt
+#            maaltall-utvalg for virksomhetsoppfølging
 #            indikator slicer — one chart per Fagområde as small multiples
 #   Ref line: Frist målverdi (constant from alert_config) — horizontal
 #   Reading:  EWMA line bending downward toward the reference line = risk
@@ -283,38 +282,38 @@ else:
 #             monthly variance there is — wide gap = volatile indicator.
 #
 # LINE CHART — Behandlingstid trend (governance report)
-#   Same pattern but metrikk = 'tidsbruk'
+#   Same pattern but maaltall = 'Behandlingstid'
 #   No reference line needed — governance team reads direction
 #   EWMA slope tells you if processing is getting faster or slower
 #
 # LINE CHART — Production balance trend (governance report)
-#   metrikk = 'prod_diff'
+#   maaltall = 'Produksjonsdifferanse'
 #   Ref line: zero — EWMA above zero = intake outpacing production
 #   EWMA crossing zero from below = backlog starting to build
 #
 # INDICATOR CARD — Current trend direction
-#   Show trend_retning for most recent periode
+#   Show trendretning for most recent periode
 #   Conditional format: Synkende → red, Stigende → green, Stabil → neutral
-#   Use ewma_slow trend for board, ewma_fast for governance team
+#   Use ewma_sakte trend for board, ewma_rask for governance team
 #
-# DAX MEASURES — add to ewma_results table in semantic model
+# DAX MEASURES — add to ewma_analyse table in semantic model
 
-# EWMA Slow frist pct =
+# EWMA Sakte fristprosent =
 # CALCULATE(
-#     MAX(ewma_results[ewma_slow]),
-#     ewma_results[metric] = "frist_pct"
+#     MAX(ewma_analyse[ewma_sakte]),
+#     ewma_analyse[maaltall] = "Fristprosent"
 # )
 
-# EWMA Fast frist pct =
+# EWMA Rask fristprosent =
 # CALCULATE(
-#     MAX(ewma_results[ewma_fast]),
-#     ewma_results[metric] = "frist_pct"
+#     MAX(ewma_analyse[ewma_rask]),
+#     ewma_analyse[maaltall] = "Fristprosent"
 # )
 
 # EWMA Trend retning =
 # CALCULATE(
-#     MAX(ewma_results[trend_direction]),
-#     ewma_results[period] = MAX(ewma_results[period])
+#     MAX(ewma_analyse[trendretning]),
+#     ewma_analyse[periode] = MAX(ewma_analyse[periode])
 # )
 
 # EWMA Trend verdi =
@@ -326,20 +325,20 @@ else:
 
 # EWMA Behandlingstid =
 # CALCULATE(
-#     MAX(ewma_results[ewma_slow]),
-#     ewma_results[metric] = "tidsbruk"
+#     MAX(ewma_analyse[ewma_sakte]),
+#     ewma_analyse[maaltall] = "Behandlingstid"
 # )
 
 # EWMA Produksjon differanse =
 # CALCULATE(
-#     MAX(ewma_results[ewma_slow]),
-#     ewma_results[metric] = "prod_diff"
+#     MAX(ewma_analyse[ewma_sakte]),
+#     ewma_analyse[maaltall] = "Produksjonsdifferanse"
 # )
 #
 # NOTE ON ALPHA CHOICE FOR BOARD VS GOVERNANCE:
-# Board report: always use ewma_slow (alpha=0.1). Stable line, clear direction,
+# Board report: always use ewma_sakte (alpha=0.1). Stable line, clear direction,
 #               not distracted by single-month noise. Changes slowly and
 #               deliberately — appropriate for monthly meeting cadence.
-# Governance team: use ewma_fast (alpha=0.3) for early warning. Picks up
-#                  trend changes 2-3 months sooner than ewma_slow. Accept
+# Governance team: use ewma_rask (alpha=0.3) for early warning. Picks up
+#                  trend changes 2-3 months sooner than ewma_sakte. Accept
 #                  more false signals as the tradeoff for earlier detection.

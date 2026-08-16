@@ -1,8 +1,8 @@
 # =============================================================================
 # SSB KOSTRA → Microsoft Fabric Lakehouse Sync
 #
-# Fetches all KOSTRA key-figure tables (SBMENU10443) from SSB PxWebApi v2
-# and writes each as a Delta table in the Lakehouse.
+# Fetches selected KOSTRA key-figure tables from SSB PxWebApi v2
+# and appends only new rows to each Delta table in the Lakehouse.
 #
 # Run in a Fabric Notebook with Spark runtime.
 # Requires: requests (pre-installed), delta (Fabric default runtime).
@@ -43,52 +43,12 @@ MAX_WORKERS      = 4
 # Seconds to sleep between HTTP requests to respect rate limit
 THROTTLE_SLEEP   = 0.5
 
-KOSTRA_SUBJECT   = "os__os01__kostrahoved__SBMENU10443"
-
-# Hard-coded fallback — the 42 KOSTRA key-figure table IDs as of 2025.
-FALLBACK_TABLES = [
+# Selected KOSTRA key-figure tables. The direct data endpoint is used;
+# table discovery and fallback handling are intentionally not needed.
+KOSTRA_TABLES = [
     {"id": "14304", "label": "KOSTRA-nøkkeltall for plan- og byggesaksbehandling"},
-    {"id": "14305", "label": "KOSTRA-nøkkeltall for barnehage"},
-    {"id": "14306", "label": "KOSTRA-nøkkeltall for grunnskole"},
-    {"id": "14307", "label": "KOSTRA-nøkkeltall for pleie og omsorg"},
-    {"id": "14308", "label": "KOSTRA-nøkkeltall for sosialtjenesten"},
-    {"id": "14309", "label": "KOSTRA-nøkkeltall for barnevern"},
-    {"id": "14310", "label": "KOSTRA-nøkkeltall for kommunehelse"},
-    {"id": "14311", "label": "KOSTRA-nøkkeltall for vann og avløp"},
-    {"id": "14312", "label": "KOSTRA-nøkkeltall for avfall"},
-    {"id": "14313", "label": "KOSTRA-nøkkeltall for samferdsel"},
-    {"id": "14314", "label": "KOSTRA-nøkkeltall for brann og ulykkesvern"},
-    {"id": "14315", "label": "KOSTRA-nøkkeltall for natur forvaltning og friluftsliv"},
-    {"id": "14316", "label": "KOSTRA-nøkkeltall for kultur"},
     {"id": "14317", "label": "KOSTRA-nøkkeltall for fysisk planlegging"},
-    {"id": "14318", "label": "KOSTRA-nøkkeltall for kirke"},
-    {"id": "14319", "label": "KOSTRA-nøkkeltall for næring"},
-    {"id": "14320", "label": "KOSTRA-nøkkeltall for landbruk"},
-    {"id": "14321", "label": "KOSTRA-nøkkeltall for overordnet økonomi"},
-    {"id": "14322", "label": "KOSTRA-nøkkeltall for folkehelse"},
-    {"id": "14323", "label": "KOSTRA-nøkkeltall for introduksjonsprogrammet"},
-    {"id": "14324", "label": "KOSTRA-nøkkeltall for bolig"},
-    {"id": "14325", "label": "KOSTRA-nøkkeltall for tjenester utenfor institusjon"},
-    {"id": "14326", "label": "KOSTRA-nøkkeltall for institusjonstjenester"},
-    {"id": "14327", "label": "KOSTRA-nøkkeltall for aktivisering og servicetjenester"},
-    {"id": "14328", "label": "KOSTRA-nøkkeltall for rehabilitering"},
-    {"id": "14329", "label": "KOSTRA-nøkkeltall for psykisk helsearbeid"},
-    {"id": "14330", "label": "KOSTRA-nøkkeltall for rusomsorg"},
-    {"id": "14331", "label": "KOSTRA-nøkkeltall for integrering"},
-    {"id": "14332", "label": "KOSTRA-nøkkeltall for kommunalt disponerte boliger"},
-    {"id": "14333", "label": "KOSTRA-nøkkeltall for tekniske tjenester"},
-    {"id": "14334", "label": "KOSTRA-nøkkeltall for energi"},
-    {"id": "14335", "label": "KOSTRA-nøkkeltall for renovasjon"},
-    {"id": "14336", "label": "KOSTRA-nøkkeltall for parkering"},
-    {"id": "14337", "label": "KOSTRA-nøkkeltall for friluftsliv natur og kulturmiljø"},
-    {"id": "14338", "label": "KOSTRA-nøkkeltall for idrett"},
-    {"id": "14339", "label": "KOSTRA-nøkkeltall for bibliotek"},
-    {"id": "14340", "label": "KOSTRA-nøkkeltall for kino"},
-    {"id": "14341", "label": "KOSTRA-nøkkeltall for museer"},
-    {"id": "14342", "label": "KOSTRA-nøkkeltall for musikk og kulturskoler"},
-    {"id": "14343", "label": "KOSTRA-nøkkeltall for tilrettelagte tjenester"},
-    {"id": "14344", "label": "KOSTRA-nøkkeltall for kommunalt foretak"},
-    {"id": "14345", "label": "KOSTRA-nøkkeltall for ressursbruk til opplæring"},
+    {"id": "14324", "label": "KOSTRA-nøkkeltall for bolig"}
 ]
 
 
@@ -121,28 +81,6 @@ def make_table_name(table_id: str, label: str) -> str:
     return f"{TABLE_PREFIX}{table_id}_{slug}"
 
 
-def discover_table_ids(subject: str) -> list[dict]:
-    url    = f"{BASE_URL}/tables"
-    params = {"lang": "no", "subject": subject, "pageSize": 100}
-    resp   = requests.get(url, params=params, timeout=30)
-    resp.raise_for_status()
-    data   = resp.json()
-    tables = data.get("tables", data.get("value", []))
-    return [{"id": t["id"], "label": t.get("label", t["id"])} for t in tables]
-
-
-def get_table_list() -> list[dict]:
-    try:
-        tables = discover_table_ids(KOSTRA_SUBJECT)
-        if tables:
-            print(f"Discovered {len(tables)} tables via API")
-            return tables
-    except Exception as e:
-        print(f"API discovery failed ({e}), using hard-coded list")
-    print(f"Using hard-coded list: {len(FALLBACK_TABLES)} tables")
-    return FALLBACK_TABLES
-
-
 def _jsonstat2_to_rows(js2: dict) -> list[dict]:
     """Flatten a JSON-stat2 dataset into a list of dicts."""
     if "_rows" in js2:
@@ -171,7 +109,7 @@ def _jsonstat2_to_rows(js2: dict) -> list[dict]:
             row[f"{dim_id}_label"] = cat_label
 
         raw_val        = values[flat_idx]
-        row["value"]   = float(raw_val) if raw_val is not None else None
+        row["verdi"]   = float(raw_val) if raw_val is not None else None
         row["_status"] = str(statuses[str(flat_idx)]) if str(flat_idx) in statuses else None
         rows.append(row)
 
@@ -237,11 +175,11 @@ print("Helper functions defined")
 
 
 # =============================================================================
-# CELL 2 — Discover table IDs
+# CELL 2 — Select table IDs
 # =============================================================================
 
-tables = get_table_list()
-print(f"\nFound {len(tables)} KOSTRA tables to process")
+tables = KOSTRA_TABLES
+print(f"\nValgt {len(tables)} KOSTRA-tabeller for behandling")
 
 
 # =============================================================================
@@ -284,6 +222,27 @@ print(f"\nFetch complete: {sum(1 for v in fetched.values() if v is not None)} su
 # CELL 4 — Write to Delta tables (sequential — one table at a time)
 # =============================================================================
 
+def migrate_metadata_columns(full_name: str) -> None:
+    """Rename legacy metadata columns without replacing existing records."""
+    if not spark.catalog.tableExists(full_name):
+        return
+
+    columns = {field.name for field in spark.table(full_name).schema.fields}
+    renames = {
+        "value": "verdi",
+        "_source_table_id": "kilde_tabell_id",
+        "_source_label": "kilde_etikett",
+        "_loaded_at": "lastet_tidspunkt",
+    }
+    for old_name, new_name in renames.items():
+        if old_name in columns and new_name not in columns:
+            spark.sql(
+                f"ALTER TABLE {full_name} RENAME COLUMN {old_name} TO {new_name}"
+            )
+            columns.remove(old_name)
+            columns.add(new_name)
+
+
 succeeded = []
 failed    = []
 
@@ -309,8 +268,8 @@ for entry in tables:
         sample    = rows[0]
         fields    = []
         for col in sample.keys():
-            if col == "value":
-                fields.append(StructField("value", DoubleType(), True))
+            if col == "verdi":
+                fields.append(StructField("verdi", DoubleType(), True))
             else:
                 fields.append(StructField(col, StringType(), True))
 
@@ -319,19 +278,43 @@ for entry in tables:
         spark_rows = [tuple(r.get(c) for c in col_order) for r in rows]
 
         df = spark.createDataFrame(spark_rows, schema=schema)
-        df = df.withColumn("_source_table_id", F.lit(table_id))
-        df = df.withColumn("_source_label",    F.lit(label))
-        df = df.withColumn("_loaded_at",       F.current_timestamp())
+        df = df.withColumn("kilde_tabell_id", F.lit(table_id))
+        df = df.withColumn("kilde_etikett",    F.lit(label))
+        df = df.withColumn("lastet_tidspunkt", F.current_timestamp())
 
         full_name = f"{LAKEHOUSE_SCHEMA}.{tbl_name}" if LAKEHOUSE_SCHEMA else tbl_name
-        (
-            df.write
-              .format("delta")
-              .mode("overwrite")
-              .option("overwriteSchema", "true")
-              .saveAsTable(full_name)
-        )
-        print(f"  Written {df.count():>7,} rows  →  {full_name}")
+        migrate_metadata_columns(full_name)
+
+        if spark.catalog.tableExists(full_name):
+            existing = spark.table(full_name).drop("lastet_tidspunkt")
+            new_data = df.drop("lastet_tidspunkt")
+            if set(existing.columns) != set(new_data.columns):
+                raise ValueError(
+                    f"Schema mismatch for {full_name}; existing columns must match "
+                    "the current SSB response before new rows can be appended."
+                )
+
+            comparison_columns = existing.columns
+            match_condition = F.col(f"ny.{comparison_columns[0]}").eqNullSafe(
+                F.col(f"eksisterende.{comparison_columns[0]}")
+            )
+            for column in comparison_columns[1:]:
+                match_condition = match_condition & F.col(f"ny.{column}").eqNullSafe(
+                    F.col(f"eksisterende.{column}")
+                )
+
+            new_rows = new_data.alias("ny").join(
+                existing.alias("eksisterende"),
+                on=match_condition,
+                how="left_anti",
+            ).withColumn("lastet_tidspunkt", F.current_timestamp())
+        else:
+            new_rows = df
+
+        new_row_count = new_rows.count()
+        if new_row_count:
+            new_rows.write.format("delta").mode("append").saveAsTable(full_name)
+        print(f"  La til {new_row_count:>7,} nye rader  →  {full_name}")
         succeeded.append(table_id)
     except Exception as exc:
         print(f"  FAILED  {table_id}: {exc}")
