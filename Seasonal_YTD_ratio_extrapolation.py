@@ -9,7 +9,7 @@
 #   4. Apply trimmed mean ratio to current YTD to project year-end
 #   5. Confidence interval from trimmed variance across historical years
 #
-# Output table: projection_results
+# Output table: frist_prognose
 #   One row per indicator per month — actuals for past months,
 #   forecast for remaining months of current year.
 #
@@ -22,7 +22,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-spark = SparkSession.builder.getOrCreate()
+spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 BATCH_ID      = datetime.now().strftime("%Y%m%dT%H%M%S")
 CURRENT_YEAR  = datetime.now().year
 CURRENT_MONTH = datetime.now().month
@@ -36,48 +36,49 @@ START_YEAR    = 2015 # exclude data before this year — adjust if older data is
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS projection_results (
-    indikator           STRING      NOT NULL,
-    period              INT         NOT NULL,
-    type                STRING      NOT NULL,
-    verdi               DOUBLE,
-    ci_lower            DOUBLE,
-    ci_upper            DOUBLE,
-    year_end_estimate   DOUBLE,
-    computed_at         TIMESTAMP   NOT NULL,
-    batch_id            STRING      NOT NULL
+CREATE TABLE IF NOT EXISTS prognoser.frist_ (
+    indikator                   STRING      NOT NULL,
+    periode                     INT         NOT NULL,
+    type                        STRING      NOT NULL,
+    verdi                       DOUBLE,
+    nedre_konfidensgrense       DOUBLE,
+    oevre_konfidensgrense       DOUBLE,
+    prognose_aarsslutt          DOUBLE,
+    kjoert_tidspunkt            TIMESTAMP   NOT NULL,
+    kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Year-end frist% projection per indicator. type=actual for past months, type=forecast for remaining months. ci_lower/ci_upper are 80% confidence bounds derived from historical variance at same seasonal position.'
+COMMENT 'Årssluttprognose for fristprosent per indikator. type=Faktisk for måneder med data og type=Prognose for gjenstående måneder. Konfidensgrensene er 80 prosent og bygger på historisk variasjon i samme sesongposisjon.'
 """)
 
-print("projection_results table ready")
+print("prognoser.frist-tabellen er klar")
 
 
 # =============================================================================
 # CELL 2 — Load historical monthly frist% per indicator
 # =============================================================================
 # Full history — all years, all indicators.
-# Excludes 'avtalt' indicators (no fixed target to project toward).
 
 monthly = spark.sql(f"""
     SELECT
-        pr.Indikator,
-        YEAR(pr.sluttdato)                         AS år,
-        MONTH(pr.sluttdato)                        AS mnd,
+        pr.indikator,
+        YEAR(pr.sluttmilepaeldato)                 AS år,
+        MONTH(pr.sluttmilepaeldato)                AS mnd,
         COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END)           AS innenfor,
-        COUNT(CASE WHEN pr.aggregert_frist IS NOT NULL THEN 1 END)   AS total
-    FROM Prosesser pr
-        WHERE pr.sluttdato IS NOT NULL
-            AND pr.aggregert_frist IS NOT NULL
-            AND pr.Indikator NOT LIKE '%avtalt%'
-            AND YEAR(pr.sluttdato) >= {START_YEAR}
-        GROUP BY pr.Indikator, YEAR(pr.sluttdato), MONTH(pr.sluttdato)
-    ORDER BY pr.Indikator, år, mnd
+        COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END)             AS total
+    FROM saksbehandling.faser pr
+    INNER JOIN felles.indikatorer indikatorer
+        ON indikatorer.pk_indikator = pr.indikator
+        WHERE pr.sluttmilepaeldato IS NOT NULL
+            AND pr.frist IS NOT NULL
+            AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
+    ORDER BY pr.indikator, år, mnd
 """).toPandas()
 
-print(f"Monthly data loaded: {len(monthly)} rows, "
-      f"{monthly['Indikator'].nunique()} indicators, "
+print(f"Månedlige data lastet: {len(monthly)} rader, "
+      f"{monthly['indikator'].nunique()} indikatorer, "
       f"{monthly['år'].min()}–{monthly['år'].max()}")
 
 
@@ -90,7 +91,7 @@ def compute_ytd(df, indikator, year):
     Compute cumulative YTD frist% for each month of a given year.
     Returns dict {month: ytd_pct} for months with data.
     """
-    ind = df[(df["Indikator"] == indikator) & (df["år"] == year)].sort_values("mnd")
+    ind = df[(df["indikator"] == indikator) & (df["år"] == year)].sort_values("mnd")
     result = {}
     cum_innenfor = 0
     cum_total    = 0
@@ -110,7 +111,7 @@ def seasonal_ratios(df, indikator, current_year, min_years=3, trim_n=1):
     Returns dict {month: {mean_ratio, std_ratio, n_years}} or None if
     insufficient history.
     """
-    years = sorted(df[(df["Indikator"] == indikator) &
+    years = sorted(df[(df["indikator"] == indikator) &
                       (df["år"] < current_year)]["år"].unique())
 
     # Only use complete years — must have data in month 12
@@ -166,7 +167,7 @@ def project_year_end(current_ytd, month, ratios, z=1.28):
     if r["mean_ratio"] == 0:
         return None, None, None
 
-    estimate = current_ytd / r["mean_ratio"]
+    estimate = min(1.0, max(0.0, current_ytd / r["mean_ratio"]))
 
     # Propagate uncertainty from ratio variance to year-end estimate
     if r["std_ratio"] > 0:
@@ -190,7 +191,7 @@ def project_year_end(current_ytd, month, ratios, z=1.28):
 # =============================================================================
 
 results = []
-indicators = monthly["Indikator"].unique()
+indicators = monthly["indikator"].unique()
 
 for indikator in indicators:
 
@@ -225,14 +226,14 @@ for indikator in indicators:
         period = CURRENT_YEAR * 100 + mnd
         results.append({
             "indikator":         indikator,
-            "period":            period,
-            "type":              "actual",
+            "periode":           period,
+            "type":              "Faktisk",
             "verdi":             round(float(ytd_val), 4),
-            "ci_lower":          None,
-            "ci_upper":          None,
-            "year_end_estimate": year_end_est,
-            "computed_at":       datetime.now(),
-            "batch_id":          BATCH_ID,
+            "nedre_konfidensgrense": None,
+            "oevre_konfidensgrense": None,
+            "prognose_aarsslutt": year_end_est,
+            "kjoert_tidspunkt":  datetime.now(),
+            "kjoere_id":         BATCH_ID,
         })
 
     # Write forecast rows — remaining months of current year
@@ -252,14 +253,14 @@ for indikator in indicators:
         period = CURRENT_YEAR * 100 + mnd
         results.append({
             "indikator":         indikator,
-            "period":            period,
-            "type":              "forecast",
+            "periode":           period,
+            "type":              "Prognose",
             "verdi":             round(float(forecast_ytd), 4),
-            "ci_lower":          f_ci_lo,
-            "ci_upper":          f_ci_hi,
-            "year_end_estimate": year_end_est,
-            "computed_at":       datetime.now(),
-            "batch_id":          BATCH_ID,
+            "nedre_konfidensgrense": f_ci_lo,
+            "oevre_konfidensgrense": f_ci_hi,
+            "prognose_aarsslutt": year_end_est,
+            "kjoert_tidspunkt":  datetime.now(),
+            "kjoere_id":         BATCH_ID,
         })
 
 print(f"\nProjection rows computed: {len(results)}")
@@ -271,39 +272,41 @@ print(f"Indicators projected: {len(set(r['indikator'] for r in results))}")
 # =============================================================================
 
 if not results:
-    print("No projection results to write.")
+    print("Ingen prognoseresultater å skrive.")
 else:
     df = pd.DataFrame(results)
     results_spark = spark.createDataFrame(df)
 
     # Idempotent — delete current year rows before inserting
     spark.sql(f"""
-            DELETE FROM projection_results
-            WHERE period >= {CURRENT_YEAR * 100 + 1}
-                AND period <= {CURRENT_YEAR * 100 + 12}
+            DELETE FROM frist_prognose
+            WHERE periode >= {CURRENT_YEAR * 100 + 1}
+                AND periode <= {CURRENT_YEAR * 100 + 12}
     """)
 
-    results_spark.write.mode("append").saveAsTable("projection_results")
+    results_spark.write.mode("append").saveAsTable("frist_prognose")
 
-    print(f"projection_results written: {len(results)} rows")
+    print(f"frist_prognose skrevet: {len(results)} rader")
 
     # Summary — year-end estimates for current indicators
     spark.sql(f"""
         SELECT
             indikator,
-            MAX(CASE WHEN type = 'actual'
-                     THEN verdi END)             AS ytd_naa,
-            MAX(year_end_estimate)               AS prognose_årslutt,
-            MAX(CASE WHEN type = 'forecast'
-                     AND period = {CURRENT_YEAR * 100 + 12}
-                     THEN ci_lower END)          AS ci_lower,
-            MAX(CASE WHEN type = 'forecast'
-                     AND period = {CURRENT_YEAR * 100 + 12}
-                     THEN ci_upper END)          AS ci_upper
-        FROM projection_results
-        WHERE batch_id = '{BATCH_ID}'
+            MAX_BY(
+                CASE WHEN type = 'Faktisk' THEN verdi END,
+                CASE WHEN type = 'Faktisk' THEN periode END
+            )                                           AS verdi_hittil,
+            MAX(prognose_aarsslutt)                      AS prognose_aarsslutt,
+            MAX(CASE WHEN type = 'Prognose'
+                     AND periode = {CURRENT_YEAR * 100 + 12}
+                     THEN nedre_konfidensgrense END)     AS nedre_konfidensgrense,
+            MAX(CASE WHEN type = 'Prognose'
+                     AND periode = {CURRENT_YEAR * 100 + 12}
+                     THEN oevre_konfidensgrense END)     AS oevre_konfidensgrense
+        FROM frist_prognose
+        WHERE kjoere_id = '{BATCH_ID}'
         GROUP BY indikator
-        ORDER BY prognose_årslutt ASC
+        ORDER BY prognose_aarsslutt ASC
     """).show(30, truncate=False)
 
 
@@ -313,16 +316,16 @@ else:
 #
 # OUTPUT TABLE → VISUALS
 #
-# projection_results contains both actuals (type='actual') and
-# forecast rows (type='forecast') for the current year, plus
-# year_end_estimate on every row for easy KPI card use.
+# frist_prognose inneholder både faktiske rader (type='Faktisk') og
+# prognoserader (type='Prognose') for inneværende år, med
+# prognose_aarsslutt på hver rad for enkel bruk i KPI-kort.
 #
 # LINE CHART — YTD actuals with forecast extension (primary visual)
 #   X axis:  periode (Regnskapsperiode) — full current year Jan to Dec
 #   Lines:
-#     Solid line:  type = 'actual'  — verdi (YTD frist% to date)
-#     Dotted line: type = 'forecast' — verdi (projected YTD each remaining month)
-#     Shaded band: ci_lower to ci_upper on forecast portion only
+#     Solid line:  type = 'Faktisk'  — verdi (fristprosent hittil i år)
+#     Dotted line: type = 'Prognose' — verdi (prognostisert verdi for gjenstående måneder)
+#     Shaded band: nedre_konfidensgrense til oevre_konfidensgrense for prognosedelen
 #                  — shows uncertainty range, narrows with more history
 #     Flat ref line: year-end target from alert_config (Frist målverdi DAX measure)
 #                  — horizontal line the projection must end above
@@ -339,31 +342,31 @@ else:
 #   Conditional format: green if above Frist målverdi, red if below
 #
 # TABLE — Projection summary per indicator
-#   Columns: indikator | YTD nå | Prognose årslutt | CI lower | CI upper | Mål
+#   Columns: indikator | verdi_hittil | prognose_aarsslutt | nedre_konfidensgrense | oevre_konfidensgrense | Mål
 #   Sort:    prognose årslutt ASC — most at-risk indicators first
 #   Conditional format on Prognose årslutt: RAG vs Frist målverdi
 #
-# DAX MEASURES — add to projection_results table in semantic model
+# DAX MEASURES — add to frist_prognose table in semantic model
 
 # Prognose årslutt =
 # CALCULATE(
-#     MAX(projection_results[year_end_estimate]),
-#     projection_results[type] = "forecast",
-#     projection_results[period] = MAX(projection_results[period])
+#     MAX(frist_prognose[prognose_aarsslutt]),
+#     frist_prognose[type] = "Prognose",
+#     frist_prognose[periode] = MAX(frist_prognose[periode])
 # )
 
 # Prognose CI lower =
 # CALCULATE(
-#     MAX(projection_results[ci_lower]),
-#     projection_results[type] = "forecast",
-#     projection_results[period] = MAX(projection_results[period])
+#     MAX(frist_prognose[nedre_konfidensgrense]),
+#     frist_prognose[type] = "Prognose",
+#     frist_prognose[periode] = MAX(frist_prognose[periode])
 # )
 
 # Prognose CI upper =
 # CALCULATE(
-#     MAX(projection_results[ci_upper]),
-#     projection_results[type] = "forecast",
-#     projection_results[period] = MAX(projection_results[period])
+#     MAX(frist_prognose[oevre_konfidensgrense]),
+#     frist_prognose[type] = "Prognose",
+#     frist_prognose[periode] = MAX(frist_prognose[periode])
 # )
 
 # Prognose RAG =
@@ -371,7 +374,7 @@ else:
 # VAR Mål =
 #     CALCULATE(
 #         MIN(alert_config[terskel_amber]),
-#         alert_config[indikator] = MAX(projection_results[indikator]),
+#         alert_config[indikator] = MAX(frist_prognose[indikator]),
 #         alert_config[aktiv] = TRUE()
 #     )
 # RETURN

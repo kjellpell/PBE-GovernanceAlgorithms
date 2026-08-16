@@ -77,9 +77,12 @@ monthly_frist = spark.sql(f"""
                          / COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END)
                 END AS verdi
             FROM saksbehandling.faser pr
+            INNER JOIN felles.indikatorer indikatorer
+                ON indikatorer.pk_indikator = pr.indikator
             WHERE pr.sluttmilepaeldato IS NOT NULL
                 AND pr.frist IS NOT NULL
                 AND pr.indikator NOT LIKE '%avtalt%'
+                AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
                 AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
             GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
             ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
@@ -92,9 +95,12 @@ monthly_tid = spark.sql(f"""
                 (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
                 AVG(pr.tidsbruk) AS verdi
         FROM saksbehandling.faser pr
+        INNER JOIN felles.indikatorer indikatorer
+            ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
             AND pr.tidsbruk IS NOT NULL
             AND pr.indikator NOT LIKE '%avtalt%'
+            AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
         ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
@@ -109,7 +115,10 @@ monthly_prod = spark.sql(f"""
                 COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
                 - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
         FROM saksbehandling.faser pr
+        INNER JOIN felles.indikatorer indikatorer
+            ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.indikator NOT LIKE '%avtalt%'
+            AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
         GROUP BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
                          MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))

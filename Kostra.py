@@ -22,7 +22,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 
-spark = SparkSession.builder.getOrCreate()
+spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 
 # Target Lakehouse schema (leave empty string "" for default schema)
 LAKEHOUSE_SCHEMA = "kostra"

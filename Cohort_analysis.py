@@ -14,12 +14,11 @@
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import *
 import pandas as pd
 import numpy as np
 from datetime import datetime, date
 
-spark = SparkSession.builder.getOrCreate()
+spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 BATCH_ID        = datetime.now().strftime("%Y%m%dT%H%M%S")
 TODAY           = date.today()
 MIN_COHORT_SIZE = 10
@@ -75,7 +74,10 @@ cases = spark.sql(f"""
             WHEN pr.sluttmilepaeldato IS NULL THEN 1 ELSE 0
         END                                    AS er_aapen
     FROM saksbehandling.faser pr
+    INNER JOIN felles.indikatorer indikatorer
+        ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.startmilepaeldato IS NOT NULL
+            AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
 """).toPandas()
 
@@ -165,7 +167,7 @@ historical = (
     df[~df["er_nylig_kohort"]]
     .groupby(["indikator", "uker_siden_mottak"]) ["andel_aapne"]
     .apply(lambda x: float(np.mean(
-        np.sort(x.values)[
+        np.sort(x.to_numpy())[
             max(0, int(len(x) * 0.1)) : max(1, int(len(x) * 0.9))
         ]
     )) if len(x) >= 5 else float(x.mean()))
