@@ -33,7 +33,7 @@ START_YEAR      = 2015  # exclude data before this year — adjust if older data
 spark.sql("""
 CREATE TABLE IF NOT EXISTS kohortanalyse (
     indikator                   STRING      NOT NULL,
-    kohort_periode              INT         NOT NULL,  -- AAAAMM for mottaksmåned
+    analyse_date                DATE        NOT NULL,  -- første dag i mottaksmåneden
     kohortstoerrelse            INT         NOT NULL,  -- saker mottatt den måneden
     uker_siden_mottak           INT         NOT NULL,  -- uker siden kohortmottak
     aapne_saker_antall          INT         NOT NULL,  -- saker fortsatt åpne denne uken
@@ -60,9 +60,7 @@ print("kohortanalyse-tabellen er klar")
 cases = spark.sql(f"""
     SELECT
         pr.indikator                          AS indikator,
-        DATE_FORMAT(pr.startmilepaeldato, 'yyyyMM') AS kohort_periode,
-        YEAR(pr.startmilepaeldato) * 100
-            + MONTH(pr.startmilepaeldato)     AS kohort_periode_int,
+        CAST(DATE_TRUNC('MONTH', pr.startmilepaeldato) AS DATE) AS analyse_date,
         pr.startmilepaeldato                  AS mottaksdato,
         pr.sluttmilepaeldato                  AS sluttdato,
         CASE
@@ -81,8 +79,8 @@ cases = spark.sql(f"""
             AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
 """).toPandas()
 
-cases["kohort_periode_int"] = cases["kohort_periode_int"].astype(int)
-cases["mottaksdato"]        = pd.to_datetime(cases["mottaksdato"])
+cases["analyse_date"] = pd.to_datetime(cases["analyse_date"]).dt.normalize()
+cases["mottaksdato"]  = pd.to_datetime(cases["mottaksdato"])
 cases["sluttdato"]          = pd.to_datetime(cases["sluttdato"])
 
 print(f"Saker lastet: {len(cases):,}")
@@ -100,28 +98,24 @@ today_ts = pd.Timestamp(TODAY)
 for indikator, ind_cases in cases.groupby("indikator"):
 
     # All distinct cohort months for this indicator
-    cohort_months = sorted(ind_cases["kohort_periode_int"].unique())
+    cohort_months = sorted(ind_cases["analyse_date"].unique())
 
     # Cutoff for "recent" cohorts — last 6 months
-    current_yyyymm  = int(TODAY.strftime("%Y%m"))
     _rc_yr, _rc_mo  = TODAY.year, TODAY.month - 6
     if _rc_mo <= 0:
         _rc_mo += 12; _rc_yr -= 1
-    recent_cutoff   = _rc_yr * 100 + _rc_mo
-    for cohort_periode in cohort_months:
+    recent_cutoff = pd.Timestamp(_rc_yr, _rc_mo, 1)
+    for cohort_start in cohort_months:
         kohort_saker = ind_cases[
-            ind_cases["kohort_periode_int"] == cohort_periode
+            ind_cases["analyse_date"] == cohort_start
         ].copy()
 
         kohortstoerrelse = len(kohort_saker)
         if kohortstoerrelse < MIN_COHORT_SIZE:
             continue
 
-        # Cohort intake reference date — first day of intake month
-        yr  = cohort_periode // 100
-        mth = cohort_periode % 100
-        cohort_start = pd.Timestamp(yr, mth, 1)
-        is_recent     = cohort_periode >= recent_cutoff
+        cohort_start = pd.Timestamp(cohort_start)
+        is_recent     = cohort_start >= recent_cutoff
 
         # For each week bucket up to MAX_WEEKS, count how many cases
         # from this cohort were still open at that point in time.
@@ -143,7 +137,7 @@ for indikator, ind_cases in cases.groupby("indikator"):
 
             results.append({
                 "indikator":             indikator,
-                "kohort_periode":        cohort_periode,
+                "analyse_date":          cohort_start.date(),
                 "kohortstoerrelse":      kohortstoerrelse,
                 "uker_siden_mottak":     uke,
                 "aapne_saker_antall":    aapne_saker_antall,
@@ -199,15 +193,15 @@ else:
 
     print(f"\nkohortanalyse skrevet: {len(df):,} rader")
     print(f"Indikatorer: {df['indikator'].nunique()}")
-    print(f"Kohorter:    {df['kohort_periode'].nunique()}")
-    print(f"Nylige kohorter markert: {df[df['er_nylig_kohort']]['kohort_periode'].nunique()}")
+    print(f"Kohorter:    {df['analyse_date'].nunique()}")
+    print(f"Nylige kohorter markert: {df[df['er_nylig_kohort']]['analyse_date'].nunique()}")
 
     # Summary — recent cohorts vs historical baseline at week 12
     print("\n=== RECENT COHORTS VS BASELINE AT WEEK 12 ===")
     spark.sql("""
         SELECT
                         indikator,
-                        kohort_periode,
+                        analyse_date,
                         kohortstoerrelse,
                         ROUND(andel_aapne * 100, 1)             AS andel_aapne,
                         ROUND(andel_aapne_historisk * 100, 1)   AS andel_aapne_historisk,
@@ -224,7 +218,7 @@ else:
 # CELL 6 — Power BI visual notes
 # =============================================================================
 # HEATMAP (primary visual):
-#   Rows:    kohort_periode (mottaksmåned) — nyere kohorter øverst
+#   Rows:    analyse_date (mottaksmåned) — nyere kohorter øverst
 #   Columns: uker_siden_mottak (1 to 26)
 #   Values:  andel_aapne — format as %
 #   Colour:  gradient dark (high %) → light (low %)
@@ -234,7 +228,7 @@ else:
 #
 # LINE CHART (secondary visual — recent vs historical):
 #   X axis:  uker_siden_mottak
-#   Lines:   andel_aapne per nyere kohort_periode (one line per month)
+#   Lines:   andel_aapne per nyere analyse_date (one line per month)
 #            andel_aapne_historisk as a single reference line (trimmed mean)
 #   Shading: area between recent lines and historical line
 #            Above historical = resolving slower than normal
