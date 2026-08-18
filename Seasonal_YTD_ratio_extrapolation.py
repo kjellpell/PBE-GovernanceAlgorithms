@@ -65,12 +65,12 @@ monthly = spark.sql(f"""
         YEAR(pr.sluttmilepaeldato)                 AS aar,
         MONTH(pr.sluttmilepaeldato)                AS mnd,
         COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END)           AS innenfor,
-        COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END)             AS total
+        COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END)             AS total
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikatorer
         ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
-            AND pr.frist IS NOT NULL
+            AND pr.frist_dager IS NOT NULL
             AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)

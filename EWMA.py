@@ -72,15 +72,15 @@ monthly_frist = spark.sql(f"""
                 pr.indikator,
                 (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
                 CASE
-                    WHEN COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END) = 0 THEN NULL
+                    WHEN COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END) = 0 THEN NULL
                         ELSE COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0
-                         / COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END)
+                         / COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END)
                 END AS verdi
             FROM saksbehandling.faser pr
             INNER JOIN felles.indikator indikatorer
                 ON indikatorer.pk_indikator = pr.indikator
             WHERE pr.sluttmilepaeldato IS NOT NULL
-                AND pr.frist IS NOT NULL
+                AND pr.frist_dager IS NOT NULL
                 AND pr.indikator NOT LIKE '%avtalt%'
                 AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
                 AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
