@@ -219,7 +219,7 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H):
     if len(series) < 8:
         return None
 
-    values = series.dropna().values
+    values = series.dropna().values.astype(float)
     if len(values) < 8:
         return None
 
