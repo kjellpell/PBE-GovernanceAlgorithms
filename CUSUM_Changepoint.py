@@ -25,7 +25,7 @@
 from pyspark.sql import SparkSession
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, date
 
 spark = SparkSession.builder.getOrCreate()
 BATCH_ID      = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS cusum_analyse (
     indikator        STRING      NOT NULL,
     maaltall         STRING      NOT NULL,
     granularitet     STRING      NOT NULL,
-    periode          INT         NOT NULL,
+    analyse_dato     DATE        NOT NULL,
     verdi            DOUBLE,
     cusum_positiv    DOUBLE,
     cusum_negativ    DOUBLE,
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS pelt_analyse (
     indikator                   STRING      NOT NULL,
     maaltall                    STRING      NOT NULL,
     granularitet                STRING      NOT NULL,
-    pelt_periode                INT         NOT NULL,
+    analyse_dato                DATE        NOT NULL,
     gjennomsnitt_foer           DOUBLE,
     gjennomsnitt_etter          DOUBLE,
     endringsstoerrelse          DOUBLE,
@@ -195,9 +195,18 @@ print(f"  Månedlig frist: {monthly_frist['indikator'].nunique()} indikatorer")
 print(f"  Ukentlig frist: {weekly_frist['indikator'].nunique()} indikatorer")
 
 
-# =============================================================================
-# CELL 3 — CUSUM implementation
-# =============================================================================
+def _periode_to_date(period_int, granularitet):
+    """Convert YYYYMM (monthly) or YYYYWW (weekly) integer to an end-of-period date."""
+    year  = int(period_int) // 100
+    unit  = int(period_int) % 100
+    if granularitet == "Månedlig":
+        return (pd.Timestamp(year, unit, 1) + pd.offsets.MonthEnd(0)).date()
+    else:
+        # ISO week — return the Sunday (last day) of that week
+        return pd.Timestamp.fromisocalendar(year, unit, 7).date()
+
+
+
 
 def run_cusum(series, k=CUSUM_K, h=CUSUM_H):
     """
@@ -275,7 +284,7 @@ def run_changepoint(series, granularitet):
         return []
 
 
-def extract_changepoint_stats(series, breakpoints):
+def extract_changepoint_stats(series, breakpoints, granularitet):
     """
     For each detected breakpoint, compute before/after mean and shift.
     Returns list of dicts.
@@ -298,7 +307,7 @@ def extract_changepoint_stats(series, breakpoints):
         shift       = mean_after - mean_before
 
         results.append({
-            "pelt_periode":                int(periods[bp]) if bp < len(periods) else None,
+            "analyse_dato":                _periode_to_date(periods[bp], granularitet) if bp < len(periods) else None,
             "gjennomsnitt_foer":           round(mean_before, 4),
             "gjennomsnitt_etter":          round(mean_after, 4),
             "endringsstoerrelse":          round(shift, 4),
@@ -348,7 +357,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
                             "indikator":       indikator,
                             "maaltall":        metrikk,
                             "granularitet":    granularitet,
-                            "periode":         int(idx),
+                            "analyse_dato":    _periode_to_date(idx, granularitet),
                             "verdi":           float(ind_data[idx]) if idx in ind_data else None,
                             "cusum_positiv":   round(float(row["cusum_pos"]), 4),
                             "cusum_negativ":   round(float(row["cusum_neg"]), 4),
@@ -361,7 +370,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
         # ── Changepoint (monthly only for stability) ───────────────
         if granularitet == "Månedlig":
             breakpoints = run_changepoint(ind_data, granularitet)
-            for cp in extract_changepoint_stats(ind_data, breakpoints):
+            for cp in extract_changepoint_stats(ind_data, breakpoints, granularitet):
                         changepoint_rows.append({
                             "indikator":    indikator,
                             "maaltall":     metrikk,
@@ -374,7 +383,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
         # Weekly changepoints — separate pass
         if granularitet == "Ukentlig":
             breakpoints = run_changepoint(ind_data, granularitet)
-            for cp in extract_changepoint_stats(ind_data, breakpoints):
+            for cp in extract_changepoint_stats(ind_data, breakpoints, granularitet):
                 changepoint_rows.append({
                     "indikator":    indikator,
                     "maaltall":     metrikk,
@@ -412,7 +421,7 @@ if changepoint_rows:
 if cusum_rows:
     spark.sql(f"""
                 SELECT indikator, maaltall, granularitet,
-                             MAX(periode) AS siste_signalperiode,
+                             MAX(analyse_dato) AS siste_signaldato,
                              MAX(signalretning) AS retning
                 FROM cusum_analyse
                 WHERE signal = TRUE
@@ -424,7 +433,7 @@ if cusum_rows:
 if changepoint_rows:
     spark.sql(f"""
      SELECT indikator, maaltall, granularitet,
-         pelt_periode,
+         analyse_dato,
          ROUND(gjennomsnitt_foer, 3) AS foer,
          ROUND(gjennomsnitt_etter, 3) AS etter,
          ROUND(endringsstoerrelse, 3) AS endring,
@@ -444,7 +453,7 @@ if changepoint_rows:
 # cusum_analyse:
 #
 #   LINE CHART — CUSUM values over time
-#     X axis:  periode (Regnskapsperiode or Ukenummer)
+#     X axis:  analyse_dato (Regnskapsperiode or Ukenummer)
 #     Y axis:  cusum_positiv (upper line), cusum_negativ (lower line, negate for display)
 #     Ref line: constant at CUSUM_H threshold (default 5.0) — horizontal line
 #     Filter:  indikator slicer, maaltall slicer (Fristprosent / Behandlingstid / Produksjonsdifferanse)
@@ -457,8 +466,8 @@ if changepoint_rows:
 #              Lines returning to zero = process stabilised.
 #
 #   TABLE — Active CUSUM signals
-#     Columns: indikator | maaltall | granularitet | signalretning | periode
-#     Filter:  signal = TRUE, most recent periode per indicator
+#     Columns: indikator | maaltall | granularitet | signalretning | analyse_dato
+#     Filter:  signal = TRUE, most recent analyse_dato per indicator
 #     Sort:    metrikk, then indikator
 #     Purpose: governance team morning check — which indicators have
 #              active drift signals right now
@@ -467,7 +476,7 @@ if changepoint_rows:
 #
 #   LINE CHART with changepoint markers — overlay on existing frist% or
 #   behandlingstid time series charts
-#     Add a vertical reference line at pelt_periode
+#     Add a vertical reference line at analyse_dato
 #     Show gjennomsnitt_foer as a horizontal segment before the changepoint
 #     Show gjennomsnitt_etter as a horizontal segment after the changepoint
 #     The visual gap between the two horizontal segments = endringsstoerrelse
@@ -475,7 +484,7 @@ if changepoint_rows:
 #     or use the Analytics pane "average line" filtered to pre/post periods
 #
 #   TABLE — Detected changepoints
-#     Columns: indikator | maaltall | pelt_periode | gjennomsnitt_foer
+#     Columns: indikator | maaltall | analyse_dato | gjennomsnitt_foer
 #              | gjennomsnitt_etter | endringsstoerrelse | endringsretning | granularitet
 #     Sort:    ABS(endringsstoerrelse) DESC — largest shifts first
 #     Filter:  granularitet slicer so team can toggle Månedlig/Ukentlig view
@@ -485,29 +494,29 @@ if changepoint_rows:
 # Filters to most recent period per indicator for use in summary visuals.
 
 # Har aktiv CUSUM signal =
-# VAR SistePeriode =
+# VAR SisteDato =
 #     CALCULATE(
-#         MAX(cusum_analyse[periode]),
+#         MAX(cusum_analyse[analyse_dato]),
 #         ALLEXCEPT(cusum_analyse, cusum_analyse[indikator], cusum_analyse[maaltall])
 #     )
 # RETURN
 #     CALCULATE(
 #         MAX(cusum_analyse[signal]),
-#         cusum_analyse[periode] = SistePeriode
+#         cusum_analyse[analyse_dato] = SisteDato
 #     ) = TRUE()
 
 # Antall aktive signaler =
 # CALCULATE(
 #     DISTINCTCOUNT(cusum_analyse[indikator]),
 #     cusum_analyse[signal] = TRUE(),
-#     cusum_analyse[periode] = MAX(cusum_analyse[periode])
+#     cusum_analyse[analyse_dato] = MAX(cusum_analyse[analyse_dato])
 # )
 
 # DAX MEASURES — add to pelt_analyse table
 
-# Siste endringspunkt periode =
+# Siste endringspunkt dato =
 # CALCULATE(
-#     MAX(pelt_analyse[pelt_periode]),
+#     MAX(pelt_analyse[analyse_dato]),
 #     ALLEXCEPT(pelt_analyse, pelt_analyse[indikator],
 #               pelt_analyse[maaltall])
 # )
@@ -515,5 +524,5 @@ if changepoint_rows:
 # Endringspunkt størrelse =
 # CALCULATE(
 #     MAX(pelt_analyse[endringsstoerrelse]),
-#     pelt_analyse[pelt_periode] = [Siste endringspunkt periode]
+#     pelt_analyse[analyse_dato] = [Siste endringspunkt dato]
 # )

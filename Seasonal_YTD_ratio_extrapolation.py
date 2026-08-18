@@ -20,7 +20,7 @@
 from pyspark.sql import SparkSession
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, date
 
 spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 BATCH_ID      = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -38,7 +38,7 @@ START_YEAR    = 2015 # exclude data before this year — adjust if older data is
 spark.sql("""
 CREATE TABLE IF NOT EXISTS prognoser.frist_ (
     indikator                   STRING      NOT NULL,
-    periode                     INT         NOT NULL,
+    analyse_dato                DATE        NOT NULL,
     type                        STRING      NOT NULL,
     verdi                       DOUBLE,
     nedre_konfidensgrense       DOUBLE,
@@ -223,10 +223,10 @@ for indikator in indicators:
 
     # Write actual rows — one per month with data this year
     for mnd, ytd_val in current_ytd.items():
-        period = CURRENT_YEAR * 100 + mnd
+        analyse_dato = (pd.Timestamp(CURRENT_YEAR, mnd, 1) + pd.offsets.MonthEnd(0)).date()
         results.append({
             "indikator":         indikator,
-            "periode":           period,
+            "analyse_dato":      analyse_dato,
             "type":              "Faktisk",
             "verdi":             round(float(ytd_val), 4),
             "nedre_konfidensgrense": None,
@@ -250,10 +250,10 @@ for indikator in indicators:
         forecast_ytd = latest_ytd * (ratio_forecast / ratio_current)
         _, f_ci_lo, f_ci_hi = project_year_end(forecast_ytd, mnd, ratios)
 
-        period = CURRENT_YEAR * 100 + mnd
+        analyse_dato = (pd.Timestamp(CURRENT_YEAR, mnd, 1) + pd.offsets.MonthEnd(0)).date()
         results.append({
             "indikator":         indikator,
-            "periode":           period,
+            "analyse_dato":      analyse_dato,
             "type":              "Prognose",
             "verdi":             round(float(forecast_ytd), 4),
             "nedre_konfidensgrense": f_ci_lo,
@@ -280,8 +280,8 @@ else:
     # Idempotent — delete current year rows before inserting
     spark.sql(f"""
             DELETE FROM frist_prognose
-            WHERE periode >= {CURRENT_YEAR * 100 + 1}
-                AND periode <= {CURRENT_YEAR * 100 + 12}
+            WHERE analyse_dato >= '{CURRENT_YEAR}-01-31'
+                AND analyse_dato <= '{CURRENT_YEAR}-12-31'
     """)
 
     results_spark.write.mode("append").saveAsTable("frist_prognose")
@@ -294,14 +294,14 @@ else:
             indikator,
             MAX_BY(
                 CASE WHEN type = 'Faktisk' THEN verdi END,
-                CASE WHEN type = 'Faktisk' THEN periode END
-            )                                           AS verdi_hittil,
+                CASE WHEN type = 'Faktisk' THEN analyse_dato END
+            )                                                       AS verdi_hittil,
             MAX(prognose_aarsslutt)                      AS prognose_aarsslutt,
             MAX(CASE WHEN type = 'Prognose'
-                     AND periode = {CURRENT_YEAR * 100 + 12}
+                     AND analyse_dato = '{CURRENT_YEAR}-12-31'
                      THEN nedre_konfidensgrense END)     AS nedre_konfidensgrense,
             MAX(CASE WHEN type = 'Prognose'
-                     AND periode = {CURRENT_YEAR * 100 + 12}
+                     AND analyse_dato = '{CURRENT_YEAR}-12-31'
                      THEN oevre_konfidensgrense END)     AS oevre_konfidensgrense
         FROM frist_prognose
         WHERE kjoere_id = '{BATCH_ID}'
@@ -321,7 +321,7 @@ else:
 # prognose_aarsslutt på hver rad for enkel bruk i KPI-kort.
 #
 # LINE CHART — YTD actuals with forecast extension (primary visual)
-#   X axis:  periode (Regnskapsperiode) — full current year Jan to Dec
+#   X axis:  analyse_dato (Regnskapsperiode) — full current year Jan to Dec
 #   Lines:
 #     Solid line:  type = 'Faktisk'  — verdi (fristprosent hittil i år)
 #     Dotted line: type = 'Prognose' — verdi (prognostisert verdi for gjenstående måneder)
@@ -352,21 +352,21 @@ else:
 # CALCULATE(
 #     MAX(frist_prognose[prognose_aarsslutt]),
 #     frist_prognose[type] = "Prognose",
-#     frist_prognose[periode] = MAX(frist_prognose[periode])
+#     frist_prognose[analyse_dato] = MAX(frist_prognose[analyse_dato])
 # )
 
 # Prognose CI lower =
 # CALCULATE(
 #     MAX(frist_prognose[nedre_konfidensgrense]),
 #     frist_prognose[type] = "Prognose",
-#     frist_prognose[periode] = MAX(frist_prognose[periode])
+#     frist_prognose[analyse_dato] = MAX(frist_prognose[analyse_dato])
 # )
 
 # Prognose CI upper =
 # CALCULATE(
 #     MAX(frist_prognose[oevre_konfidensgrense]),
 #     frist_prognose[type] = "Prognose",
-#     frist_prognose[periode] = MAX(frist_prognose[periode])
+#     frist_prognose[analyse_dato] = MAX(frist_prognose[analyse_dato])
 # )
 
 # Prognose RAG =
