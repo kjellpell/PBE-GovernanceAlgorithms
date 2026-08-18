@@ -41,7 +41,7 @@ START_YEAR    = 2015  # exclude data before this year — adjust if older data i
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS cusum_analyse (
+CREATE TABLE IF NOT EXISTS analyser.cusum_analyse (
     indikator        STRING      NOT NULL,
     maaltall         STRING      NOT NULL,
     granularitet     STRING      NOT NULL,
@@ -408,13 +408,13 @@ now = datetime.now()
 if cusum_rows:
     cusum_df = pd.DataFrame(cusum_rows)
     cusum_spark = spark.createDataFrame(cusum_df)
-    cusum_spark.write.mode("overwrite").saveAsTable("cusum_analyse")
+    cusum_spark.write.mode("overwrite").saveAsTable("analyser.cusum_analyse")
     print(f"cusum_analyse skrevet: {len(cusum_rows)} rader")
 
 if changepoint_rows:
     cp_df = pd.DataFrame(changepoint_rows)
     cp_spark = spark.createDataFrame(cp_df)
-    cp_spark.write.mode("overwrite").saveAsTable("pelt_analyse")
+    cp_spark.write.mode("overwrite").saveAsTable("analyser.pelt_analyse")
     print(f"pelt_analyse skrevet: {len(changepoint_rows)} rader")
 
 # Summary — active signals
@@ -423,7 +423,7 @@ if cusum_rows:
                 SELECT indikator, maaltall, granularitet,
                              MAX(analyse_dato) AS siste_signaldato,
                              MAX(signalretning) AS retning
-                FROM cusum_analyse
+                FROM analyser.cusum_analyse
                 WHERE signal = TRUE
                     AND kjoere_id = '{BATCH_ID}'
                 GROUP BY indikator, maaltall, granularitet
@@ -438,7 +438,7 @@ if changepoint_rows:
          ROUND(gjennomsnitt_etter, 3) AS etter,
          ROUND(endringsstoerrelse, 3) AS endring,
          endringsretning
-     FROM pelt_analyse
+     FROM analyser.pelt_analyse
      WHERE kjoere_id = '{BATCH_ID}'
      ORDER BY ABS(endringsstoerrelse) DESC
     """).show(50, truncate=False)
