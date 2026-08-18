@@ -1,34 +1,29 @@
 # =============================================================================
-# Seasonal YTD ratio extrapolation for year-end frist% projection.
-# Runs nightly after main data pipeline.
+# Cohort analysis — tracks resolution rate of cases grouped by intake month.
+# Answers: are cases received recently resolving at the same rate as
+# historical cohorts, or are they accumulating?
 #
-# Method:
-#   1. Compute monthly YTD frist% per indicator for all historical years
-#   2. At each calendar month, compute the ratio: YTD_at_month / year_end
-#   3. Trim best and worst year per seasonal position (handles outliers)
-#   4. Apply trimmed mean ratio to current YTD to project year-end
-#   5. Confidence interval from trimmed variance across historical years
+# Output table: kohortanalyse
+# Power BI visual: heatmap — cohort month on Y axis, weeks since intake
+# on X axis, cell colour = fraction still open. Dark = slow resolution.
 #
-# Output table: frist_prognose
-#   One row per indicator per month — actuals for past months,
-#   forecast for remaining months of current year.
-#
-# Schedule: nightly, after main data pipeline.
-# Minimum history: 3 years per indicator. Suppressed below that.
+# Schedule: nightly after main data pipeline.
+# Minimum cohort size: 10 cases. Suppress smaller cohorts.
+# History: uses all available data — 15-20 years gives stable baseline.
 # =============================================================================
 
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
 import pandas as pd
 import numpy as np
 from datetime import datetime, date
 
 spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
-BATCH_ID      = datetime.now().strftime("%Y%m%dT%H%M%S")
-CURRENT_YEAR  = datetime.now().year
-CURRENT_MONTH = datetime.now().month
-MIN_YEARS     = 3    # minimum history for reliable seasonal pattern
-TRIM_N        = 1    # drop N best and N worst years per seasonal position
-START_YEAR    = 2015 # exclude data before this year — adjust if older data is reliable
+BATCH_ID        = datetime.now().strftime("%Y%m%dT%H%M%S")
+TODAY           = date.today()
+MIN_COHORT_SIZE = 10
+MAX_WEEKS       = 26  # track cohorts for up to 26 weeks after intake
+START_YEAR      = 2015  # exclude data before this year — adjust if older data is reliable
 
 
 # =============================================================================
@@ -36,351 +31,211 @@ START_YEAR    = 2015 # exclude data before this year — adjust if older data is
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS prognoser.frist_prognose (
+CREATE TABLE IF NOT EXISTS kohortanalyse (
     indikator                   STRING      NOT NULL,
-    analyse_dato                DATE        NOT NULL,
-    type                        STRING      NOT NULL,
-    verdi                       DOUBLE,
-    nedre_konfidensgrense       DOUBLE,
-    oevre_konfidensgrense       DOUBLE,
-    prognose_aarsslutt          DOUBLE,
+    analyse_date                DATE        NOT NULL,  -- første dag i mottaksmåneden
+    kohortstoerrelse            INT         NOT NULL,  -- saker mottatt den måneden
+    uker_siden_mottak           INT         NOT NULL,  -- uker siden kohortmottak
+    aapne_saker_antall          INT         NOT NULL,  -- saker fortsatt åpne denne uken
+    andel_aapne                 DOUBLE      NOT NULL,  -- andel åpne saker (0-1)
+    andel_aapne_historisk       DOUBLE,                -- historisk gjennomsnitt for samme uke
+    avvik_historisk             DOUBLE,                -- nåværende minus historisk
+    er_nylig_kohort             BOOLEAN     NOT NULL,  -- siste seks måneder = true
     kjoert_tidspunkt            TIMESTAMP   NOT NULL,
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Årssluttprognose for fristprosent per indikator. type=Faktisk for måneder med data og type=Prognose for gjenstående måneder. Konfidensgrensene er 80 prosent og bygger på historisk variasjon i samme sesongposisjon.'
+COMMENT 'Kohorters ferdigstillingsrate per mottaksmåned. Én rad per kombinasjon av kohort og uke.'
 """)
 
-print("prognoser.frist-tabellen er klar")
+print("kohortanalyse-tabellen er klar")
 
 
 # =============================================================================
-# CELL 2 — Load historical monthly frist% per indicator
+# CELL 2 — Load case data
 # =============================================================================
-# Full history — all years, all indicators.
+# One row per case with intake month and days to resolution (or NULL if open).
+# Uses startmilepaeldato for intake, sluttmilepaeldato for resolution.
 
-monthly = spark.sql(f"""
+cases = spark.sql(f"""
     SELECT
-        pr.indikator,
-        YEAR(pr.sluttmilepaeldato)                 AS aar,
-        MONTH(pr.sluttmilepaeldato)                AS mnd,
-        COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END)           AS innenfor,
-        COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END)             AS total
+        pr.indikator                          AS indikator,
+        CAST(DATE_TRUNC('MONTH', pr.startmilepaeldato) AS DATE) AS analyse_date,
+        pr.startmilepaeldato                  AS mottaksdato,
+        pr.sluttmilepaeldato                  AS sluttdato,
+        CASE
+            WHEN pr.sluttmilepaeldato IS NOT NULL
+            THEN DATEDIFF(pr.sluttmilepaeldato, pr.startmilepaeldato)
+            ELSE NULL
+        END                                    AS dager_til_ferdig,
+        CASE
+            WHEN pr.sluttmilepaeldato IS NULL THEN 1 ELSE 0
+        END                                    AS er_aapen
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikatorer
         ON indikatorer.pk_indikator = pr.indikator
-        WHERE pr.sluttmilepaeldato IS NOT NULL
-            AND pr.frist_dager IS NOT NULL
+        WHERE pr.startmilepaeldato IS NOT NULL
             AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
-        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
-    ORDER BY pr.indikator, aar, mnd
+            AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
 """).toPandas()
 
-print(f"Månedlige data lastet: {len(monthly)} rader, "
-      f"{monthly['indikator'].nunique()} indikatorer, "
-      f"{monthly['aar'].min()}–{monthly['aar'].max()}")
+cases["analyse_date"] = pd.to_datetime(cases["analyse_date"]).dt.normalize()
+cases["mottaksdato"]  = pd.to_datetime(cases["mottaksdato"])
+cases["sluttdato"]          = pd.to_datetime(cases["sluttdato"])
+
+print(f"Saker lastet: {len(cases):,}")
+print(f"Indikatorer:  {cases['indikator'].nunique()}")
+print(f"Datointervall: {cases['mottaksdato'].min().date()} → {cases['mottaksdato'].max().date()}")
 
 
 # =============================================================================
-# CELL 3 — Helper functions
-# =============================================================================
-
-def compute_ytd(df, indikator, year):
-    """
-    Compute cumulative YTD frist% for each month of a given year.
-    Returns dict {month: ytd_pct} for months with data.
-    """
-    ind = df[(df["indikator"] == indikator) & (df["aar"] == year)].sort_values("mnd")
-    result = {}
-    cum_innenfor = 0
-    cum_total    = 0
-    for _, row in ind.iterrows():
-        cum_innenfor += row["innenfor"]
-        cum_total    += row["total"]
-        if cum_total > 0:
-            result[int(row["mnd"])] = cum_innenfor / cum_total
-    return result
-
-
-def seasonal_ratios(df, indikator, current_year, min_years=3, trim_n=1):
-    """
-    For each calendar month 1-12, compute the trimmed mean and std of
-    the ratio: YTD_at_month / year_end across all complete historical years.
-
-    Returns dict {month: {mean_ratio, std_ratio, n_years}} or None if
-    insufficient history.
-    """
-    years = sorted(df[(df["indikator"] == indikator) &
-                      (df["aar"] < current_year)]["aar"].unique())
-
-    # Only use complete years — must have data in month 12
-    complete_years = []
-    for y in years:
-        ytd = compute_ytd(df, indikator, y)
-        if 12 in ytd:
-            complete_years.append((y, ytd))
-
-    if len(complete_years) < min_years:
-        return None
-
-    ratios = {m: [] for m in range(1, 13)}
-
-    for year, ytd in complete_years:
-        year_end = ytd.get(12)
-        if year_end is None or year_end == 0:
-            continue
-        for m, ytd_val in ytd.items():
-            ratios[m].append(ytd_val / year_end)
-
-    result = {}
-    for m in range(1, 13):
-        vals = ratios[m]
-        if len(vals) < min_years:
-            continue
-        # Trim best and worst N years
-        vals_sorted = sorted(vals)
-        if len(vals_sorted) > 2 * trim_n:
-            trimmed = vals_sorted[trim_n:-trim_n]
-        else:
-            trimmed = vals_sorted
-        result[m] = {
-            "mean_ratio": float(np.mean(trimmed)),
-            "std_ratio":  float(np.std(trimmed)) if len(trimmed) > 1 else 0.0,
-            "n_years":    len(trimmed)
-        }
-
-    return result if result else None
-
-
-def project_year_end(current_ytd, month, ratios, z=1.28):
-    """
-    Project year-end frist% from current YTD value.
-    z=1.28 gives 80% confidence interval (appropriate for governance).
-
-    Returns (year_end_estimate, ci_lower, ci_upper) or (None, None, None).
-    """
-    if month not in ratios:
-        return None, None, None
-
-    r = ratios[month]
-    if r["mean_ratio"] == 0:
-        return None, None, None
-
-    estimate = min(1.0, max(0.0, current_ytd / r["mean_ratio"]))
-
-    # Propagate uncertainty from ratio variance to year-end estimate
-    if r["std_ratio"] > 0:
-        # Delta method: var(X/r) ≈ X² * var(r) / r⁴
-        std_estimate = current_ytd * r["std_ratio"] / (r["mean_ratio"] ** 2)
-        ci_lower = max(0.0, estimate - z * std_estimate)
-        ci_upper = min(1.0, estimate + z * std_estimate)
-    else:
-        ci_lower = estimate
-        ci_upper = estimate
-
-    return (
-        round(float(estimate), 4),
-        round(float(ci_lower), 4),
-        round(float(ci_upper), 4)
-    )
-
-
-# =============================================================================
-# CELL 4 — Compute projections per indicator
+# CELL 3 — Compute cohort resolution rates
 # =============================================================================
 
 results = []
-indicators = monthly["indikator"].unique()
+today_ts = pd.Timestamp(TODAY)
 
-for indikator in indicators:
+for indikator, ind_cases in cases.groupby("indikator"):
 
-    # Compute seasonal ratios from history
-    ratios = seasonal_ratios(
-        monthly, indikator, CURRENT_YEAR,
-        min_years=MIN_YEARS, trim_n=TRIM_N
-    )
+    # All distinct cohort months for this indicator
+    cohort_months = sorted(ind_cases["analyse_date"].unique())
 
-    if ratios is None:
-        print(f"Skipping {indikator} — insufficient history")
-        continue
+    # Cutoff for "recent" cohorts — last 6 months
+    _rc_yr, _rc_mo  = TODAY.year, TODAY.month - 6
+    if _rc_mo <= 0:
+        _rc_mo += 12; _rc_yr -= 1
+    recent_cutoff = pd.Timestamp(_rc_yr, _rc_mo, 1)
+    for cohort_start in cohort_months:
+        kohort_saker = ind_cases[
+            ind_cases["analyse_date"] == cohort_start
+        ].copy()
 
-    # Current year actuals
-    current_ytd = compute_ytd(monthly, indikator, CURRENT_YEAR)
-
-    if not current_ytd:
-        print(f"Skipping {indikator} — no current year data")
-        continue
-
-    # Latest month with data
-    latest_month = max(current_ytd.keys())
-    latest_ytd   = current_ytd[latest_month]
-
-    # Year-end estimate from latest available YTD
-    year_end_est, ci_lo, ci_hi = project_year_end(
-        latest_ytd, latest_month, ratios
-    )
-
-    # Write actual rows — one per month with data this year
-    for mnd, ytd_val in current_ytd.items():
-        analyse_dato = (pd.Timestamp(CURRENT_YEAR, mnd, 1) + pd.offsets.MonthEnd(0)).date()
-        results.append({
-            "indikator":         indikator,
-            "analyse_dato":      analyse_dato,
-            "type":              "Faktisk",
-            "verdi":             round(float(ytd_val), 4),
-            "nedre_konfidensgrense": None,
-            "oevre_konfidensgrense": None,
-            "prognose_aarsslutt": year_end_est,
-            "kjoert_tidspunkt":  datetime.now(),
-            "kjoere_id":         BATCH_ID,
-        })
-
-    # Write forecast rows — remaining months of current year
-    for mnd in range(latest_month + 1, 13):
-        if mnd not in ratios:
+        kohortstoerrelse = len(kohort_saker)
+        if kohortstoerrelse < MIN_COHORT_SIZE:
             continue
-        # Project forward: expected YTD at month mnd given current trajectory
-        # Use ratio at forecast month relative to ratio at current month
-        # to estimate what YTD will be at that future month
-        ratio_current  = ratios[latest_month]["mean_ratio"]
-        ratio_forecast = ratios[mnd]["mean_ratio"]
-        if ratio_current == 0:
-            continue
-        forecast_ytd = latest_ytd * (ratio_forecast / ratio_current)
-        _, f_ci_lo, f_ci_hi = project_year_end(forecast_ytd, mnd, ratios)
 
-        analyse_dato = (pd.Timestamp(CURRENT_YEAR, mnd, 1) + pd.offsets.MonthEnd(0)).date()
-        results.append({
-            "indikator":         indikator,
-            "analyse_dato":      analyse_dato,
-            "type":              "Prognose",
-            "verdi":             round(float(forecast_ytd), 4),
-            "nedre_konfidensgrense": f_ci_lo,
-            "oevre_konfidensgrense": f_ci_hi,
-            "prognose_aarsslutt": year_end_est,
-            "kjoert_tidspunkt":  datetime.now(),
-            "kjoere_id":         BATCH_ID,
-        })
+        cohort_start = pd.Timestamp(cohort_start)
+        is_recent     = cohort_start >= recent_cutoff
 
-print(f"\nProjection rows computed: {len(results)}")
-print(f"Indicators projected: {len(set(r['indikator'] for r in results))}")
+        # For each week bucket up to MAX_WEEKS, count how many cases
+        # from this cohort were still open at that point in time.
+        for uke in range(1, MAX_WEEKS + 1):
+            reference_date = cohort_start + pd.Timedelta(weeks=uke)
+
+            # Can't measure future weeks for recent cohorts
+            if reference_date > today_ts:
+                break
+
+            # Cases still open at reference_date:
+            # either never finished, or finished after reference_date
+            aapne_saker_antall = len(kohort_saker[
+                kohort_saker["sluttdato"].isna() |
+                (kohort_saker["sluttdato"] > reference_date)
+            ])
+
+            andel_aapne = aapne_saker_antall / kohortstoerrelse
+
+            results.append({
+                "indikator":             indikator,
+                "analyse_date":          cohort_start.date(),
+                "kohortstoerrelse":      kohortstoerrelse,
+                "uker_siden_mottak":     uke,
+                "aapne_saker_antall":    aapne_saker_antall,
+                "andel_aapne":           round(andel_aapne, 4),
+                "er_nylig_kohort":       is_recent,
+            })
+
+print(f"Cohort rows computed: {len(results):,}")
+
+
+# =============================================================================
+# CELL 4 — Compute historical baseline per indicator × week
+# =============================================================================
+# Historical average andel_åpen at each week across all non-recent cohorts.
+# Used to compare recent cohorts against — are they resolving faster or slower?
+# Uses trimmed mean (drop top and bottom 10%) to exclude exceptional years.
+
+df = pd.DataFrame(results)
+
+historical = (
+    df[~df["er_nylig_kohort"]]
+    .groupby(["indikator", "uker_siden_mottak"]) ["andel_aapne"]
+    .apply(lambda x: float(np.mean(
+        np.sort(x.to_numpy())[
+            max(0, int(len(x) * 0.1)) : max(1, int(len(x) * 0.9))
+        ]
+    )) if len(x) >= 5 else float(x.mean()))
+    .reset_index()
+    .rename(columns={"andel_aapne": "andel_aapne_historisk"})
+)
+
+df = df.merge(historical, on=["indikator", "uker_siden_mottak"], how="left")
+df["avvik_historisk"] = df["andel_aapne"] - df["andel_aapne_historisk"]
+df["avvik_historisk"] = df["avvik_historisk"].round(4)
+
+print(f"Historisk grunnlinje beregnet for {historical['indikator'].nunique()} indikatorer")
 
 
 # =============================================================================
 # CELL 5 — Write to Lakehouse
 # =============================================================================
 
-if not results:
-    print("Ingen prognoseresultater å skrive.")
+if df.empty:
+    print("Ingen kohortresultater å skrive.")
 else:
-    df = pd.DataFrame(results)
+    df["kjoert_tidspunkt"] = datetime.now()
+    df["kjoere_id"]        = BATCH_ID
+
+    # Idempotent — full overwrite since cohort history is recomputed each run.
+    # Open cases change as they resolve, so historical rows can change too.
     results_spark = spark.createDataFrame(df)
+    results_spark.write.mode("overwrite").saveAsTable("analyser.kohortanalyse")
 
-    # Idempotent — delete current year rows before inserting
-    spark.sql(f"""
-            DELETE FROM prognoser.frist_prognose
-            WHERE analyse_dato >= '{CURRENT_YEAR}-01-31'
-                AND analyse_dato <= '{CURRENT_YEAR}-12-31'
-    """)
+    print(f"\nkohortanalyse skrevet: {len(df):,} rader")
+    print(f"Indikatorer: {df['indikator'].nunique()}")
+    print(f"Kohorter:    {df['analyse_date'].nunique()}")
+    print(f"Nylige kohorter markert: {df[df['er_nylig_kohort']]['analyse_date'].nunique()}")
 
-    results_spark.write.mode("append").saveAsTable("prognoser.frist_prognose")
-
-    print(f"frist_prognose skrevet: {len(results)} rader")
-
-    # Summary — year-end estimates for current indicators
-    spark.sql(f"""
+    # Summary — recent cohorts vs historical baseline at week 12
+    print("\n=== RECENT COHORTS VS BASELINE AT WEEK 12 ===")
+    spark.sql("""
         SELECT
-            indikator,
-            MAX_BY(
-                CASE WHEN type = 'Faktisk' THEN verdi END,
-                CASE WHEN type = 'Faktisk' THEN analyse_dato END
-            )                                                       AS verdi_hittil,
-            MAX(prognose_aarsslutt)                      AS prognose_aarsslutt,
-            MAX(CASE WHEN type = 'Prognose'
-                     AND analyse_dato = '{CURRENT_YEAR}-12-31'
-                     THEN nedre_konfidensgrense END)     AS nedre_konfidensgrense,
-            MAX(CASE WHEN type = 'Prognose'
-                     AND analyse_dato = '{CURRENT_YEAR}-12-31'
-                     THEN oevre_konfidensgrense END)     AS oevre_konfidensgrense
-        FROM prognoser.frist_prognose
-        WHERE kjoere_id = '{BATCH_ID}'
-        GROUP BY indikator
-        ORDER BY prognose_aarsslutt ASC
+                        indikator,
+                        analyse_date,
+                        kohortstoerrelse,
+                        ROUND(andel_aapne * 100, 1)             AS andel_aapne,
+                        ROUND(andel_aapne_historisk * 100, 1)   AS andel_aapne_historisk,
+                        ROUND(avvik_historisk * 100, 1)         AS avvik_prosentpoeng
+                FROM analyser.kohortanalyse
+                WHERE uker_siden_mottak = 12
+                    AND er_nylig_kohort = TRUE
+                    AND andel_aapne_historisk IS NOT NULL
+                ORDER BY avvik_historisk DESC, indikator
     """).show(30, truncate=False)
 
 
 # =============================================================================
-# CELL 6 — Power BI visual guidance and DAX measures
+# CELL 6 — Power BI visual notes
 # =============================================================================
+# HEATMAP (primary visual):
+#   Rows:    analyse_date (mottaksmåned) — nyere kohorter øverst
+#   Columns: uker_siden_mottak (1 to 26)
+#   Values:  andel_aapne — format as %
+#   Colour:  gradient dark (high %) → light (low %)
+#            Dark cell = many cases still open at that week = slow resolution
+#   Filter:  er_nylig_kohort = TRUE for governance team view
+#            Remove filter for full historical view
 #
-# OUTPUT TABLE → VISUALS
+# LINE CHART (secondary visual — recent vs historical):
+#   X axis:  uker_siden_mottak
+#   Lines:   andel_aapne per nyere analyse_date (one line per month)
+#            andel_aapne_historisk as a single reference line (trimmed mean)
+#   Shading: area between recent lines and historical line
+#            Above historical = resolving slower than normal
+#            Below historical = resolving faster than normal
 #
-# frist_prognose inneholder både faktiske rader (type='Faktisk') og
-# prognoserader (type='Prognose') for inneværende år, med
-# prognose_aarsslutt på hver rad for enkel bruk i KPI-kort.
-#
-# LINE CHART — YTD actuals with forecast extension (primary visual)
-#   X axis:  analyse_dato (Regnskapsperiode) — full current year Jan to Dec
-#   Lines:
-#     Solid line:  type = 'Faktisk'  — verdi (fristprosent hittil i år)
-#     Dotted line: type = 'Prognose' — verdi (prognostisert verdi for gjenstående måneder)
-#     Shaded band: nedre_konfidensgrense til oevre_konfidensgrense for prognosedelen
-#                  — shows uncertainty range, narrows with more history
-#     Flat ref line: year-end target from alert_config (Frist målverdi DAX measure)
-#                  — horizontal line the projection must end above
-#   Filter:  indikator slicer — one chart per Fagområde as small multiples
-#   Reading: dotted line ending above the target line = on track.
-#            Dotted line ending below = at risk. Shaded band crossing
-#            the target line = uncertain outcome.
-#   Note:    Remove report period filter on this visual so all months plot.
-#            Use visual-level filter instead of report slicer.
-#
-# KPI CARD — Year-end estimate
-#   Measure: Prognose årslutt (see DAX below)
-#   Show alongside current YTD value for context
-#   Conditional format: green if above Frist målverdi, red if below
-#
-# TABLE — Projection summary per indicator
-#   Columns: indikator | verdi_hittil | prognose_aarsslutt | nedre_konfidensgrense | oevre_konfidensgrense | Mål
-#   Sort:    prognose årslutt ASC — most at-risk indicators first
-#   Conditional format on Prognose årslutt: RAG vs Frist målverdi
-#
-# DAX MEASURES — add to frist_prognose table in semantic model
-
-# Prognose årslutt =
-# CALCULATE(
-#     MAX(frist_prognose[prognose_aarsslutt]),
-#     frist_prognose[type] = "Prognose",
-#     frist_prognose[analyse_dato] = MAX(frist_prognose[analyse_dato])
-# )
-
-# Prognose CI lower =
-# CALCULATE(
-#     MAX(frist_prognose[nedre_konfidensgrense]),
-#     frist_prognose[type] = "Prognose",
-#     frist_prognose[analyse_dato] = MAX(frist_prognose[analyse_dato])
-# )
-
-# Prognose CI upper =
-# CALCULATE(
-#     MAX(frist_prognose[oevre_konfidensgrense]),
-#     frist_prognose[type] = "Prognose",
-#     frist_prognose[analyse_dato] = MAX(frist_prognose[analyse_dato])
-# )
-
-# Prognose RAG =
-# VAR Prognose = [Prognose årslutt]
-# VAR Mål =
-#     CALCULATE(
-#         MIN(alert_config[terskel_amber]),
-#         alert_config[indikator] = MAX(frist_prognose[indikator]),
-#         alert_config[aktiv] = TRUE()
-#     )
-# RETURN
-#     IF(ISBLANK(Prognose) || ISBLANK(Mål), BLANK(),
-#     IF(Prognose >= Mål, 3,
-#     IF(Prognose >= Mål * 0.95, 2,
-#     1)))
-# -- 3=Green (on track), 2=Amber (marginal), 1=Red (at risk)
-# -- 5% tolerance band below target before going red
+# KEY SIGNAL:
+#   A recent cohort line consistently above the historical reference line
+#   means cases from that intake month are sitting longer than normal.
+#   This appears in the portfolio before it appears in frist%.
+#   Governance team acts here — board sees it later in portfolio age chart.
