@@ -62,24 +62,24 @@ print("prognoser.frist-tabellen er klar")
 monthly = spark.sql(f"""
     SELECT
         pr.indikator,
-        YEAR(pr.sluttmilepaeldato)                 AS år,
+        YEAR(pr.sluttmilepaeldato)                 AS aar,
         MONTH(pr.sluttmilepaeldato)                AS mnd,
         COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END)           AS innenfor,
         COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END)             AS total
     FROM saksbehandling.faser pr
-    INNER JOIN felles.indikatorer indikatorer
+    INNER JOIN felles.indikator indikatorer
         ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
             AND pr.frist IS NOT NULL
             AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
-    ORDER BY pr.indikator, år, mnd
+    ORDER BY pr.indikator, aar, mnd
 """).toPandas()
 
 print(f"Månedlige data lastet: {len(monthly)} rader, "
       f"{monthly['indikator'].nunique()} indikatorer, "
-      f"{monthly['år'].min()}–{monthly['år'].max()}")
+      f"{monthly['aar'].min()}–{monthly['aar'].max()}")
 
 
 # =============================================================================
@@ -91,7 +91,7 @@ def compute_ytd(df, indikator, year):
     Compute cumulative YTD frist% for each month of a given year.
     Returns dict {month: ytd_pct} for months with data.
     """
-    ind = df[(df["indikator"] == indikator) & (df["år"] == year)].sort_values("mnd")
+    ind = df[(df["indikator"] == indikator) & (df["aar"] == year)].sort_values("mnd")
     result = {}
     cum_innenfor = 0
     cum_total    = 0
@@ -112,7 +112,7 @@ def seasonal_ratios(df, indikator, current_year, min_years=3, trim_n=1):
     insufficient history.
     """
     years = sorted(df[(df["indikator"] == indikator) &
-                      (df["år"] < current_year)]["år"].unique())
+                      (df["aar"] < current_year)]["aar"].unique())
 
     # Only use complete years — must have data in month 12
     complete_years = []

@@ -74,7 +74,7 @@ cases = spark.sql(f"""
             WHEN pr.sluttmilepaeldato IS NULL THEN 1 ELSE 0
         END                                    AS er_aapen
     FROM saksbehandling.faser pr
-    INNER JOIN felles.indikatorer indikatorer
+    INNER JOIN felles.indikator indikatorer
         ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.startmilepaeldato IS NOT NULL
             AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
