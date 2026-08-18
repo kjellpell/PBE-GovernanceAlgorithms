@@ -36,7 +36,7 @@ START_YEAR    = 2015 # exclude data before this year — adjust if older data is
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS prognoser.frist_ (
+CREATE TABLE IF NOT EXISTS prognoser.frist_prognose (
     indikator                   STRING      NOT NULL,
     analyse_dato                DATE        NOT NULL,
     type                        STRING      NOT NULL,
@@ -279,12 +279,12 @@ else:
 
     # Idempotent — delete current year rows before inserting
     spark.sql(f"""
-            DELETE FROM frist_prognose
+            DELETE FROM prognoser.frist_prognose
             WHERE analyse_dato >= '{CURRENT_YEAR}-01-31'
                 AND analyse_dato <= '{CURRENT_YEAR}-12-31'
     """)
 
-    results_spark.write.mode("append").saveAsTable("frist_prognose")
+    results_spark.write.mode("append").saveAsTable("prognoser.frist_prognose")
 
     print(f"frist_prognose skrevet: {len(results)} rader")
 
@@ -303,7 +303,7 @@ else:
             MAX(CASE WHEN type = 'Prognose'
                      AND analyse_dato = '{CURRENT_YEAR}-12-31'
                      THEN oevre_konfidensgrense END)     AS oevre_konfidensgrense
-        FROM frist_prognose
+        FROM prognoser.frist_prognose
         WHERE kjoere_id = '{BATCH_ID}'
         GROUP BY indikator
         ORDER BY prognose_aarsslutt ASC
