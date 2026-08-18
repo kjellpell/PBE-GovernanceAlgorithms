@@ -219,7 +219,7 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H):
     if len(series) < 8:
         return None
 
-    values = series.dropna().values
+    values = series.dropna().values.astype(float)
     if len(values) < 8:
         return None
 
@@ -265,7 +265,7 @@ def run_changepoint(series, granularitet):
         print("ruptures not installed — skipping changepoint detection")
         return []
 
-    values = series.dropna().values
+    values = series.dropna().values.astype(float)
     min_obs = MIN_MONTHLY if granularitet == "Månedlig" else MIN_WEEKLY
 
     if len(values) < min_obs:
@@ -289,7 +289,7 @@ def extract_changepoint_stats(series, breakpoints, granularitet):
     For each detected breakpoint, compute before/after mean and shift.
     Returns list of dicts.
     """
-    values = series.dropna().values
+    values = series.dropna().values.astype(float)
     periods = series.dropna().index.tolist()
     results = []
 
