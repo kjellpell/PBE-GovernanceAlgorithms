@@ -58,7 +58,7 @@ totals = spark.sql("""
         FROM Fakturalinjer fakturalinjer
         INNER JOIN saksbehandling.faser faser
                 ON faser.pk_faser = fakturalinjer.fk_faser
-        INNER JOIN felles.indikatorer indikatorer
+        INNER JOIN felles.indikator indikatorer
                 ON indikatorer.pk_indikator = faser.indikator
     WHERE fk_faser  IS NOT NULL
       AND produktnr   IS NOT NULL

@@ -95,7 +95,7 @@ monthly_frist = spark.sql(f"""
                  / COUNT(CASE WHEN pr.frist IS NOT NULL THEN 1 END)
         END AS verdi
     FROM saksbehandling.faser pr
-    INNER JOIN felles.indikatorer indikatorer
+    INNER JOIN felles.indikator indikatorer
         ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
             AND pr.frist IS NOT NULL
@@ -113,7 +113,7 @@ monthly_tid = spark.sql(f"""
                 (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
                 AVG(pr.tidsbruk) AS verdi
         FROM saksbehandling.faser pr
-        INNER JOIN felles.indikatorer indikatorer
+        INNER JOIN felles.indikator indikatorer
             ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
             AND pr.tidsbruk IS NOT NULL
@@ -133,7 +133,7 @@ monthly_prod = spark.sql(f"""
                 COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
                 - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
         FROM saksbehandling.faser pr
-        INNER JOIN felles.indikatorer indikatorer
+        INNER JOIN felles.indikator indikatorer
             ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.indikator NOT LIKE '%avtalt%'
             AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
@@ -159,7 +159,7 @@ weekly_frist = spark.sql(f"""
                               THEN 1 END)
         END                                                         AS verdi
     FROM saksbehandling.faser pr
-    INNER JOIN felles.indikatorer indikatorer
+    INNER JOIN felles.indikator indikatorer
         ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
             AND pr.frist IS NOT NULL
@@ -179,7 +179,7 @@ weekly_prod = spark.sql(f"""
                         COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
                         - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
                 FROM saksbehandling.faser pr
-                INNER JOIN felles.indikatorer indikatorer
+                INNER JOIN felles.indikator indikatorer
                     ON indikatorer.pk_indikator = pr.indikator
                 WHERE pr.indikator NOT LIKE '%avtalt%'
                     AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
