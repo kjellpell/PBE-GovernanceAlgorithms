@@ -21,7 +21,7 @@
 from pyspark.sql import SparkSession
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, date
 
 spark = SparkSession.builder.getOrCreate()
 BATCH_ID    = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -45,7 +45,7 @@ spark.sql("""
 CREATE TABLE IF NOT EXISTS ewma_analyse (
     indikator           STRING      NOT NULL,
     maaltall            STRING      NOT NULL,  -- Fristprosent / Behandlingstid / Produksjonsdifferanse
-    periode             INT         NOT NULL,  -- AAAAMM
+    analyse_dato        DATE        NOT NULL,
     verdi               DOUBLE,                -- rå månedlig verdi
     ewma_sakte          DOUBLE,                -- alfa=0.1 utjevnet verdi
     ewma_rask           DOUBLE,                -- alfa=0.3 utjevnet verdi
@@ -191,7 +191,9 @@ def process_metric(df, maaltall_navn, slope_threshold=0.002):
             rows.append({
                 "indikator":       indikator,
                 "maaltall":        maaltall_navn,
-                "periode":         int(row["period"]),
+                "analyse_dato":    (pd.Timestamp(int(row["period"]) // 100,
+                                                 int(row["period"]) % 100, 1)
+                                    + pd.offsets.MonthEnd(0)).date(),
                 "verdi":           round(float(row["verdi"]), 4)
                                    if pd.notna(row["verdi"]) else None,
                 "ewma_sakte":      round(float(row["ewma_slow"]), 4)
@@ -230,8 +232,8 @@ print(f"  Produksjonsdifferanse: {len(prod_rows):,} rader")
 
 # Trend summary for most recent period
 df = pd.DataFrame(all_rows)
-latest = df[df["periode"] == df["periode"].max()]
-print(f"\n=== TRENDSAMMENDRAG — SISTE PERIODE {df['periode'].max()} ===")
+latest = df[df["analyse_dato"] == df["analyse_dato"].max()]
+print(f"\n=== TRENDSAMMENDRAG — SISTE PERIODE {df['analyse_dato'].max()} ===")
 print(latest.groupby(["maaltall", "trendretning"]) ["indikator"].count()
     .unstack(fill_value=0).to_string())
 
@@ -259,7 +261,7 @@ else:
                             ROUND(ewma_rask,   3) AS ewma_rask,
                             trendretning
             FROM ewma_analyse
-            WHERE periode = (SELECT MAX(periode) FROM ewma_analyse)
+            WHERE analyse_dato = (SELECT MAX(analyse_dato) FROM ewma_analyse)
                 AND maaltall = 'Fristprosent'
                 AND trendretning != 'Stabil'
             ORDER BY trendretning, indikator
@@ -276,7 +278,7 @@ else:
 # for alle tre måltall. Én rad per indikator per måned per måltall.
 #
 # LINE CHART — Raw + EWMA trend overlay (primary visual, board report)
-#   X axis:  periode (Regnskapsperiode)
+#   X axis:  analyse_dato (Regnskapsperiode)
 #   Lines:
 #     Thin line, low opacity: verdi — faktisk månedlig verdi
 #     Bold line:              ewma_sakte — utjevnet trend (alfa=0.1)
@@ -301,7 +303,7 @@ else:
 #   EWMA crossing zero from below = backlog starting to build
 #
 # INDICATOR CARD — Current trend direction
-#   Show trendretning for most recent periode
+#   Show trendretning for most recent analyse_dato
 #   Conditional format: Synkende → red, Stigende → green, Stabil → neutral
 #   Use ewma_sakte trend for board, ewma_rask for governance team
 #
@@ -322,7 +324,7 @@ else:
 # EWMA Trend retning =
 # CALCULATE(
 #     MAX(ewma_analyse[trendretning]),
-#     ewma_analyse[periode] = MAX(ewma_analyse[periode])
+#     ewma_analyse[analyse_dato] = MAX(ewma_analyse[analyse_dato])
 # )
 
 # EWMA Trend verdi =
