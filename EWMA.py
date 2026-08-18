@@ -42,7 +42,7 @@ ALPHA_FAST  = 0.3
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS ewma_analyse (
+CREATE TABLE IF NOT EXISTS analyser.ewma_analyse (
     indikator           STRING      NOT NULL,
     maaltall            STRING      NOT NULL,  -- Fristprosent / Behandlingstid / Produksjonsdifferanse
     analyse_dato        DATE        NOT NULL,
@@ -249,7 +249,7 @@ else:
 
     # Full overwrite — EWMA recalculated from scratch each run since
     # it depends on the full history (each value depends on all prior values)
-    results_spark.write.mode("overwrite").saveAsTable("ewma_analyse")
+    results_spark.write.mode("overwrite").saveAsTable("analyser.ewma_analyse")
 
     print(f"ewma_analyse skrevet: {len(all_rows):,} rader")
 
@@ -260,8 +260,8 @@ else:
                             ROUND(ewma_sakte,  3) AS ewma_sakte,
                             ROUND(ewma_rask,   3) AS ewma_rask,
                             trendretning
-            FROM ewma_analyse
-            WHERE analyse_dato = (SELECT MAX(analyse_dato) FROM ewma_analyse)
+            FROM analyser.ewma_analyse
+            WHERE analyse_dato = (SELECT MAX(analyse_dato) FROM analyser.ewma_analyse)
                 AND maaltall = 'Fristprosent'
                 AND trendretning != 'Stabil'
             ORDER BY trendretning, indikator
