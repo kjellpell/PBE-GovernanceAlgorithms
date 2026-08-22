@@ -8,7 +8,9 @@
 # prisliste_varer for names and categories, and Prosesser for case metadata.
 #
 # No date filter is applied — all rows in Fakturalinjer are included.
-# No indicator filter — covers all case types, not just building permits.
+# Scoped to Byggesak and Eiendomssak fagomraade (see the fagomraade filter
+# below) — not building permits alone, but not literally "all case types"
+# either (Plansak is excluded).
 #
 # Output table : building_application_type  (full overwrite, nightly)
 # Sources      : Fakturalinjer
@@ -32,7 +34,7 @@ OUTPUT_TABLE = "building_application_type"
 
 spark.sql(f"""
 CREATE TABLE IF NOT EXISTS {OUTPUT_TABLE} (
-    pk_faser           STRING    NOT NULL,
+    fk_faser           STRING    NOT NULL,
     primary_product_code STRING    NOT NULL,
     kjoert_tidspunkt          TIMESTAMP NOT NULL,
     kjoere_id            STRING    NOT NULL
@@ -53,7 +55,7 @@ print(f"Output table {OUTPUT_TABLE} ready")
 totals = spark.sql("""
     SELECT
         CAST(fk_faser AS STRING) AS fk_faser,
-        CAST(p  roduktnr  AS STRING) AS produktnr,
+        CAST(produktnr AS STRING) AS produktnr,
         SUM(linjebeloep)           AS total_belop
         FROM Fakturalinjer fakturalinjer
         INNER JOIN saksbehandling.faser faser
