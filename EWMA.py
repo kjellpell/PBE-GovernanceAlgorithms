@@ -59,7 +59,38 @@ USING DELTA
 COMMENT 'EWMA-utjevnede trendlinjer per indikator og måltall. Brukes i trenddiagrammer for styre- og virksomhetsoppfølging.'
 """)
 
-print("ewma_analyse-tabellen er klar")
+# Pivoted companion table — one row per indikator/måned, columns per måltall.
+# Joins cleanly onto faser via the shared indikator/dato dimensioner without fan-out.
+spark.sql("""
+CREATE TABLE IF NOT EXISTS analyser.ewma_analyse_wide (
+    indikator                  STRING      NOT NULL,
+    analyse_dato                DATE        NOT NULL,
+    verdi_frist                 DOUBLE,
+    ewma_sakte_frist             DOUBLE,
+    ewma_rask_frist              DOUBLE,
+    ewma_helning_sakte_frist     DOUBLE,
+    ewma_helning_rask_frist      DOUBLE,
+    trendretning_frist           STRING,
+    verdi_tid                   DOUBLE,
+    ewma_sakte_tid               DOUBLE,
+    ewma_rask_tid                DOUBLE,
+    ewma_helning_sakte_tid       DOUBLE,
+    ewma_helning_rask_tid        DOUBLE,
+    trendretning_tid             STRING,
+    verdi_prod                  DOUBLE,
+    ewma_sakte_prod              DOUBLE,
+    ewma_rask_prod               DOUBLE,
+    ewma_helning_sakte_prod      DOUBLE,
+    ewma_helning_rask_prod       DOUBLE,
+    trendretning_prod            STRING,
+    kjoert_tidspunkt             TIMESTAMP   NOT NULL,
+    id                           STRING      NOT NULL
+)
+USING DELTA
+COMMENT 'Pivotert ewma_analyse — én rad per indikator og måned, med egne kolonner per måltall. Kan joines direkte inn i faser via delte indikator- og datodimensjoner uten fan-out.'
+""")
+
+print("ewma_analyse- og ewma_analyse_wide-tabellene er klare")
 
 
 # =============================================================================
@@ -125,6 +156,12 @@ monthly_prod = spark.sql(f"""
         ORDER BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
                          MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
 """).toPandas()
+
+# Spark DECIMAL columns (e.g. AVG(tidsbruk)) arrive as decimal.Decimal objects,
+# which cannot be mixed with floats in the EWMA arithmetic.
+for _df in (monthly_frist, monthly_tid, monthly_prod):
+    _df["verdi"]  = pd.to_numeric(_df["verdi"], errors="coerce").astype("float64")
+    _df["period"] = pd.to_numeric(_df["period"], errors="coerce").astype("int64")
 
 print(f"frist:    {monthly_frist['indikator'].nunique()} indikatorer, "
             f"{monthly_frist['period'].nunique()} måneder")
@@ -267,89 +304,33 @@ else:
             ORDER BY trendretning, indikator
     """).show(30, truncate=False)
 
+    # Pivot to one row per indikator/måned so it can join onto faser without fan-out
+    MAALTALL_SUFFIX = {
+        "Fristprosent":           "frist",
+        "Behandlingstid":         "tid",
+        "Produksjonsdifferanse":  "prod",
+    }
+    df_wide_src = df.copy()
+    df_wide_src["maaltall"] = df_wide_src["maaltall"].map(MAALTALL_SUFFIX)
+
+    df_wide = df_wide_src.pivot_table(
+        index=["indikator", "analyse_dato"],
+        columns="maaltall",
+        values=["verdi", "ewma_sakte", "ewma_rask", "ewma_helning_sakte", "ewma_helning_rask", "trendretning"],
+        aggfunc="first",
+    )
+    df_wide.columns = [f"{metric}_{suffix}" for metric, suffix in df_wide.columns]
+    df_wide = df_wide.reset_index()
+    df_wide["kjoert_tidspunkt"] = datetime.now()
+    df_wide["id"] = BATCH_ID
+
+    results_wide_spark = spark.createDataFrame(df_wide)
+    results_wide_spark.write.mode("overwrite").saveAsTable("analyser.ewma_analyse_wide")
+
+    print(f"ewma_analyse_wide skrevet: {len(df_wide):,} rader")
+
 
 # =============================================================================
-# CELL 6 — Power BI visual guidance and DAX measures
+# Power BI/DAX guidance moved to separate documentation:
+#   see EWMA_POWERBI_DAX.md
 # =============================================================================
-#
-# OUTPUT TABLE → VISUALS
-#
-# ewma_analyse inneholder rå månedlige verdier og utjevnede EWMA-linjer
-# for alle tre måltall. Én rad per indikator per måned per måltall.
-#
-# LINE CHART — Raw + EWMA trend overlay (primary visual, board report)
-#   X axis:  analyse_dato (Regnskapsperiode)
-#   Lines:
-#     Thin line, low opacity: verdi — faktisk månedlig verdi
-#     Bold line:              ewma_sakte — utjevnet trend (alfa=0.1)
-#     Optional dashed line:   ewma_rask — raskere signal (alfa=0.3)
-#   Filter:  maaltall = 'Fristprosent' for styreoversikt
-#            maaltall-utvalg for virksomhetsoppfølging
-#            indikator slicer — one chart per Fagområde as small multiples
-#   Ref line: Frist målverdi (constant from alert_config) — horizontal
-#   Reading:  EWMA line bending downward toward the reference line = risk
-#             building. EWMA line flat or rising = stable/improving.
-#             The distance between raw line and EWMA line shows how much
-#             monthly variance there is — wide gap = volatile indicator.
-#
-# LINE CHART — Behandlingstid trend (governance report)
-#   Same pattern but maaltall = 'Behandlingstid'
-#   No reference line needed — governance team reads direction
-#   EWMA slope tells you if processing is getting faster or slower
-#
-# LINE CHART — Production balance trend (governance report)
-#   maaltall = 'Produksjonsdifferanse'
-#   Ref line: zero — EWMA above zero = intake outpacing production
-#   EWMA crossing zero from below = backlog starting to build
-#
-# INDICATOR CARD — Current trend direction
-#   Show trendretning for most recent analyse_dato
-#   Conditional format: Synkende → red, Stigende → green, Stabil → neutral
-#   Use ewma_sakte trend for board, ewma_rask for governance team
-#
-# DAX MEASURES — add to ewma_analyse table in semantic model
-
-# EWMA Sakte fristprosent =
-# CALCULATE(
-#     MAX(ewma_analyse[ewma_sakte]),
-#     ewma_analyse[maaltall] = "Fristprosent"
-# )
-
-# EWMA Rask fristprosent =
-# CALCULATE(
-#     MAX(ewma_analyse[ewma_rask]),
-#     ewma_analyse[maaltall] = "Fristprosent"
-# )
-
-# EWMA Trend retning =
-# CALCULATE(
-#     MAX(ewma_analyse[trendretning]),
-#     ewma_analyse[analyse_dato] = MAX(ewma_analyse[analyse_dato])
-# )
-
-# EWMA Trend verdi =
-# -- Numeric version for conditional formatting
-# -- 1 = Stigende (green), -1 = Synkende (red), 0 = Stabil (neutral)
-# VAR Retning = [EWMA Trend retning]
-# RETURN
-#     SWITCH(Retning, "Stigende", 1, "Synkende", -1, 0)
-
-# EWMA Behandlingstid =
-# CALCULATE(
-#     MAX(ewma_analyse[ewma_sakte]),
-#     ewma_analyse[maaltall] = "Behandlingstid"
-# )
-
-# EWMA Produksjon differanse =
-# CALCULATE(
-#     MAX(ewma_analyse[ewma_sakte]),
-#     ewma_analyse[maaltall] = "Produksjonsdifferanse"
-# )
-#
-# NOTE ON ALPHA CHOICE FOR BOARD VS GOVERNANCE:
-# Board report: always use ewma_sakte (alpha=0.1). Stable line, clear direction,
-#               not distracted by single-month noise. Changes slowly and
-#               deliberately — appropriate for monthly meeting cadence.
-# Governance team: use ewma_rask (alpha=0.3) for early warning. Picks up
-#                  trend changes 2-3 months sooner than ewma_sakte. Accept
-#                  more false signals as the tradeoff for earlier detection.

@@ -6,10 +6,12 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 
 | File | Output table(s) | Schedule |
 |---|---|---|
-| `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse` | Nightly after main pipeline |
+| `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | Nightly after main data pipeline |
 | `EWMA.py` | `ewma_analyse` | Nightly after main pipeline |
-| `Cohort_analysis.py` | `cohort_results` | Nightly after main pipeline |
-| `Seasonal_YTD_ratio_extrapolation.py` | `projection_results` | Nightly after main pipeline |
+| `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
+| `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Nightly after main pipeline |
+| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Nightly after main pipeline |
+| `Stalled_Case_Early_Warning.py` | `sak_stillstand_varsler` | Nightly after main pipeline |
 
 ## CUSUM_Changepoint.py
 
@@ -22,6 +24,16 @@ Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per in
 - **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `START_YEAR`
 - `signalretning` og `endringsretning` har verdiene `Økning` og `Nedgang`.
 - `signal` er en boolsk verdi.
+
+### pelt_analyse_detaljer
+
+Breaks down the most recent PELT changepoint per indikator/maaltall/granularitet by `enhet` (team) and `fasetittel` (process step), reusing PELT's before/after window instead of re-running changepoint detection.
+
+- Only drills into changepoints within `RECENT_CHANGEPOINT_DAYS` (default 90) — old changepoints aren't re-drilled every night.
+- Saksbehandler is intentionally excluded — too thin per-segment volume, and individual-level automated flagging is out of scope for this layer.
+- `bidrag_til_endring` is each segment's share of the aggregate shift (volume-weighted, sums to `pelt_analyse.endringsstoerrelse`).
+- `tilstrekkelig_volum = FALSE` marks segments below `MIN_SEGMENT_OBS` (default 10) — don't rank or trust these.
+- **Key constants:** `DRILLDOWN_DIMENSIONS`, `MIN_SEGMENT_OBS`, `RECENT_CHANGEPOINT_DAYS`
 
 ## EWMA.py
 
