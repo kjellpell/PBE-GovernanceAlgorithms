@@ -18,9 +18,17 @@
 # =============================================================================
 
 from pyspark.sql import SparkSession
+from pyspark.sql.types import (
+    DateType,
+    DoubleType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
 import pandas as pd
 import numpy as np
-from datetime import datetime, date
+from datetime import datetime
 
 spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 BATCH_ID      = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -73,13 +81,20 @@ monthly = spark.sql(f"""
             AND pr.frist_dager IS NOT NULL
             AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND (
+                YEAR(pr.sluttmilepaeldato) < {CURRENT_YEAR}
+                OR MONTH(pr.sluttmilepaeldato) <= {CURRENT_MONTH}
+            )
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
     ORDER BY pr.indikator, aar, mnd
 """).toPandas()
 
-print(f"Månedlige data lastet: {len(monthly)} rader, "
-      f"{monthly['indikator'].nunique()} indikatorer, "
-      f"{monthly['aar'].min()}–{monthly['aar'].max()}")
+if monthly.empty:
+    print("Ingen månedlige data lastet.")
+else:
+    print(f"Månedlige data lastet: {len(monthly)} rader, "
+          f"{monthly['indikator'].nunique()} indikatorer, "
+          f"{monthly['aar'].min()}–{monthly['aar'].max()}")
 
 
 # =============================================================================
@@ -114,11 +129,12 @@ def seasonal_ratios(df, indikator, current_year, min_years=3, trim_n=1):
     years = sorted(df[(df["indikator"] == indikator) &
                       (df["aar"] < current_year)]["aar"].unique())
 
-    # Only use complete years — must have data in month 12
+    # A seasonal ratio needs every month; otherwise a missing month can look
+    # like seasonality.
     complete_years = []
     for y in years:
         ytd = compute_ytd(df, indikator, y)
-        if 12 in ytd:
+        if set(ytd) == set(range(1, 13)):
             complete_years.append((y, ytd))
 
     if len(complete_years) < min_years:
@@ -128,19 +144,23 @@ def seasonal_ratios(df, indikator, current_year, min_years=3, trim_n=1):
 
     for year, ytd in complete_years:
         year_end = ytd.get(12)
-        if year_end is None or year_end == 0:
+        if year_end is None or not np.isfinite(year_end) or year_end <= 0:
+            print(f"Skipping {indikator} {year} — invalid year-end YTD")
             continue
         for m, ytd_val in ytd.items():
-            ratios[m].append(ytd_val / year_end)
+            ratio = ytd_val / year_end
+            if np.isfinite(ratio) and 0 <= ratio <= 1.5:
+                ratios[m].append(ratio)
 
     result = {}
     for m in range(1, 13):
         vals = ratios[m]
         if len(vals) < min_years:
             continue
-        # Trim best and worst N years
+        # Avoid reducing a three-year sample to one observation and a false
+        # zero-width uncertainty interval.
         vals_sorted = sorted(vals)
-        if len(vals_sorted) > 2 * trim_n:
+        if len(vals_sorted) >= 2 * trim_n + 2:
             trimmed = vals_sorted[trim_n:-trim_n]
         else:
             trimmed = vals_sorted
@@ -164,7 +184,9 @@ def project_year_end(current_ytd, month, ratios, z=1.28):
         return None, None, None
 
     r = ratios[month]
-    if r["mean_ratio"] == 0:
+    if not np.isfinite(current_ytd) or not 0 <= current_ytd <= 1:
+        return None, None, None
+    if not np.isfinite(r["mean_ratio"]) or r["mean_ratio"] <= 1e-9:
         return None, None, None
 
     estimate = min(1.0, max(0.0, current_ytd / r["mean_ratio"]))
@@ -181,9 +203,44 @@ def project_year_end(current_ytd, month, ratios, z=1.28):
 
     return (
         round(float(estimate), 4),
-        round(float(ci_lower), 4),
-        round(float(ci_upper), 4)
+        round(float(min(ci_lower, estimate)), 4),
+        round(float(max(ci_upper, estimate)), 4)
     )
+
+
+OUTPUT_COLUMNS = {
+    "indikator",
+    "analyse_dato",
+    "type",
+    "verdi",
+    "nedre_konfidensgrense",
+    "oevre_konfidensgrense",
+    "prognose_aarsslutt",
+    "kjoert_tidspunkt",
+    "kjoere_id",
+}
+
+
+def validate_results(results):
+    """Validate rows before Spark applies the Delta table schema."""
+    for row_number, row in enumerate(results, start=1):
+        if set(row) != OUTPUT_COLUMNS:
+            raise ValueError(
+                f"Result row {row_number} has unexpected columns: "
+                f"{sorted(set(row) ^ OUTPUT_COLUMNS)}"
+            )
+        for column in ("verdi", "prognose_aarsslutt"):
+            value = row[column]
+            if value is not None and (not np.isfinite(value) or not 0 <= value <= 1):
+                raise ValueError(f"{column} out of bounds in row {row_number}: {value}")
+        lower = row["nedre_konfidensgrense"]
+        upper = row["oevre_konfidensgrense"]
+        estimate = row["prognose_aarsslutt"]
+        if lower is not None and upper is not None:
+            if not all(np.isfinite(value) and 0 <= value <= 1 for value in (lower, upper)):
+                raise ValueError(f"Confidence interval out of bounds in row {row_number}")
+            if lower > upper or (estimate is not None and not lower <= estimate <= upper):
+                raise ValueError(f"Invalid confidence interval in row {row_number}")
 
 
 # =============================================================================
@@ -237,6 +294,11 @@ for indikator in indicators:
         })
 
     # Write forecast rows — remaining months of current year
+    previous_forecast_ytd = latest_ytd
+    if latest_month not in ratios:
+        print(f"Skipping {indikator} — no seasonal ratio for month {latest_month}")
+        continue
+
     for mnd in range(latest_month + 1, 13):
         if mnd not in ratios:
             continue
@@ -248,7 +310,11 @@ for indikator in indicators:
         if ratio_current == 0:
             continue
         forecast_ytd = latest_ytd * (ratio_forecast / ratio_current)
+        forecast_ytd = min(1.0, max(previous_forecast_ytd, forecast_ytd))
         _, f_ci_lo, f_ci_hi = project_year_end(forecast_ytd, mnd, ratios)
+        if f_ci_lo is None or f_ci_hi is None:
+            print(f"Skipping {indikator} month {mnd} — invalid projection")
+            continue
 
         analyse_dato = (pd.Timestamp(CURRENT_YEAR, mnd, 1) + pd.offsets.MonthEnd(0)).date()
         results.append({
@@ -262,6 +328,7 @@ for indikator in indicators:
             "kjoert_tidspunkt":  datetime.now(),
             "kjoere_id":         BATCH_ID,
         })
+        previous_forecast_ytd = forecast_ytd
 
 print(f"\nProjection rows computed: {len(results)}")
 print(f"Indicators projected: {len(set(r['indikator'] for r in results))}")
@@ -274,8 +341,24 @@ print(f"Indicators projected: {len(set(r['indikator'] for r in results))}")
 if not results:
     print("Ingen prognoseresultater å skrive.")
 else:
-    df = pd.DataFrame(results)
-    results_spark = spark.createDataFrame(df)
+    validate_results(results)
+    output_schema = StructType([
+        StructField("indikator", StringType(), False),
+        StructField("analyse_dato", DateType(), False),
+        StructField("type", StringType(), False),
+        StructField("verdi", DoubleType(), True),
+        StructField("nedre_konfidensgrense", DoubleType(), True),
+        StructField("oevre_konfidensgrense", DoubleType(), True),
+        StructField("prognose_aarsslutt", DoubleType(), True),
+        StructField("kjoert_tidspunkt", TimestampType(), False),
+        StructField("kjoere_id", StringType(), False),
+    ])
+    output_columns = [field.name for field in output_schema.fields]
+    output_rows = [
+        tuple(row[column] for column in output_columns)
+        for row in results
+    ]
+    results_spark = spark.createDataFrame(output_rows, schema=output_schema)
 
     # Idempotent — delete current year rows before inserting
     spark.sql(f"""
@@ -286,7 +369,7 @@ else:
 
     results_spark.write.mode("append").saveAsTable("prognoser.frist_prognose")
 
-    print(f"frist_prognose skrevet: {len(results)} rader")
+    print(f"prognoser.frist_prognose skrevet: {len(results)} rader")
 
     # Summary — year-end estimates for current indicators
     spark.sql(f"""
@@ -308,7 +391,6 @@ else:
         GROUP BY indikator
         ORDER BY prognose_aarsslutt ASC
     """).show(30, truncate=False)
-
 
 # =============================================================================
 # CELL 6 — Power BI visual guidance and DAX measures
