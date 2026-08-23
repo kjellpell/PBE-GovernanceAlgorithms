@@ -47,6 +47,15 @@ CUSUM_K       = 0.5   # allowance parameter — half sigma is standard
 CUSUM_H       = 5.0   # decision threshold — 5 sigma cumulative
 START_YEAR    = 2015  # exclude data before this year — adjust if older data is reliable
 
+# Anchored baseline window — mu/sigma used to standardise each series are
+# computed from only the FIRST this-many observations, not the whole series.
+# Using the whole series lets a slow persistent drift get partially absorbed
+# into "normal", which dampens CUSUM's sensitivity to exactly the kind of
+# shift it exists to catch.
+CUSUM_BASELINE_MONTHLY      = 12
+CUSUM_BASELINE_WEEKLY       = 26
+CUSUM_MIN_POST_BASELINE_OBS = 4   # need at least this many points after the baseline to test anything
+
 DRILLDOWN_DIMENSIONS     = ["enhet", "fasetittel"]  # verify these column names against the Lakehouse schema
 MIN_SEGMENT_OBS          = 10   # segments below this are marked utilstrekkelig_volum, not tested
 RECENT_CHANGEPOINT_DAYS  = 90   # only drill into changepoints still recent enough to be actionable
@@ -266,11 +275,17 @@ def to_float_series(series):
     return pd.to_numeric(series, errors="coerce").astype("float64")
 
 
-def run_cusum(series, k=CUSUM_K, h=CUSUM_H):
+def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY):
     """
     Two-sided CUSUM on a standardised series.
     k = allowance (typically 0.5 * expected shift in sigma units)
     h = decision threshold (typically 4-5)
+    baseline_obs = number of leading observations used to compute mu/sigma —
+        an anchored reference period, not the whole series. Otherwise a slow
+        persistent drift gets partially absorbed into "normal", dampening
+        the very sensitivity CUSUM is meant to provide. The full series
+        (including the baseline window itself) is standardised against this
+        fixed mu/sigma before running the CUSUM recursion.
 
     Returns DataFrame with cusum_pos, cusum_neg, signal, signal_retning.
     """
@@ -282,8 +297,12 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H):
     if len(values) < 8:
         return None
 
-    mu    = np.mean(values)
-    sigma = np.std(values)
+    if len(values) < baseline_obs + CUSUM_MIN_POST_BASELINE_OBS:
+        return None
+
+    baseline = values[:baseline_obs]
+    mu    = np.mean(baseline)
+    sigma = np.std(baseline)
     if sigma == 0:
         return None
 
@@ -460,9 +479,10 @@ def extract_changepoint_stats(series, breakpoints, granularitet):
     results = []
 
     prev = 0
-    for bp in breakpoints:
+    for i, bp in enumerate(breakpoints):
+        next_bp = breakpoints[i + 1] if i + 1 < len(breakpoints) else len(values)
         before = values[prev:bp]
-        after  = values[bp:]
+        after  = values[bp:next_bp]
 
         if len(before) < 3 or len(after) < 3:
             prev = bp
@@ -500,6 +520,11 @@ series_configs = [
     ("Produksjonsdifferanse",   weekly_prod,   "Ukentlig", MIN_WEEKLY),
 ]
 
+CUSUM_BASELINE_BY_GRANULARITET = {
+    "Månedlig": CUSUM_BASELINE_MONTHLY,
+    "Ukentlig": CUSUM_BASELINE_WEEKLY,
+}
+
 cusum_rows       = []
 changepoint_rows = []
 
@@ -516,7 +541,8 @@ for metrikk, df, granularitet, min_obs in series_configs:
             continue
 
         # ── CUSUM ──────────────────────────────────────────────────
-        cusum = run_cusum(ind_data)
+        baseline_obs = CUSUM_BASELINE_BY_GRANULARITET[granularitet]
+        cusum = run_cusum(ind_data, baseline_obs=baseline_obs)
         if cusum is not None:
             for idx, row in cusum.iterrows():
                         cusum_rows.append({
