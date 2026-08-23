@@ -29,23 +29,34 @@
 #   (days) can. An effect on Produksjonsdifferanse should still surface
 #   indirectly via a shift in one of these two metrics.
 #
+# The before-window ("control" period, x days back from virkningsdato) and
+#   the after-window ("test" period, y days forward) are independently
+#   configurable per change (vindu_dager_foer / vindu_dager_etter) — they
+#   are NOT forced to the same length. This matters whenever the thing
+#   being measured hasn't existed for as long on one side as the other:
+#   e.g. a process/indikator that only came into being a few months before
+#   virkningsdato has a naturally short "before" history no matter how long
+#   you're willing to wait for the "after" side to accumulate.
+#
 # Volume reality: some phases (e.g. Plansak) see only ~30 cases/year. This
 #   drives two deliberate choices below:
-#     - DEFAULT_VINDU_DAGER = 365 (a full year each side), not a shorter
-#       window — this both gets close to a usable per-group sample size at
-#       that volume AND cancels seasonality on its own (a full year covers
-#       one whole seasonal cycle), reducing reliance on exact calendar
-#       alignment with the control group.
+#     - DEFAULT_VINDU_DAGER_FOER/_ETTER = 365 (a full year on each side by
+#       default), not a shorter window — this both gets close to a usable
+#       per-group sample size at that volume AND cancels seasonality on its
+#       own (a full year covers one whole seasonal cycle), reducing
+#       reliance on exact calendar alignment with the control group.
+#       Shorten either side per change when the actual history available or
+#       the case volume justifies it.
 #     - MIN_OBS_PER_GROUP is a pragmatic floor (10, matching this repo's
 #       existing MIN_SEGMENT_OBS/MIN_TEAM_VOLUME convention), not a
 #       stricter one — a higher wall sounds more rigorous but at this
 #       volume would just mean the tool reports nothing. Thinness below a
 #       comfortable margin is instead surfaced via lav_styrke, an explicit
 #       "trust this p-value less" flag, rather than suppressed entirely.
-#   Consequence: with ~30 cases/year and a 365-day window, a mature reading
-#   (tilstrekkelig_moden = TRUE) is roughly a year after rollout. Earlier
-#   snapshots are provisional trend signal, not a conclusion — an honest
-#   property of low case volume, not a bug to engineer around.
+#   Consequence: with ~30 cases/year and a 365-day after-window, a mature
+#   reading (tilstrekkelig_moden = TRUE) is roughly a year after rollout.
+#   Earlier snapshots are provisional trend signal, not a conclusion — an
+#   honest property of low case volume, not a bug to engineer around.
 #
 # Control group is OPTIONAL per configured change. When configured, this
 #   script computes full DiD. When not, it falls back to a plain before/
@@ -83,7 +94,8 @@ spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAcc
 BATCH_ID = datetime.now().strftime("%Y%m%dT%H%M%S")
 TODAY    = date.today()
 
-DEFAULT_VINDU_DAGER    = 365   # full year each side — see header comment
+DEFAULT_VINDU_DAGER_FOER  = 365   # full year of baseline/"control" history by default — see header comment
+DEFAULT_VINDU_DAGER_ETTER = 365   # full year of test period by default — see header comment
 MIN_OBS_PER_GROUP      = 10    # pragmatic floor, not a statistical ideal — see header comment
 LAV_STYRKE_TERSKEL     = 20    # below this, volume clears the floor but is still thin
 PELT_MATCH_WINDOW_DAYS = 45    # how close a PELT changepoint must be to virkningsdato to corroborate
@@ -97,9 +109,16 @@ ALPHA                  = 0.05
 # Each entry:
 #   endring_navn       : unique id/name for this change.
 #   maaltall           : "Fristprosent" or "Behandlingstid" only (see header).
-#   virkningsdato      : ISO date the change went live.
-#   vindu_dager        : comparison window length in days, before AND after
-#                         virkningsdato. None -> DEFAULT_VINDU_DAGER.
+#   virkningsdato      : ISO date the change went live (the changepoint).
+#   vindu_dager_foer   : the baseline/"control" period — how many days
+#                         BEFORE virkningsdato to pull outcome values from.
+#                         None -> DEFAULT_VINDU_DAGER_FOER. Shorten this when
+#                         the thing being measured hasn't existed for a full
+#                         year before the change.
+#   vindu_dager_etter  : the test period — how many days AFTER virkningsdato
+#                         to pull outcome values from. None ->
+#                         DEFAULT_VINDU_DAGER_ETTER. Independent of
+#                         vindu_dager_foer — the two do not need to match.
 #   treatment_scope    : dict with optional "indikator"/"fasetittel"/"enhet"
 #                         lists. An omitted (or None) dimension means no
 #                         filter on that dimension.
@@ -124,7 +143,8 @@ PROCESS_CHANGES = [
         "endring_navn":       "MAL_Ny_sjekkliste_byggesak",
         "maaltall":           "Behandlingstid",
         "virkningsdato":      "2026-03-01",
-        "vindu_dager":        None,
+        "vindu_dager_foer":   None,
+        "vindu_dager_etter":  None,
         "treatment_scope": {
             "indikator":  ["Byggesak - Tiltak"],
             "fasetittel": ["Saksbehandling"],
@@ -152,7 +172,8 @@ CREATE TABLE IF NOT EXISTS analyser.prosessendring_effekt (
     endring_navn                  STRING      NOT NULL,
     maaltall                      STRING      NOT NULL,
     virkningsdato                 DATE        NOT NULL,
-    vindu_dager                   INT         NOT NULL,
+    vindu_dager_foer              INT         NOT NULL,
+    vindu_dager_etter             INT         NOT NULL,
     snapshot_dato                 DATE        NOT NULL,
 
     n_behandling_foer             INT,
@@ -445,13 +466,14 @@ for change in PROCESS_CHANGES:
     navn         = change["endring_navn"]
     maaltall     = change["maaltall"]
     virkningsdato = date.fromisoformat(change["virkningsdato"])
-    vindu_dager  = change.get("vindu_dager") or DEFAULT_VINDU_DAGER
+    vindu_dager_foer  = change.get("vindu_dager_foer") or DEFAULT_VINDU_DAGER_FOER
+    vindu_dager_etter = change.get("vindu_dager_etter") or DEFAULT_VINDU_DAGER_ETTER
     treatment_scope = change.get("treatment_scope")
     control_scope   = change.get("control_scope")
 
-    before_start = virkningsdato - timedelta(days=vindu_dager)
-    after_end    = min(TODAY, virkningsdato + timedelta(days=vindu_dager))
-    tilstrekkelig_moden = TODAY >= virkningsdato + timedelta(days=vindu_dager)
+    before_start = virkningsdato - timedelta(days=vindu_dager_foer)
+    after_end    = min(TODAY, virkningsdato + timedelta(days=vindu_dager_etter))
+    tilstrekkelig_moden = TODAY >= virkningsdato + timedelta(days=vindu_dager_etter)
 
     treatment_before = _fetch_outcome(maaltall, treatment_scope, before_start, virkningsdato)
     treatment_after  = _fetch_outcome(maaltall, treatment_scope, virkningsdato, after_end)
@@ -476,7 +498,8 @@ for change in PROCESS_CHANGES:
         "endring_navn":                  navn,
         "maaltall":                      maaltall,
         "virkningsdato":                 virkningsdato,
-        "vindu_dager":                   int(vindu_dager),
+        "vindu_dager_foer":              int(vindu_dager_foer),
+        "vindu_dager_etter":             int(vindu_dager_etter),
         "snapshot_dato":                 snapshot_dato,
         "n_behandling_foer":             did["n_treatment_before"],
         "gjennomsnitt_behandling_foer":  did["mean_treatment_before"],
@@ -523,7 +546,8 @@ SCHEMA = StructType([
     StructField("endring_navn",                  StringType(),    False),
     StructField("maaltall",                      StringType(),    False),
     StructField("virkningsdato",                 DateType(),      False),
-    StructField("vindu_dager",                   IntegerType(),   False),
+    StructField("vindu_dager_foer",              IntegerType(),   False),
+    StructField("vindu_dager_etter",             IntegerType(),   False),
     StructField("snapshot_dato",                 DateType(),      False),
     StructField("n_behandling_foer",             IntegerType(),   True),
     StructField("gjennomsnitt_behandling_foer",  DoubleType(),    True),
