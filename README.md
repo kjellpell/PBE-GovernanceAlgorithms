@@ -11,7 +11,6 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
 | `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Nightly after main data pipeline |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Nightly after main data pipeline |
-| `Plansak_Cohort_Analysis.py` | `plansak_2026_phase_detail`, `plansak_2026_dim_cases`, `plansak_2026_kpi_snapshot` | Nightly after main data pipeline |
 | `Building_Application_Type.py` | `building_application_type` | Nightly |
 | `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
 | `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko`, `sak_frist_risiko_trend` | Nightly after main data pipeline |
@@ -77,21 +76,6 @@ Same pattern as `Throughput_Pressure_Monitor.py`, one level down: detects queue 
 - `alvorlighet` har verdiene `Lav`, `Moderat`, `Hoy`, `Kritisk`; `arsak_kode`/`arsak_tekst` explain the flag
 - **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`
 
-## Plansak_Cohort_Analysis.py
-
-Tracks the 2026 planning-case cohort (Oppstartsmøte >= 2026-01-01) against a
-rolling per-case deadline: every case must reach "Sendt til politisk
-behandling" within 3 years of its own Oppstartsmøte date.
-
-- **Four phases per case:** Utarbeidingsfasen Kostra, Offentlig ettersyn,
-  Høringsperiode, Sendt til politisk behandling
-- **Case_Deadline** = each case's own Oppstartsmøte date + 3 years (not a
-  fixed portfolio-wide date)
-- **Output:** `plansak_2026_phase_detail` (one row per Saksnummer × Phase),
-  `plansak_2026_dim_cases` (one row per Saksnummer),
-  `plansak_2026_kpi_snapshot` (aggregate KPIs, append-mode idempotent per day)
-- `Overall_Status` in `dim_cases`: `On Track`, `At Risk`, `Off Track`, `Completed`
-
 ## Building_Application_Type.py
 
 For each process recorded in Fakturalinjer, identifies the product code accounting for the largest total invoice amount — a raw product code downstream models join against `prisliste_varer` and `Prosesser`.
@@ -128,8 +112,7 @@ Team-level workload concentration / bus-factor / burnout early warning: is activ
 
 ## Process_Change_Impact_Analysis.py
 
-Did a specific process change actually work, net of seasonality and org-wide drift?
-`Plansak_Cohort_Analysis.py` has no control group and takes years to resolve; a naive
+Did a specific process change actually work, net of seasonality and org-wide drift? A naive
 before/after comparison is confounded by exactly the seasonality
 `Seasonal_YTD_ratio_extrapolation.py` models and the secular drift `CUSUM_Changepoint.py`
 detects. This script instead computes a **difference-in-differences (DiD)** estimate:

@@ -4,12 +4,9 @@
 # so analyser.pelt_analyse is fresh for the cross-reference in CELL 4.
 #
 # Purpose:
-#   Plansak_Cohort_Analysis.py tracks cases against deadlines, but has no
-#   control group and a case can take up to 3 years to resolve — it cannot
-#   tell you whether a specific process change (a new template, a changed
-#   procedure for one phase) actually helped. A naive before/after
-#   comparison of Tidsbruk or Fristprosent around the change date is
-#   confounded by:
+#   A naive before/after comparison of Tidsbruk or Fristprosent around a
+#   process change date (a new template, a changed procedure for one
+#   phase) is confounded by:
 #     - seasonality — already modeled elsewhere, in
 #       Seasonal_YTD_ratio_extrapolation.py, so it's a real, known effect
 #       here, not a hypothetical one
