@@ -8,14 +8,23 @@ import pandas as pd
 
 SOURCE = Path(__file__).parents[1] / "Seasonal_YTD_ratio_extrapolation.py"
 TREE = ast.parse(SOURCE.read_text())
-FUNCTIONS = {
-    node.name: node
-    for node in TREE.body
-    if isinstance(node, ast.FunctionDef)
-    and node.name in {"compute_ytd", "seasonal_ratios", "project_year_end", "validate_results"}
-}
+FUNCTION_NAMES = {"compute_ytd", "seasonal_ratios", "project_year_end", "validate_results"}
+CONSTANT_NAMES = {"OUTPUT_COLUMNS"}
+
+EXTRACTED = []
+for node in TREE.body:
+    if isinstance(node, ast.FunctionDef) and node.name in FUNCTION_NAMES:
+        EXTRACTED.append(node)
+    elif (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in CONSTANT_NAMES
+    ):
+        EXTRACTED.append(node)
+
 NAMESPACE = {"np": np, "pd": pd}
-exec(compile(ast.Module(body=list(FUNCTIONS.values()), type_ignores=[]), str(SOURCE), "exec"), NAMESPACE)
+exec(compile(ast.Module(body=EXTRACTED, type_ignores=[]), str(SOURCE), "exec"), NAMESPACE)
 
 compute_ytd = NAMESPACE["compute_ytd"]
 seasonal_ratios = NAMESPACE["seasonal_ratios"]
@@ -53,7 +62,9 @@ class SeasonalForecastTests(unittest.TestCase):
             ]
         )
 
-        self.assertEqual(compute_ytd(data, "A", 2025), {1: 0.5, 2: 0.75})
+        # Month 1: 1/2 = 0.5. Month 2 cumulates: (1+8)/(2+8) = 9/10 = 0.9 —
+        # a volume-weighted cumulative ratio, not an average of monthly ratios.
+        self.assertEqual(compute_ytd(data, "A", 2025), {1: 0.5, 2: 0.9})
 
     def test_incomplete_year_is_not_used_for_seasonal_ratios(self):
         data = monthly_rows([2022, 2023, 2024], missing_months={(2023, 6)})
