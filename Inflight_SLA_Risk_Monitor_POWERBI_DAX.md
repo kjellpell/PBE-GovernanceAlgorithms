@@ -59,5 +59,5 @@ SWITCH(
 - `risikoklasse`
 
 ## Tolkning
-- Dette er en *leading* indikator — sammenlign med `ewma_analyse`/`cusum_analyse` sin `Fristprosent`, som kun måler lukkede saker.
+- Dette er en *leading* indikator — sammenlign med `cusum_analyse` sin `Fristprosent`, som kun måler lukkede saker.
 - `andel_brukt = NULL` betyr `frist_dager <= 0` for den saken — sjekk datakvalitet før den saken brukes i tiltak.

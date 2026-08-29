@@ -3,7 +3,7 @@
 # Runs nightly after main data pipeline.
 #
 # Purpose:
-#   Fristprosent (EWMA/CUSUM) only scores cases that have already closed —
+#   Fristprosent (CUSUM) only scores cases that have already closed —
 #   a lagging indicator. This script scores cases that are STILL OPEN
 #   against their own frist_dager, so an SLA breach wave shows up here
 #   before it ever reaches the closed-case ratio.
@@ -11,7 +11,7 @@
 # Assumption to verify against the Lakehouse schema:
 #   it is unconfirmed whether frist_dager is reliably populated on rows
 #   that have not yet closed (it is only proven populated on closed rows
-#   elsewhere in this repo, via EWMA/CUSUM's Fristprosent calculation).
+#   elsewhere in this repo, via CUSUM's Fristprosent calculation).
 #   Rows without a frist_dager are simply excluded here, not defaulted —
 #   if frist_dager turns out to be sparse on open rows, this script will
 #   under-cover the open-case population and that should be investigated
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS analyser.sak_frist_risiko (
     kjoere_id          STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Åpne saker (pk_faser) vurdert mot egen frist_dager. Leading indicator — motstykke til den lukkede-saker-baserte Fristprosent i EWMA/CUSUM. Full overwrite hver natt.'
+COMMENT 'Åpne saker (pk_faser) vurdert mot egen frist_dager. Leading indicator — motstykke til den lukkede-saker-baserte Fristprosent i CUSUM. Full overwrite hver natt.'
 """)
 
 spark.sql("""

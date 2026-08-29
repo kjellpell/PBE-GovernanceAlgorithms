@@ -7,7 +7,6 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 | File | Output table(s) | Schedule |
 |---|---|---|
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | Nightly after main data pipeline |
-| `EWMA.py` | `ewma_analyse` | Nightly after main pipeline |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
 | `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Nightly after main data pipeline |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Nightly after main data pipeline |
@@ -41,14 +40,21 @@ Breaks down the most recent PELT changepoint per indikator/maaltall/granularitet
 - `tilstrekkelig_volum = FALSE` marks segments below `MIN_SEGMENT_OBS` (default 10) — don't rank or trust these.
 - **Key constants:** `DRILLDOWN_DIMENSIONS`, `MIN_SEGMENT_OBS`, `RECENT_CHANGEPOINT_DAYS`
 
-## EWMA.py
+## Trendretning (native DAX, no nightly script)
 
-Exponentially weighted moving average smoothing for trend lines in board and governance reports.
+Trend direction for board and governance report charts used to be computed by a nightly
+`EWMA.py` script (exponentially weighted moving average, `ewma_analyse` table). It was
+removed: the only output people actually used was the `Stigende`/`Synkende`/`Stabil` label,
+and EWMA is harder to explain to a non-technical audience than a plain moving average for
+no real benefit at monthly board-reporting resolution. The label is now computed directly
+in Power BI with a rolling-average-slope DAX measure — see `Trendretning_POWERBI_DAX.md`.
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
-- **To hastigheter:** `ewma_sakte` (α=0.1, styret), `ewma_rask` (α=0.3, virksomhetsoppfølging)
-- `trendretning` har verdiene `Stigende`, `Synkende`, `Stabil`.
-- Full overwrite each run (EWMA depends on full history)
+- **To hastigheter:** 6-month rolling average (styret), 3-month rolling average
+  (virksomhetsoppfølging) — same board-vs-operational split as before, just as plain
+  moving-average windows instead of EWMA alpha values
+- `trendretning` still has the values `Stigende`, `Synkende`, `Stabil`, derived from the
+  slope of the 6-month rolling average, same as the old script's slow-EWMA-based label
 
 ## Seasonal_YTD_ratio_extrapolation.py
 
@@ -86,7 +92,7 @@ For each process recorded in Fakturalinjer, identifies the product code accounti
 
 ## Inflight_SLA_Risk_Monitor.py
 
-Leading indicator of SLA-breach risk. `Fristprosent` (EWMA/CUSUM) only scores cases that have already closed; this script scores cases that are **still open** against their own `frist_dager`, so a breach wave shows up here before it reaches the closed-case ratio.
+Leading indicator of SLA-breach risk. `Fristprosent` (CUSUM) only scores cases that have already closed; this script scores cases that are **still open** against their own `frist_dager`, so a breach wave shows up here before it reaches the closed-case ratio.
 
 - **Output:** `sak_frist_risiko` (one row per open case-phase `pk_faser`, full overwrite nightly — current-state detail), `sak_frist_risiko_trend` (indikator × enhet × snapshot_dato, append-mode idempotent per day — trend)
 - `risikoklasse` har verdiene `Bruddet`, `Kritisk`, `Risiko`, `Innenfor`
