@@ -12,7 +12,6 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 | `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
 | `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko`, `sak_frist_risiko_trend` | Nightly after main data pipeline |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_arbeidsmengde`, `saksbehandler_konsentrasjon` | Nightly after main data pipeline |
-| `Process_Change_Impact_Analysis.py` | `prosessendring_effekt` | Nightly, ideally after `CUSUM_Changepoint.py` |
 
 ## CUSUM_Changepoint.py
 
@@ -123,24 +122,6 @@ Team-level workload concentration / bus-factor / burnout early warning: is activ
 - **Output:** `saksbehandler_arbeidsmengde` (enhet × saksbehandler, **full overwrite nightly, no history retained at the individual grain**), `saksbehandler_konsentrasjon` (enhet × snapshot_dato, append-mode idempotent per day — Gini trend, **no individual data**, only accumulates history at the enhet level)
 - **Key constants:** `MIN_SAKSBEHANDLERE` (3) — Gini on 1-2 people is meaningless, gates `tilstrekkelig_volum`
 - `SAKSBEHANDLER_COL` is unverified against the Lakehouse schema — verify before relying on this script.
-
-## Process_Change_Impact_Analysis.py
-
-Did a specific process change actually work, net of seasonality and org-wide drift? A naive
-before/after comparison is confounded by exactly the seasonality
-`Seasonal_YTD_ratio_extrapolation.py` models and the secular drift `CUSUM_Changepoint.py`
-detects. This script instead computes a **difference-in-differences (DiD)** estimate:
-the before→after change in the affected population, net of the before→after change in an
-unaffected control population over the same window.
-
-- **Config:** hand-edit the `PROCESS_CHANGES` list whenever a real process change ships (ships with one template entry — replace or delete it)
-- **Scope:** `Fristprosent` and `Behandlingstid` only — `Produksjonsdifferanse` has no per-case realization and can't be split into treatment/control rows
-- **Control group is optional per entry** — DiD when configured; otherwise a plain before/after with `har_kontrollgruppe = FALSE`, never silently skipped
-- **`effekt_retning`** har verdiene `Forbedring`, `Forverring`, `Ingen praktisk effekt` (statistically real but below the configured minimum size), `Ingen sikker effekt` (not statistically significant)
-- **Window length is independently configurable per side** via `vindu_dager_foer` (baseline/"control" period before the change) and `vindu_dager_etter` (test period after) — they don't have to match, e.g. when whatever's being measured hasn't existed for as long on one side as the other
-- **Volume reality:** some phases see only ~30 cases/year, so both default to `DEFAULT_VINDU_DAGER_FOER`/`_ETTER = 365` (a full year each side — also cancels seasonality on its own) and `MIN_OBS_PER_GROUP = 10` is a pragmatic floor, not a statistical ideal; thinness above that floor is surfaced via `lav_styrke` rather than suppressed. A mature reading (`tilstrekkelig_moden = TRUE`) is typically ~12 months after rollout — earlier snapshots are trend signal, not a conclusion
-- **`pelt_stotte`** cross-references `analyser.pelt_analyse` as corroborating context only — never feeds back into `effekt_retning`
-- Output: `prosessendring_effekt`, append-mode idempotent per day, so the confidence interval visibly narrows across successive nightly runs on the same change
 
 ## Configuration
 
