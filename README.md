@@ -8,12 +8,9 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 |---|---|---|
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | Nightly after main data pipeline |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
-| `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Nightly after main data pipeline |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Nightly after main data pipeline |
-| `Building_Application_Type.py` | `building_application_type` | Nightly |
 | `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
 | `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko`, `sak_frist_risiko_trend` | Nightly after main data pipeline |
-| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Nightly after main data pipeline |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_arbeidsmengde`, `saksbehandler_konsentrasjon` | Nightly after main data pipeline |
 | `Process_Change_Impact_Analysis.py` | `prosessendring_effekt` | Nightly, ideally after `CUSUM_Changepoint.py` |
 
@@ -65,30 +62,33 @@ Projects year-end `frist%` from current YTD using trimmed seasonal ratios from h
 - `type = 'actual'` for past months, `type = 'forecast'` for remaining months
 - Idempotent — deletes and rewrites current-year rows on each run
 
-## Throughput_Pressure_Monitor.py
+## Throughput pressure monitor (native DAX, no nightly script)
 
-Detects where intake exceeds completions for multiple periods and where processing time deteriorates versus a recent baseline, at the team (`enhet`) level.
+Used to be `Throughput_Pressure_Monitor.py` (`gjennomstoremming_press_enhet`,
+`gjennomstroemming_press_fase`), detecting where intake exceeds completions for multiple
+periods and where processing time deteriorates versus a recent baseline, at the team
+(`enhet`) level. Removed: `mottatt`/`ferdigstilt` counts, baselines, and the composite
+pressure score are all live-computable against the fact table — see
+`Throughput_Pressure_Monitor_POWERBI_DAX.md` (same filename, now documents pure DAX
+measures instead of a script's output tables). That doc also flags the two rough edges
+worth knowing about before relying on this: the `netto_flyt_streak` measure needs an
+iterative window-scan pattern DAX has no native primitive for, and the model needs a
+second (inactive) date relationship on `startmilepaeldato` to separate "received" from
+"completed" counts by month.
 
-- **Output:** `gjennomstoremming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table showing which faser drive a team's pressure score)
-- `pressure_nivaa` har verdiene `Lav`, `Moderat`, `Hoy`, `Kritisk`
-- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`
-- Full overwrite each run (monthly time series recomputed from full history)
+- **Måltall/output shape:** same as before — team (`enhet`) × indikator × month, plus a
+  fase-level companion for drill-down
+- `pressure_nivaa` still has the values `Lav`, `Moderat`, `Hoy`, `Kritisk`, from the same
+  composite scoring rule (net flow, flow streak, tidsbruk deviation vs. baseline, intake
+  ratio) — just evaluated as a measure instead of written to a table
 
 ## Phase_Bottleneck_Detector.py
 
-Same pattern as `Throughput_Pressure_Monitor.py`, one level down: detects queue pressure forming inside individual process phases (fase-nettoflyt + p90 fasetid deviation vs. baseline).
+Same pattern as the throughput pressure monitor above, one level down: detects queue pressure forming inside individual process phases (fase-nettoflyt + p90 fasetid deviation vs. baseline). Self-contained — does not read the throughput pressure monitor's output, so it was unaffected by that script's removal.
 
 - **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)
 - `alvorlighet` har verdiene `Lav`, `Moderat`, `Hoy`, `Kritisk`; `arsak_kode`/`arsak_tekst` explain the flag
 - **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`
-
-## Building_Application_Type.py
-
-For each process recorded in Fakturalinjer, identifies the product code accounting for the largest total invoice amount — a raw product code downstream models join against `prisliste_varer` and `Prosesser`.
-
-- **Output:** `building_application_type` (one row per `fk_faser`, full overwrite)
-- Scoped to Byggesak and Eiendomssak fagomraade (not Plansak)
-- No date filter — all Fakturalinjer rows in scope are included
 
 ## Inflight_SLA_Risk_Monitor.py
 
@@ -99,13 +99,21 @@ Leading indicator of SLA-breach risk. `Fristprosent` (CUSUM) only scores cases t
 - **Key constants:** `RISK_THRESHOLD_KRITISK` (0.90), `RISK_THRESHOLD_RISIKO` (0.75), `MIN_TEAM_VOLUME`
 - Open assumption to verify against the Lakehouse schema: whether `frist_dager` is reliably populated on rows that haven't closed yet — rows missing it are excluded, not defaulted.
 
-## Backlog_Aging_Distribution.py
+## Backlog aging distribution (native DAX, no nightly script)
 
-Tracks whether the *existing* open-case backlog is aging, independent of `Throughput_Pressure_Monitor.py`'s net-flow score (which measures flow imbalance, not the age of work already in the queue).
+Used to be `Backlog_Aging_Distribution.py` (`sak_alder_fordeling`), tracking whether the
+*existing* open-case backlog is aging, independent of the throughput pressure monitor's
+net-flow score (which measures flow imbalance, not the age of work already in the queue).
+Removed: age bucketing and the median/p90 age are plain row-level arithmetic — see
+`Backlog_Aging_Distribution_POWERBI_DAX.md` (same filename, now documents pure DAX
+measures instead of a script's output table).
 
-- **Output:** `sak_alder_fordeling` (indikator × enhet × aldersgruppe × snapshot_dato, append-mode idempotent per day). `snapshot_dato` carries both roles — filter to `MAX(snapshot_dato)` for today's backlog shape, or chart the full table for the trend.
-- `aldersgruppe` buckets (default `AGE_BUCKETS`): `0-30`, `31-60`, `61-90`, `91-180`, `180+`
-- Percentiles (`median_alder_dager`, `p90_alder_dager`) computed in pandas/numpy, not Spark SQL — the grouping key is pandas-derived and backlog volume is small.
+- **Trade-off to know before relying on this:** the old script's `snapshot_dato`-stamped
+  table let you trend the backlog's age shape over time. A live DAX measure only ever
+  knows what's open *today* — it cannot reproduce that historical trend without something
+  still persisting a daily snapshot somewhere. The DAX doc covers "today's backlog shape"
+  only; it's explicit about what was dropped.
+- `aldersgruppe` buckets (unchanged): `0-30`, `31-60`, `61-90`, `91-180`, `180+`
 
 ## Caseworker_Load_Concentration.py
 

@@ -5,7 +5,7 @@
 # Purpose:
 #   Team-level workload concentration / bus-factor / burnout early warning —
 #   is active caseload piling up on a few caseworkers within a team, even
-#   while the team's aggregate numbers (Throughput_Pressure_Monitor.py,
+#   while the team's aggregate numbers (throughput pressure monitor,
 #   Fristprosent) look fine? Concentration is measured with the Gini
 #   coefficient of open-caseload counts per saksbehandler within each enhet.
 #

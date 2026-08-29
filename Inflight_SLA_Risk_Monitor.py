@@ -49,8 +49,9 @@ TODAY    = pd.Timestamp(date.today())
 RISK_THRESHOLD_KRITISK = 0.90
 RISK_THRESHOLD_RISIKO  = 0.75
 
-# Trend-table volume gate — same pattern as MIN_TEAM_VOLUME in
-# Throughput_Pressure_Monitor.py.
+# Trend-table volume gate — same pattern as the throughput pressure
+# monitor's MIN_TEAM_VOLUME (now native DAX, see
+# Throughput_Pressure_Monitor_POWERBI_DAX.md).
 MIN_TEAM_VOLUME = 10
 
 
