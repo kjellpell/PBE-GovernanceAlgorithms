@@ -8,9 +8,7 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 |---|---|---|
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | Nightly after main data pipeline |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
-| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Nightly after main data pipeline |
 | `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
-| `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko`, `sak_frist_risiko_trend` | Nightly after main data pipeline |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_arbeidsmengde`, `saksbehandler_konsentrasjon` | Nightly after main data pipeline |
 
 ## CUSUM_Changepoint.py
@@ -81,22 +79,38 @@ second (inactive) date relationship on `startmilepaeldato` to separate "received
   composite scoring rule (net flow, flow streak, tidsbruk deviation vs. baseline, intake
   ratio) — just evaluated as a measure instead of written to a table
 
-## Phase_Bottleneck_Detector.py
+## Phase bottleneck detector (native DAX, no nightly script)
 
-Same pattern as the throughput pressure monitor above, one level down: detects queue pressure forming inside individual process phases (fase-nettoflyt + p90 fasetid deviation vs. baseline). Self-contained — does not read the throughput pressure monitor's output, so it was unaffected by that script's removal.
+Used to be `Phase_Bottleneck_Detector.py` (`fase_flaskehals_enhet`), one level down from
+the throughput pressure monitor: detects queue pressure forming inside individual process
+phases (fase-nettoflyt + p90 fasetid deviation vs. baseline), same composite-scoring
+pattern. Removed for the same reason — see `Phase_Bottleneck_Detector_POWERBI_DAX.md`
+(same filename, now pure DAX). That doc flags its own two rough edges: a third date role
+is needed on the model (`COALESCE(sluttmilepaeldato, startmilepaeldato)`, since this table
+groups each row by its own single representative date rather than two independent date
+counts), and the reason-code string (`arsak_kode`) is more naturally Python than DAX —
+worth dropping in favor of separate boolean flag measures if maintainability matters more
+than exact parity.
 
-- **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)
-- `alvorlighet` har verdiene `Lav`, `Moderat`, `Hoy`, `Kritisk`; `arsak_kode`/`arsak_tekst` explain the flag
-- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`
+- `alvorlighet` still has the values `Lav`, `Moderat`, `Hoy`, `Kritisk`; `arsak_kode`/`arsak_tekst` still explain the flag, computed live
 
-## Inflight_SLA_Risk_Monitor.py
+## In-flight SLA risk monitor (native DAX, no nightly script)
 
-Leading indicator of SLA-breach risk. `Fristprosent` (CUSUM) only scores cases that have already closed; this script scores cases that are **still open** against their own `frist_dager`, so a breach wave shows up here before it reaches the closed-case ratio.
+Used to be `Inflight_SLA_Risk_Monitor.py` (`sak_frist_risiko`, `sak_frist_risiko_trend`), a
+leading indicator of SLA-breach risk: `Fristprosent` (CUSUM) only scores cases that have
+already closed, so this scores cases that are **still open** against their own
+`frist_dager`, catching a breach wave before it reaches the closed-case ratio. Removed:
+of everything in this repo, this was the easiest conversion — per-case classification is
+pure row-level arithmetic and threshold comparisons, no baseline or rolling window
+anywhere — see `Inflight_SLA_Risk_Monitor_POWERBI_DAX.md` (same filename, now pure DAX).
 
-- **Output:** `sak_frist_risiko` (one row per open case-phase `pk_faser`, full overwrite nightly — current-state detail), `sak_frist_risiko_trend` (indikator × enhet × snapshot_dato, append-mode idempotent per day — trend)
-- `risikoklasse` har verdiene `Bruddet`, `Kritisk`, `Risiko`, `Innenfor`
-- **Key constants:** `RISK_THRESHOLD_KRITISK` (0.90), `RISK_THRESHOLD_RISIKO` (0.75), `MIN_TEAM_VOLUME`
-- Open assumption to verify against the Lakehouse schema: whether `frist_dager` is reliably populated on rows that haven't closed yet — rows missing it are excluded, not defaulted.
+- `risikoklasse` still has the values `Bruddet`, `Kritisk`, `Risiko`, `Innenfor`, from the
+  same thresholds (`0.90`/`0.75`), computed live as a calculated column
+- **Same trend limitation as backlog aging below:** the daily risk-mix trend
+  (`sak_frist_risiko_trend`) depended on a persisted snapshot; a live measure can only show
+  today's mix, not history — the DAX doc covers "today" only
+- Same open assumption carried over, still unverified: whether `frist_dager` is reliably
+  populated on rows that haven't closed yet — rows missing it are excluded, not defaulted
 
 ## Backlog aging distribution (native DAX, no nightly script)
 
