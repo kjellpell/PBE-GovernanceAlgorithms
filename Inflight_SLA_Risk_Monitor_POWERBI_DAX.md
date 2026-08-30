@@ -107,6 +107,16 @@ SWITCH(
 - Filter: `Risikoklasse IN ("Bruddet", "Kritisk")`
 - Sortering: `DagerIgjen` stigende
 
+### Visual — forfaller neste 14 dager
+A separate list from the one above, on purpose: this filters on calendar proximity
+(`DagerIgjen`) rather than `% AndelBrukt`, so it catches a brand-new case with a short
+`frist_dager` before it's used enough of its own time to trip `Kritisk`/`Bruddet` — a case
+that started today with a 13-day deadline is `DagerIgjen = 13`, `AndelBrukt = 0%`
+(`Innenfor`), invisible to the list above until much closer to the deadline.
+- `indikator`, `enhet`, `fasetittel`, `DagerIgjen`, `Risikoklasse`
+- Filter: `NOT ISBLANK(DagerIgjen) && DagerIgjen >= 0 && DagerIgjen <= 14`
+- Sortering: `DagerIgjen` stigende
+
 ## Del 2 — Risikotrend over tid (persistert snapshot)
 
 Datakilde: `analyser.sak_frist_risiko_trend` (written nightly by
