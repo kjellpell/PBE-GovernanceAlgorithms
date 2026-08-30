@@ -9,8 +9,8 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | Nightly after main data pipeline |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
 | `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
-| `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko`, `sak_frist_risiko_trend` | Nightly after main data pipeline |
-| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Nightly after main data pipeline |
+| `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko_trend` (trend snapshot only — today's list is live DAX) | Nightly after main data pipeline |
+| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` (trend snapshot only — today's shape is live DAX) | Nightly after main data pipeline |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_arbeidsmengde`, `saksbehandler_konsentrasjon` | Nightly after main data pipeline |
 
 ## CUSUM_Changepoint.py
@@ -98,26 +98,19 @@ than exact parity.
 
 ## Inflight_SLA_Risk_Monitor.py
 
-Leading indicator of SLA-breach risk. `Fristprosent` (CUSUM) only scores cases that have already closed; this script scores cases that are **still open** against their own `frist_dager`, so a breach wave shows up here before it reaches the closed-case ratio. **Kept as a script, not native DAX** — briefly converted to live DAX measures, reverted for the same reason as `Backlog_Aging_Distribution.py`: `sak_frist_risiko_trend`'s daily risk-mix trend is a trend question, and a live measure only ever knows today's mix (`risikoklasse` depends on `TODAY()`), not what it was last week.
+Leading indicator of SLA-breach risk. `Fristprosent` (CUSUM) only scores cases that have already closed; this scores cases that are **still open** against their own `frist_dager`, so a breach wave shows up here before it reaches the closed-case ratio. **Minimal script — trend snapshot only.** `risikoklasse` depends on `TODAY()`, so today's per-case risk list is computed live in DAX straight from `saksbehandling.faser` (no nightly wait, no output table — see `Inflight_SLA_Risk_Monitor_POWERBI_DAX.md`, Del 1). This script's only remaining job is writing the daily risk-mix down for the trend chart Del 1 structurally can't produce — one `INSERT INTO ... SELECT`, pure Spark SQL, no pandas. `classify_risk()` stays in the script as the tested spec that the SQL's `CASE` expression (`risikoklasse_case_sql()`) is generated from, so the two can't drift apart.
 
-- **Output:** `sak_frist_risiko` (one row per open case-phase `pk_faser`, full overwrite nightly — current-state detail), `sak_frist_risiko_trend` (indikator × enhet × snapshot_dato, append-mode idempotent per day — trend)
+- **Output:** `sak_frist_risiko_trend` (indikator × enhet × snapshot_dato, append-mode idempotent per day)
 - `risikoklasse` har verdiene `Bruddet`, `Kritisk`, `Risiko`, `Innenfor`
 - **Key constants:** `RISK_THRESHOLD_KRITISK` (0.90), `RISK_THRESHOLD_RISIKO` (0.75), `MIN_TEAM_VOLUME`
 - Open assumption to verify against the Lakehouse schema: whether `frist_dager` is reliably populated on rows that haven't closed yet — rows missing it are excluded, not defaulted.
 
 ## Backlog_Aging_Distribution.py
 
-Tracks whether the *existing* open-case backlog is aging, independent of the throughput
-pressure monitor's net-flow score (which measures flow imbalance, not the age of work
-already in the queue). **Kept as a script, not native DAX** — an earlier pass converted
-this to live DAX measures, but that loses exactly the thing the script exists for: `Blir
-saksbunken eldre over tid?` is a trend question, and a live measure only ever knows what's
-open *today* (`TODAY()` has no memory of what was open last month). The whole point of the
-`snapshot_dato`-stamped, append-mode table is to answer that trend question — reverted.
+Tracks whether the *existing* open-case backlog is aging, independent of the throughput pressure monitor's net-flow score (which measures flow imbalance, not the age of work already in the queue). **Minimal script — trend snapshot only.** `Aldersgruppe` depends on `TODAY()`, so today's backlog shape is computed live in DAX straight from `saksbehandling.faser` (no nightly wait, no output table — see `Backlog_Aging_Distribution_POWERBI_DAX.md`, Del 1). This script's only remaining job is writing the daily age-bucket shape down for the trend chart Del 1 structurally can't produce — one `INSERT INTO ... SELECT`, pure Spark SQL (`percentile_approx` + a `CASE` expression), no pandas. `bucket_age()` stays in the script as the tested spec that the SQL's `CASE` expression (`aldersgruppe_case_sql()`) is generated from, so the two can't drift apart.
 
-- **Output:** `sak_alder_fordeling` (indikator × enhet × aldersgruppe × snapshot_dato, append-mode idempotent per day). `snapshot_dato` carries both roles — filter to `MAX(snapshot_dato)` for today's backlog shape, or chart the full table for the trend.
+- **Output:** `sak_alder_fordeling` (indikator × enhet × aldersgruppe × snapshot_dato, append-mode idempotent per day)
 - `aldersgruppe` buckets (default `AGE_BUCKETS`): `0-30`, `31-60`, `61-90`, `91-180`, `180+`
-- Percentiles (`median_alder_dager`, `p90_alder_dager`) computed in pandas/numpy, not Spark SQL — the grouping key is pandas-derived and backlog volume is small.
 
 ## Caseworker_Load_Concentration.py
 
