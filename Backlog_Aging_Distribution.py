@@ -2,26 +2,18 @@
 # Backlog aging TREND snapshot per indicator and team.
 # Runs nightly after main data pipeline.
 #
-# Purpose:
-#   "Is the existing backlog aging over time" is a trend question, and a live
-#   DAX measure only ever knows what's open TODAY (TODAY() has no memory of
-#   what was open last month). This script's only job is writing today's
-#   age-bucket shape down each night so Power BI can chart the trend.
-#
-#   TODAY's shape doesn't need this table at all — that's computed live in
-#   DAX directly against saksbehandling.faser (calculated columns, no
-#   nightly run needed). See Backlog_Aging_Distribution_POWERBI_DAX.md for
-#   both the live "today" measures and how to consume this trend table.
+# Aldersgruppe depends on TODAY() — this script's only job is writing that
+# day's age-bucket shape down so Power BI can chart the trend. Today's shape
+# itself is live DAX against saksbehandling.faser, no table needed — see
+# Backlog_Aging_Distribution_POWERBI_DAX.md (Del 1: live, Del 2: this table).
 #
 # Output table: sak_alder_fordeling
 #   One row per indikator x enhet x aldersgruppe x snapshot_dato.
 #
-# Implementation note: pure Spark SQL, no pandas/numpy. Age bucketing is a
-# SQL CASE expression and percentiles use percentile_approx — both native to
-# Spark SQL, so there's no need to pull rows down locally at all. AGE_BUCKETS
-# and bucket_age() below stay in Python only as the tested single source of
-# truth that aldersgruppe_case_sql() generates the CASE expression from, so
-# the two can never drift apart.
+# Pure Spark SQL, no pandas/numpy — age bucketing is a SQL CASE expression,
+# percentiles use percentile_approx. AGE_BUCKETS and bucket_age() stay in
+# Python only as the tested spec aldersgruppe_case_sql() generates its SQL
+# CASE expression from, so the two can't drift apart.
 #
 # Schedule: nightly after main data pipeline.
 # =============================================================================

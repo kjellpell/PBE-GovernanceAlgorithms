@@ -2,19 +2,12 @@
 # In-flight SLA risk TREND snapshot per indicator and team.
 # Runs nightly after main data pipeline.
 #
-# Purpose:
-#   Fristprosent (CUSUM) only scores cases that have already closed — a
-#   lagging indicator. "Is the open-case risk mix worsening over time" is a
-#   trend question, and risikoklasse depends on TODAY() (elapsed days since
-#   start), so a live DAX measure only ever knows today's mix. This script's
-#   only job is writing that mix down each night so Power BI can chart the
-#   trend before a breach wave reaches the closed-case ratio.
-#
-#   Today's per-case risk list doesn't need this table at all — that's
-#   computed live in DAX directly against saksbehandling.faser (calculated
-#   columns, no nightly run needed). See
-#   Inflight_SLA_Risk_Monitor_POWERBI_DAX.md for both the live "today" view
-#   and how to consume this trend table.
+# Fristprosent (CUSUM) only scores cases that have already closed. This
+# scores cases that are STILL OPEN against their own frist_dager. Risikoklasse
+# depends on TODAY() — this script's only job is writing that day's risk mix
+# down so Power BI can chart the trend before a breach wave reaches the
+# closed-case ratio. Today's per-case list is live DAX, no table needed —
+# see Inflight_SLA_Risk_Monitor_POWERBI_DAX.md (Del 1: live, Del 2: this table).
 #
 # Assumption to verify against the Lakehouse schema:
 #   it is unconfirmed whether frist_dager is reliably populated on rows

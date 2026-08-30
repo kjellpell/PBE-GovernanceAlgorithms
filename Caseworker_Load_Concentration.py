@@ -9,22 +9,17 @@
 #   Fristprosent) look fine? Concentration is measured with the Gini
 #   coefficient of open-caseload counts per saksbehandler within each enhet.
 #
-# Per-saksbehandler open caseload counts and shares (aktiv_saksmengde,
-# andel_av_enhetens_saksmengde) are NOT written by this script — Faser is
-# already grouped on saksbehandler live in DAX in the semantic model, so a
-# nightly copy of a plain COUNTROWS/DIVIDE would just be duplicated data.
-# See Caseworker_Load_Concentration_POWERBI_DAX.md, Del 1.
-#
-# This script's only remaining job is the Gini coefficient — the one thing
-# here that genuinely can't be a DAX measure (a rank-based Lorenz-curve
-# computation), and, being a snapshot of TODAY's open caseload, is also a
-# trend question a live measure can't answer on its own — same reasoning
-# as Backlog_Aging_Distribution.py / Inflight_SLA_Risk_Monitor.py.
+# Per-saksbehandler counts/shares are live DAX (Faser[saksbehandler] is
+# already in the model) — see Caseworker_Load_Concentration_POWERBI_DAX.md,
+# Del 1. This script's only job is the Gini coefficient (Del 2): rank-based
+# Lorenz-curve math genuinely can't be a DAX measure, and being a snapshot
+# of TODAY's open caseload, it's also a trend question a live measure can't
+# answer alone.
 #
 # Individual-level automated flagging is out of scope for this layer (see
-# CUSUM_Changepoint.py's explicit exclusion of saksbehandler from its
-# drilldown, for that exact reason) — saksbehandler_konsentrasjon only
-# ever stores enhet-level aggregates, never a per-person breakdown.
+# CUSUM_Changepoint.py's explicit exclusion of saksbehandler, for that exact
+# reason) — saksbehandler_konsentrasjon only ever stores enhet-level
+# aggregates, never a per-person breakdown.
 #
 # Schema assumption: the saksbehandler column name below is UNVERIFIED
 # against the Lakehouse schema (it is only ever mentioned in comments

@@ -20,7 +20,8 @@
 #   Saksbehandler is deliberately excluded — too thin per-segment volume,
 #   and individual-level automated flagging is out of scope for this layer.
 #
-# Output tables:
+# Output tables (addon signal only — no raw value; that's a live DAX
+# measure against saksbehandling.faser, see CUSUM_Changepoint_POWERBI_DAX.md):
 #   cusum_analyse     — løpende CUSUM-verdier og signalflagg
 #   pelt_analyse      — oppdagede endringspunkter med gjennomsnitt før/etter
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
