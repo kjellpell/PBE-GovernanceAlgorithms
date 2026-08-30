@@ -2,14 +2,11 @@
 
 ## Formål
 Trend direction (`Stigende` / `Synkende` / `Stabil`) for `Fristprosent`, `Behandlingstid`
-and `Produksjonsdifferanse`, computed live in the Power BI model instead of by a nightly
-`EWMA.py` script. The old script's only output that was actually used was this label — the
-smoothed EWMA lines themselves were harder to explain than a plain moving average for no
-real benefit at monthly reporting resolution, so this replaces the whole thing with a
-rolling-average slope, which is both simpler to read and native DAX.
+and `Produksjonsdifferanse`, from the slope of a rolling average — simpler to read than an
+exponentially weighted average, and native DAX.
 
-**No Delta table, no nightly run.** These are measures against the same fact table the old
-script queried (`saksbehandling.faser` in the Lakehouse — referred to below by whatever
+**No Delta table, no nightly run.** These are measures against the fact table
+(`saksbehandling.faser` in the Lakehouse — referred to below by whatever
 name it's imported into the semantic model as).
 
 ## Antagelser (rename to match your model)
