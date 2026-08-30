@@ -30,6 +30,31 @@ in DAX.
 `Kostra.py` is the one exception — it's SSB API ingestion, not a governance algorithm, and
 isn't part of this rule.
 
+## Two reports, not one
+
+Not every output here is intuitive to a leader without someone explaining the method
+first. Split into two Power BI reports along that line, rather than one report mixing
+self-explanatory labels with numbers that need a briefing:
+
+**Leder-rapport** — reads cold, no explanation needed:
+- `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
+- `Backlog_Aging_Distribution` — "X% of cases are 180+ days old"
+- `Inflight_SLA_Risk_Monitor` — `Bruddet`/`Kritisk`/`Risiko`/`Innenfor`, plus the due-in-14-days list
+- `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
+
+**Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
+step removed from the raw quantity, and needs someone who can defend the method:
+- `CUSUM_Changepoint` — why *this* month triggered, not last month, is an anchored-baseline judgment call
+- `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
+- `Throughput_Pressure_Monitor` — `pressure_nivaa` reads fine; the five-factor weighted score behind it doesn't
+- `Caseworker_Load_Concentration` — a Gini coefficient teaches a leader nothing on sight the way a percentage or a day count does; the color band is doing all the communicating, so keep the raw number out of any leader-facing view entirely
+
+Note the asymmetry between the two flow/queue pages: `Phase_Bottleneck_Detector` earns
+leader-report placement specifically because of `arsak_tekst` — its sibling
+`Throughput_Pressure_Monitor` has no equivalent plain-language field, only the composite
+score, so it stays in the analyst report despite being the same pattern one grain up.
+That's a real difference in what the two tables expose, not an inconsistency to fix.
+
 ## Scripts — the addon signal DAX can't produce
 
 | File | Output table(s) | What it computes |

@@ -1,5 +1,8 @@
 # Seasonal_YTD_ratio_extrapolation.py — Power BI and DAX
 
+**Målgruppe:** Analytiker-rapport — prognosen og intervallet leses greit, men å stole på
+tallet krever å stole på sesongratio-metoden bak det.
+
 ## Formål
 Vise årssluttprognose for fristprosent med usikkerhetsintervall basert på sesongmønster.
 

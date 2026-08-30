@@ -1,5 +1,10 @@
 # Throughput_Pressure_Monitor.py — Power BI and DAX
 
+**Målgruppe:** Analytiker-rapport — `pressure_nivaa` leser greit alene, men den
+femfaktors-vektede poengsummen bak den gjør det ikke. (Søstersiden
+`Phase_Bottleneck_Detector` er i leder-rapporten fordi den har `arsak_tekst` — denne
+tabellen har ikke et tilsvarende forklarende tekstfelt.)
+
 ## Formål
 Denne siden skal svare på:
 - Hvor er gjennomstrømmingspresset størst akkurat nå?

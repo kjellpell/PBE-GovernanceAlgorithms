@@ -1,5 +1,9 @@
 # Caseworker_Load_Concentration.py — Power BI and DAX
 
+**Målgruppe:** Analytiker-rapport — en Gini-koeffisient lærer en leder ingenting ved
+første øyekast slik en prosentandel eller et antall dager gjør. Vis kun fargekode/nivå i
+et eventuelt leder-vindu, aldri rå Gini-verdi.
+
 ## Formål
 Denne siden skal svare på:
 - Er aktiv saksmengde jevnt fordelt i et team, eller konsentrert på få personer?

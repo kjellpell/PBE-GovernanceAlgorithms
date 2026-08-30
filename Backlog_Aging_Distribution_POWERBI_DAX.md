@@ -1,5 +1,7 @@
 # Backlog_Aging_Distribution.py — Power BI and DAX
 
+**Målgruppe:** Leder-rapport — leser kaldt, ingen forklaring nødvendig.
+
 ## Formål
 Denne siden skal svare på:
 - Blir den eksisterende saksbunken eldre over tid, uavhengig av nettoflyt?

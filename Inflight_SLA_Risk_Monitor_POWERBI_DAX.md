@@ -1,5 +1,7 @@
 # Inflight_SLA_Risk_Monitor.py — Power BI and DAX
 
+**Målgruppe:** Leder-rapport — leser kaldt, ingen forklaring nødvendig.
+
 ## Formål
 Denne siden skal svare på:
 - Hvor mange åpne saker er i ferd med å sprenge fristen, før de lukkes?

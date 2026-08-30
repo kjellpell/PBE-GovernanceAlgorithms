@@ -1,5 +1,8 @@
 # CUSUM_Changepoint.py — Power BI and DAX
 
+**Målgruppe:** Analytiker-rapport — hvorfor signalet utløste akkurat denne måneden, og
+ikke forrige, krever å forstå den ankrede baseline-metoden.
+
 ## Formål
 Skille mellom tidlig driftssignal (CUSUM) og bekreftet strukturelt skift (PELT), med drill-down for årsaksforklaring.
 

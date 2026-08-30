@@ -1,5 +1,8 @@
 # Phase_Bottleneck_Detector.py — Power BI and DAX
 
+**Målgruppe:** Leder-rapport — `alvorlighet` pluss `arsak_tekst` er en fullstendig
+forklarende setning, ikke bare en kode; leser kaldt.
+
 ## Formål
 Denne siden skal svare på:
 - Hvilke faser er reelle flaskehalser per enhet og indikator?
