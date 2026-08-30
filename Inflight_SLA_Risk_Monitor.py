@@ -39,9 +39,8 @@ BATCH_ID = datetime.now().strftime("%Y%m%dT%H%M%S")
 RISK_THRESHOLD_KRITISK = 0.90
 RISK_THRESHOLD_RISIKO  = 0.75
 
-# Trend-table volume gate — same pattern as the throughput pressure
-# monitor's MIN_TEAM_VOLUME (now native DAX, see
-# Throughput_Pressure_Monitor_POWERBI_DAX.md).
+# Trend-table volume gate — same pattern as Throughput_Pressure_Monitor.py's
+# MIN_TEAM_VOLUME.
 MIN_TEAM_VOLUME = 10
 
 

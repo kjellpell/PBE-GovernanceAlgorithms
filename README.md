@@ -20,6 +20,13 @@ DAX measure straight against `saksbehandling.faser`, joined by `indikator` + `an
 is the "addon" a live measure can't produce; it is never a copy of something the fact table
 already gives you for free.
 
+DAX stays simple: a plain measure or a standard time-intelligence pattern, nothing a
+report author has to squint at. If the only way to express something in DAX is an
+iterative window-scan, a disconnected-date trick, or a string built up in a table
+constructor — the kind of measure that's slow to evaluate and hard for the next person to
+read — that's a script, not a fancy measure. Being *possible* in DAX isn't being *simple*
+in DAX.
+
 `Kostra.py` is the one exception — it's SSB API ingestion, not a governance algorithm, and
 isn't part of this rule.
 
@@ -29,6 +36,8 @@ isn't part of this rule.
 |---|---|---|
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | CUSUM drift score + PELT changepoints — recursive/segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
+| `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
+| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
 | `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Daily snapshot of open-case age buckets — `TODAY()`-dependent trend |
 | `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko_trend` | Daily snapshot of open-case risk mix — `TODAY()`-dependent trend |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_konsentrasjon` | Gini coefficient of workload concentration — rank-based math, `TODAY()`-dependent trend |
@@ -37,13 +46,15 @@ isn't part of this rule.
 All scripts share `START_YEAR = 2015` at the top — adjust to match the earliest reliable
 data in your Lakehouse. All (except `Kostra.py`) run nightly after the main data pipeline.
 
+Throughput_Pressure_Monitor and Phase_Bottleneck_Detector were briefly native DAX; reverted
+— the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
+role DAX has no clean primitive for, exactly the "possible but not simple" case above.
+
 ## Live DAX pages — no script, computed directly against Faser
 
 | Page (see `*_POWERBI_DAX.md`) | Replaces the removed script |
 |---|---|
 | `Trendretning` | Rolling-average trend direction (was `EWMA.py`) |
-| `Throughput_Pressure_Monitor` | Team-level flow imbalance + tidsbruk deviation |
-| `Phase_Bottleneck_Detector` | Phase-level queue pressure + tidsbruk deviation |
 
 ## Closed-case trend, drift, and forecast
 
@@ -83,21 +94,26 @@ years, only for what a live measure can't do: the forecast and its confidence in
 
 ## Flow and queue health
 
-### Throughput_Pressure_Monitor (live DAX — see `Throughput_Pressure_Monitor_POWERBI_DAX.md`)
+### Throughput_Pressure_Monitor.py
 
 Team-level (`enhet`) flow imbalance (received vs. completed) and processing-time
-deviation vs. a rolling baseline, combined into a `pressure_nivaa` (`Lav`/`Moderat`/`Hoy`/`Kritisk`).
-The doc flags two rough edges: the flow-streak measure needs a bounded window-scan (DAX
-has no run-length primitive), and the model needs a second date relationship
-(`startmilepaeldato`) to separate "received" from "completed" counts by month.
+deviation vs. a rolling baseline, combined into a `pressure_nivaa`
+(`Lav`/`Moderat`/`Hoy`/`Kritisk`).
 
-### Phase_Bottleneck_Detector (live DAX — see `Phase_Bottleneck_Detector_POWERBI_DAX.md`)
+- **Output:** `gjennomstoremming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
+- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`
+- `netto_flyt_streak` (consecutive positive-flow months) is exactly the kind of
+  order-dependent running count DAX has no clean primitive for — a script, not a fancy
+  measure
+
+### Phase_Bottleneck_Detector.py
 
 Same pattern one level down — phase-level (`fasetittel`) queue pressure and tidsbruk
 deviation, `alvorlighet` (`Lav`/`Moderat`/`Hoy`/`Kritisk`) with an `arsak_kode`/`arsak_tekst`
-explaining the flag. Needs a third date role on the model
-(`COALESCE(sluttmilepaeldato, startmilepaeldato)`, since this table groups by its own
-representative date rather than two independent date counts).
+explaining the flag.
+
+- **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)
+- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`
 
 ## In-flight (currently-open) state
 
