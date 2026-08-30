@@ -25,6 +25,7 @@ Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per in
 - `signalretning` og `endringsretning` har verdiene `Økning` og `Nedgang`.
 - `signal` er en boolsk verdi.
 - CUSUM's mu/sigma are computed from a fixed, anchored baseline window (the series' first `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` observations), not the whole history — otherwise a slow persistent drift would partially get absorbed into "normal" and dampen detection sensitivity.
+- `cusum_analyse` does **not** store the raw underlying value (Fristprosent/Behandlingstid/Produksjonsdifferanse) — that's a plain live DAX measure against `saksbehandling.faser` (see `CUSUM_Changepoint_POWERBI_DAX.md`), joined on indikator/maaltall/granularitet/analyse_dato. Only `cusum_positiv`/`cusum_negativ`/`signal` are stored — the recursive reset-at-each-step math genuinely can't be a DAX measure.
 
 ### pelt_analyse_detaljer
 
@@ -54,11 +55,11 @@ in Power BI with a rolling-average-slope DAX measure — see `Trendretning_POWER
 
 ## Seasonal_YTD_ratio_extrapolation.py
 
-Projects year-end `frist%` from current YTD using trimmed seasonal ratios from historical years.
+Projects year-end `frist%` from current YTD using trimmed seasonal ratios from historical years. **Minimal script — forecast only.** Actual YTD is a plain live DAX year-to-date measure against `saksbehandling.faser` (standard time intelligence, no algorithm needed — see `Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md`, Del 1); the script's only remaining job is the part DAX genuinely can't do: the trimmed seasonal-ratio model and its confidence interval.
 
 - **Minimum history:** 3 complete years per indicator
 - **Confidence interval:** 80% (z=1.28), derived from ratio variance (delta method)
-- `type = 'actual'` for past months, `type = 'forecast'` for remaining months
+- `frist_prognose` now holds only forecast rows (`type` is always `'Prognose'`) for the remaining months of the current year
 - Idempotent — deletes and rewrites current-year rows on each run
 
 ## Throughput pressure monitor (native DAX, no nightly script)

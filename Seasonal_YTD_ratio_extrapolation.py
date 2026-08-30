@@ -10,8 +10,12 @@
 #   5. Confidence interval from trimmed variance across historical years
 #
 # Output table: frist_prognose
-#   One row per indicator per month — actuals for past months,
-#   forecast for remaining months of current year.
+#   One row per indicator per remaining month of the current year — the
+#   forecast and its confidence interval only. Actual YTD for past months
+#   isn't written here: it's a plain live DAX year-to-date measure against
+#   saksbehandling.faser (standard time intelligence, no algorithm needed),
+#   so storing a copy of it here would just be duplicated data. See
+#   Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
 #
 # Schedule: nightly, after main data pipeline.
 # Minimum history: 3 years per indicator. Suppressed below that.
@@ -56,7 +60,7 @@ CREATE TABLE IF NOT EXISTS prognoser.frist_prognose (
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Årssluttprognose for fristprosent per indikator. type=Faktisk for måneder med data og type=Prognose for gjenstående måneder. Konfidensgrensene er 80 prosent og bygger på historisk variasjon i samme sesongposisjon.'
+COMMENT 'Årssluttprognose for fristprosent per indikator — kun prognoserte gjenstående måneder (type alltid Prognose). Faktisk YTD er en live DAX-mål mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 80 prosent og bygger på historisk variasjon i samme sesongposisjon.'
 """)
 
 print("prognoser.frist-tabellen er klar")
@@ -278,20 +282,12 @@ for indikator in indicators:
         latest_ytd, latest_month, ratios
     )
 
-    # Write actual rows — one per month with data this year
-    for mnd, ytd_val in current_ytd.items():
-        analyse_dato = (pd.Timestamp(CURRENT_YEAR, mnd, 1) + pd.offsets.MonthEnd(0)).date()
-        results.append({
-            "indikator":         indikator,
-            "analyse_dato":      analyse_dato,
-            "type":              "Faktisk",
-            "verdi":             round(float(ytd_val), 4),
-            "nedre_konfidensgrense": None,
-            "oevre_konfidensgrense": None,
-            "prognose_aarsslutt": year_end_est,
-            "kjoert_tidspunkt":  datetime.now(),
-            "kjoere_id":         BATCH_ID,
-        })
+    # Actual YTD rows are NOT written here — verdi for type='Faktisk' months
+    # is just the YTD ratio, which is a plain live DAX measure against
+    # saksbehandling.faser (standard year-to-date time intelligence, no
+    # algorithm needed). This table only stores what a live measure
+    # structurally can't produce: the seasonal-ratio forecast and its
+    # confidence interval. See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
 
     # Write forecast rows — remaining months of current year
     previous_forecast_ytd = latest_ytd
@@ -371,20 +367,16 @@ else:
 
     print(f"prognoser.frist_prognose skrevet: {len(results)} rader")
 
-    # Summary — year-end estimates for current indicators
+    # Summary — year-end estimates for current indicators. verdi_hittil
+    # (actual YTD so far) isn't in this table anymore — it's a live DAX
+    # measure — so this only shows what the table actually holds.
     spark.sql(f"""
         SELECT
             indikator,
-            MAX_BY(
-                CASE WHEN type = 'Faktisk' THEN verdi END,
-                CASE WHEN type = 'Faktisk' THEN analyse_dato END
-            )                                                       AS verdi_hittil,
             MAX(prognose_aarsslutt)                      AS prognose_aarsslutt,
-            MAX(CASE WHEN type = 'Prognose'
-                     AND analyse_dato = '{CURRENT_YEAR}-12-31'
+            MAX(CASE WHEN analyse_dato = '{CURRENT_YEAR}-12-31'
                      THEN nedre_konfidensgrense END)     AS nedre_konfidensgrense,
-            MAX(CASE WHEN type = 'Prognose'
-                     AND analyse_dato = '{CURRENT_YEAR}-12-31'
+            MAX(CASE WHEN analyse_dato = '{CURRENT_YEAR}-12-31'
                      THEN oevre_konfidensgrense END)     AS oevre_konfidensgrense
         FROM prognoser.frist_prognose
         WHERE kjoere_id = '{BATCH_ID}'
