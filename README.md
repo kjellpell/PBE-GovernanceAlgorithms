@@ -11,7 +11,7 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 | `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
 | `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko_trend` (trend snapshot only — today's list is live DAX) | Nightly after main data pipeline |
 | `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` (trend snapshot only — today's shape is live DAX) | Nightly after main data pipeline |
-| `Caseworker_Load_Concentration.py` | `saksbehandler_arbeidsmengde`, `saksbehandler_konsentrasjon` | Nightly after main data pipeline |
+| `Caseworker_Load_Concentration.py` | `saksbehandler_konsentrasjon` (Gini trend only — today's per-person counts are live DAX) | Nightly after main data pipeline |
 
 ## CUSUM_Changepoint.py
 
@@ -115,10 +115,10 @@ Tracks whether the *existing* open-case backlog is aging, independent of the thr
 
 ## Caseworker_Load_Concentration.py
 
-Team-level workload concentration / bus-factor / burnout early warning: is active caseload piling up on a few caseworkers within a team, even while the team's aggregate numbers look fine? Concentration is measured with the Gini coefficient of open-caseload counts per saksbehandler within each enhet.
+Team-level workload concentration / bus-factor / burnout early warning: is active caseload piling up on a few caseworkers within a team, even while the team's aggregate numbers look fine? Concentration is measured with the Gini coefficient of open-caseload counts per saksbehandler within each enhet. **Minimal script — Gini trend only.** Per-person open caseload counts and shares are plain live DAX against `saksbehandling.faser` (`Faser[saksbehandler]` is already in the semantic model — see `Caseworker_Load_Concentration_POWERBI_DAX.md`, Del 1); this script's only remaining job is the Gini coefficient, which genuinely can't be a DAX measure (rank-based Lorenz-curve math), and which — being a snapshot of today's open caseload — is also a trend question a live measure can't answer on its own, same reasoning as `Backlog_Aging_Distribution.py`/`Inflight_SLA_Risk_Monitor.py`.
 
-- **Deliberate exception to repo convention:** this is the only script here that persists per-individual (per-saksbehandler) data. It exists for internal manager capacity-planning/workload-balancing use — **not** for automated escalation or individual performance flagging (the same reason `CUSUM_Changepoint.py`'s drilldown explicitly excludes saksbehandler). Do not repurpose `saksbehandler_arbeidsmengde` for automated per-person alerting.
-- **Output:** `saksbehandler_arbeidsmengde` (enhet × saksbehandler, **full overwrite nightly, no history retained at the individual grain**), `saksbehandler_konsentrasjon` (enhet × snapshot_dato, append-mode idempotent per day — Gini trend, **no individual data**, only accumulates history at the enhet level)
+- Individual-level automated flagging is still out of scope for this layer (the same reason `CUSUM_Changepoint.py`'s drilldown explicitly excludes saksbehandler) — `saksbehandler_konsentrasjon` only ever stores enhet-level aggregates, never a per-person breakdown.
+- **Output:** `saksbehandler_konsentrasjon` (enhet × snapshot_dato, append-mode idempotent per day — Gini trend, **no individual data**)
 - **Key constants:** `MIN_SAKSBEHANDLERE` (3) — Gini on 1-2 people is meaningless, gates `tilstrekkelig_volum`
 - `SAKSBEHANDLER_COL` is unverified against the Lakehouse schema — verify before relying on this script.
 
