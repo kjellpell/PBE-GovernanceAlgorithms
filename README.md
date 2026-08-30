@@ -9,6 +9,7 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | Nightly after main data pipeline |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
 | `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
+| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Nightly after main data pipeline |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_arbeidsmengde`, `saksbehandler_konsentrasjon` | Nightly after main data pipeline |
 
 ## CUSUM_Changepoint.py
@@ -106,27 +107,26 @@ anywhere — see `Inflight_SLA_Risk_Monitor_POWERBI_DAX.md` (same filename, now 
 
 - `risikoklasse` still has the values `Bruddet`, `Kritisk`, `Risiko`, `Innenfor`, from the
   same thresholds (`0.90`/`0.75`), computed live as a calculated column
-- **Same trend limitation as backlog aging below:** the daily risk-mix trend
-  (`sak_frist_risiko_trend`) depended on a persisted snapshot; a live measure can only show
-  today's mix, not history — the DAX doc covers "today" only
+- **Same trend trade-off `Backlog_Aging_Distribution.py` was reverted over:** the daily
+  risk-mix trend (`sak_frist_risiko_trend`) depended on a persisted snapshot; a live
+  measure can only show today's mix, not history — the DAX doc covers "today" only. Worth
+  revisiting the same way if that trend view turns out to matter here too.
 - Same open assumption carried over, still unverified: whether `frist_dager` is reliably
   populated on rows that haven't closed yet — rows missing it are excluded, not defaulted
 
-## Backlog aging distribution (native DAX, no nightly script)
+## Backlog_Aging_Distribution.py
 
-Used to be `Backlog_Aging_Distribution.py` (`sak_alder_fordeling`), tracking whether the
-*existing* open-case backlog is aging, independent of the throughput pressure monitor's
-net-flow score (which measures flow imbalance, not the age of work already in the queue).
-Removed: age bucketing and the median/p90 age are plain row-level arithmetic — see
-`Backlog_Aging_Distribution_POWERBI_DAX.md` (same filename, now documents pure DAX
-measures instead of a script's output table).
+Tracks whether the *existing* open-case backlog is aging, independent of the throughput
+pressure monitor's net-flow score (which measures flow imbalance, not the age of work
+already in the queue). **Kept as a script, not native DAX** — an earlier pass converted
+this to live DAX measures, but that loses exactly the thing the script exists for: `Blir
+saksbunken eldre over tid?` is a trend question, and a live measure only ever knows what's
+open *today* (`TODAY()` has no memory of what was open last month). The whole point of the
+`snapshot_dato`-stamped, append-mode table is to answer that trend question — reverted.
 
-- **Trade-off to know before relying on this:** the old script's `snapshot_dato`-stamped
-  table let you trend the backlog's age shape over time. A live DAX measure only ever
-  knows what's open *today* — it cannot reproduce that historical trend without something
-  still persisting a daily snapshot somewhere. The DAX doc covers "today's backlog shape"
-  only; it's explicit about what was dropped.
-- `aldersgruppe` buckets (unchanged): `0-30`, `31-60`, `61-90`, `91-180`, `180+`
+- **Output:** `sak_alder_fordeling` (indikator × enhet × aldersgruppe × snapshot_dato, append-mode idempotent per day). `snapshot_dato` carries both roles — filter to `MAX(snapshot_dato)` for today's backlog shape, or chart the full table for the trend.
+- `aldersgruppe` buckets (default `AGE_BUCKETS`): `0-30`, `31-60`, `61-90`, `91-180`, `180+`
+- Percentiles (`median_alder_dager`, `p90_alder_dager`) computed in pandas/numpy, not Spark SQL — the grouping key is pandas-derived and backlog volume is small.
 
 ## Caseworker_Load_Concentration.py
 

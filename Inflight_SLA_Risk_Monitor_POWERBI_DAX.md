@@ -110,11 +110,12 @@ SWITCH(
 
 ## Viktig begrensning: ingen historisk risikotrend uten et snapshot
 The old script's `sak_frist_risiko_trend` table captured the daily risk-class mix, letting
-you chart whether the risk distribution was worsening over time. That's the same
-point-in-time problem `Backlog_Aging_Distribution` had: `Risikoklasse` depends on `TODAY()`,
-so a live measure only ever knows today's mix, not what it was last month. This page can
-answer "what does today's open-case risk look like" but not "is it trending worse" —
-that still needs something persisting a daily snapshot if it matters.
+you chart whether the risk distribution was worsening over time. `Risikoklasse` depends on
+`TODAY()`, so a live measure only ever knows today's mix, not what it was last month — the
+same reason `Backlog_Aging_Distribution.py` was kept as a script rather than converted to
+DAX. This page can answer "what does today's open-case risk look like" but not "is it
+trending worse" — that still needs something persisting a daily snapshot if it matters,
+and the same revert is worth doing here if it turns out to.
 
 ## Anbefalte visualer
 
