@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS prognoser.frist_prognose (
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Årssluttprognose for fristprosent per indikator — kun prognoserte gjenstående måneder (type alltid Prognose). Faktisk YTD er en live DAX-mål mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 80 prosent og bygger på historisk variasjon i samme sesongposisjon.'
+COMMENT 'Årssluttprognose for fristprosent per indikator — kun prognoserte gjenstående måneder (type alltid Prognose). Faktisk YTD er en live DAX-mål mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og bygger på historisk variasjon i samme sesongposisjon.'
 """)
 
 print("prognoser.frist-tabellen er klar")
@@ -177,10 +177,10 @@ def seasonal_ratios(df, indikator, current_year, min_years=3, trim_n=1):
     return result if result else None
 
 
-def project_year_end(current_ytd, month, ratios, z=1.28):
+def project_year_end(current_ytd, month, ratios, z=1.645):
     """
     Project year-end frist% from current YTD value.
-    z=1.28 gives 80% confidence interval (appropriate for governance).
+    z=1.645 gives 90% confidence interval (appropriate for governance).
 
     Returns (year_end_estimate, ci_lower, ci_upper) or (None, None, None).
     """
