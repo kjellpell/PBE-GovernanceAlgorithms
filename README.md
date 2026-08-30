@@ -9,6 +9,7 @@ Statistical governance algorithms for indicator time series. Designed to run as 
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | Nightly after main data pipeline |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
 | `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
+| `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko`, `sak_frist_risiko_trend` | Nightly after main data pipeline |
 | `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Nightly after main data pipeline |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_arbeidsmengde`, `saksbehandler_konsentrasjon` | Nightly after main data pipeline |
 
@@ -95,24 +96,14 @@ than exact parity.
 
 - `alvorlighet` still has the values `Lav`, `Moderat`, `Hoy`, `Kritisk`; `arsak_kode`/`arsak_tekst` still explain the flag, computed live
 
-## In-flight SLA risk monitor (native DAX, no nightly script)
+## Inflight_SLA_Risk_Monitor.py
 
-Used to be `Inflight_SLA_Risk_Monitor.py` (`sak_frist_risiko`, `sak_frist_risiko_trend`), a
-leading indicator of SLA-breach risk: `Fristprosent` (CUSUM) only scores cases that have
-already closed, so this scores cases that are **still open** against their own
-`frist_dager`, catching a breach wave before it reaches the closed-case ratio. Removed:
-of everything in this repo, this was the easiest conversion — per-case classification is
-pure row-level arithmetic and threshold comparisons, no baseline or rolling window
-anywhere — see `Inflight_SLA_Risk_Monitor_POWERBI_DAX.md` (same filename, now pure DAX).
+Leading indicator of SLA-breach risk. `Fristprosent` (CUSUM) only scores cases that have already closed; this script scores cases that are **still open** against their own `frist_dager`, so a breach wave shows up here before it reaches the closed-case ratio. **Kept as a script, not native DAX** — briefly converted to live DAX measures, reverted for the same reason as `Backlog_Aging_Distribution.py`: `sak_frist_risiko_trend`'s daily risk-mix trend is a trend question, and a live measure only ever knows today's mix (`risikoklasse` depends on `TODAY()`), not what it was last week.
 
-- `risikoklasse` still has the values `Bruddet`, `Kritisk`, `Risiko`, `Innenfor`, from the
-  same thresholds (`0.90`/`0.75`), computed live as a calculated column
-- **Same trend trade-off `Backlog_Aging_Distribution.py` was reverted over:** the daily
-  risk-mix trend (`sak_frist_risiko_trend`) depended on a persisted snapshot; a live
-  measure can only show today's mix, not history — the DAX doc covers "today" only. Worth
-  revisiting the same way if that trend view turns out to matter here too.
-- Same open assumption carried over, still unverified: whether `frist_dager` is reliably
-  populated on rows that haven't closed yet — rows missing it are excluded, not defaulted
+- **Output:** `sak_frist_risiko` (one row per open case-phase `pk_faser`, full overwrite nightly — current-state detail), `sak_frist_risiko_trend` (indikator × enhet × snapshot_dato, append-mode idempotent per day — trend)
+- `risikoklasse` har verdiene `Bruddet`, `Kritisk`, `Risiko`, `Innenfor`
+- **Key constants:** `RISK_THRESHOLD_KRITISK` (0.90), `RISK_THRESHOLD_RISIKO` (0.75), `MIN_TEAM_VOLUME`
+- Open assumption to verify against the Lakehouse schema: whether `frist_dager` is reliably populated on rows that haven't closed yet — rows missing it are excluded, not defaulted.
 
 ## Backlog_Aging_Distribution.py
 
