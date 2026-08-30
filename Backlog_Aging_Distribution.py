@@ -1,41 +1,28 @@
 # =============================================================================
-# Backlog aging distribution per indicator and team.
+# Backlog aging TREND snapshot per indicator and team.
 # Runs nightly after main data pipeline.
 #
-# Purpose:
-#   Throughput_Pressure_Monitor.py scores flow imbalance (received vs
-#   completed), which is a different signal from whether the EXISTING
-#   backlog is getting older. A team can have balanced net flow while its
-#   oldest open cases keep aging — this script tracks that aging tail
-#   directly, bucketed by how long each open case has been open.
+# Aldersgruppe depends on TODAY() — this script's only job is writing that
+# day's age-bucket shape down so Power BI can chart the trend. Today's shape
+# itself is live DAX against saksbehandling.faser, no table needed — see
+# Backlog_Aging_Distribution_POWERBI_DAX.md (Del 1: live, Del 2: this table).
 #
 # Output table: sak_alder_fordeling
 #   One row per indikator x enhet x aldersgruppe x snapshot_dato.
-#   snapshot_dato carries both roles at once: filter to MAX(snapshot_dato)
-#   for "today's backlog shape", or chart the whole table for the trend.
-# Power BI/DAX guidance:
-#   see Backlog_Aging_Distribution_POWERBI_DAX.md
+#
+# Pure Spark SQL, no pandas/numpy — age bucketing is a SQL CASE expression,
+# percentiles use percentile_approx. AGE_BUCKETS and bucket_age() stay in
+# Python only as the tested spec aldersgruppe_case_sql() generates its SQL
+# CASE expression from, so the two can't drift apart.
 #
 # Schedule: nightly after main data pipeline.
 # =============================================================================
 
 from pyspark.sql import SparkSession
-from pyspark.sql.types import (
-    StructType,
-    StructField,
-    StringType,
-    IntegerType,
-    DoubleType,
-    TimestampType,
-    DateType,
-)
-import pandas as pd
-import numpy as np
 from datetime import datetime, date
 
 spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 BATCH_ID = datetime.now().strftime("%Y%m%dT%H%M%S")
-TODAY    = pd.Timestamp(date.today())
 
 # Ordered (min_days, max_days, label) age buckets. max_days=None means
 # unbounded (open-ended top bucket). Must stay contiguous — no gaps.
@@ -46,6 +33,39 @@ AGE_BUCKETS = [
     (91,  180,  "91-180"),
     (181, None, "180+"),
 ]
+
+
+def bucket_age(age_days, buckets=AGE_BUCKETS):
+    """
+    Map an age in days to its bucket label using an ordered list of
+    (min_days, max_days, label) tuples; max_days=None means unbounded
+    (open-ended top bucket). Returns None for negative or missing age_days,
+    or if no bucket matches (should not happen given contiguous AGE_BUCKETS).
+
+    Not used at runtime (aldersgruppe_case_sql() below builds the equivalent
+    SQL CASE expression instead) — kept as the tested spec the two must
+    agree on.
+    """
+    if age_days is None or age_days < 0:
+        return None
+    for lo, hi, label in buckets:
+        if age_days < lo:
+            continue
+        if hi is None or age_days <= hi:
+            return label
+    return None
+
+
+def aldersgruppe_case_sql(column, buckets=AGE_BUCKETS):
+    """Build the SQL CASE expression equivalent to bucket_age() above."""
+    lines = ["CASE"]
+    for lo, hi, label in buckets:
+        if hi is None:
+            lines.append(f"        WHEN {column} >= {lo} THEN '{label}'")
+        else:
+            lines.append(f"        WHEN {column} BETWEEN {lo} AND {hi} THEN '{label}'")
+    lines.append("    END")
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -72,139 +92,55 @@ print("sak_alder_fordeling-tabellen er klar")
 
 
 # =============================================================================
-# CELL 2 — Load open case-phases
+# CELL 2 — Snapshot today's open-case age distribution
 # =============================================================================
-
-open_cases = spark.sql("""
-    SELECT
-        pr.indikator,
-        COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
-        CAST(pr.startmilepaeldato AS DATE) AS startmilepaeldato
-    FROM saksbehandling.faser pr
-    INNER JOIN felles.indikator indikator
-        ON indikator.pk_indikator = pr.indikator
-    WHERE pr.startmilepaeldato IS NOT NULL
-      AND pr.sluttmilepaeldato IS NULL
-      AND pr.indikator NOT LIKE '%avtalt%'
-      AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-""").toPandas()
-
-open_cases["startmilepaeldato"] = pd.to_datetime(open_cases["startmilepaeldato"])
-
-print(f"Åpne saker: {len(open_cases):,}")
-
-
-# =============================================================================
-# CELL 3 — Bucket by age
-# =============================================================================
-
-def bucket_age(age_days, buckets=AGE_BUCKETS):
-    """
-    Map an age in days to its bucket label using an ordered list of
-    (min_days, max_days, label) tuples; max_days=None means unbounded
-    (open-ended top bucket). Returns None for negative or missing age_days,
-    or if no bucket matches (should not happen given contiguous AGE_BUCKETS).
-    """
-    if age_days is None or age_days < 0:
-        return None
-    for lo, hi, label in buckets:
-        if age_days < lo:
-            continue
-        if hi is None or age_days <= hi:
-            return label
-    return None
-
-
-if open_cases.empty:
-    open_cases["alder_dager"]  = pd.Series(dtype="int64")
-    open_cases["aldersgruppe"] = pd.Series(dtype="object")
-else:
-    open_cases["alder_dager"]  = (TODAY - open_cases["startmilepaeldato"]).dt.days
-    open_cases["aldersgruppe"] = open_cases["alder_dager"].apply(bucket_age)
-
-print(f"Rader bucketet: {len(open_cases):,}")
-if not open_cases.empty:
-    print(open_cases["aldersgruppe"].value_counts().to_string())
-
-
-# =============================================================================
-# CELL 4 — Aggregate per indikator/enhet/aldersgruppe
-# =============================================================================
-# Percentiles computed in pandas/numpy, not Spark SQL: aldersgruppe is a
-# pandas-derived column (not something percentile_approx can group on
-# without a second Spark round-trip), and the open-case backlog is small
-# enough that pulling it down once and aggregating locally is simpler.
 
 snapshot_dato = date.today()
 
-agg_rows = []
-if not open_cases.empty:
-    for (indikator, enhet, aldersgruppe), grp in open_cases.groupby(
-        ["indikator", "enhet", "aldersgruppe"], dropna=False
-    ):
-        ages = grp["alder_dager"].to_numpy()
-        agg_rows.append({
-            "indikator":          indikator,
-            "enhet":              enhet,
-            "aldersgruppe":       aldersgruppe,
-            "snapshot_dato":      snapshot_dato,
-            "antall_saker":       int(len(ages)),
-            "median_alder_dager": round(float(np.median(ages)), 2),
-            "p90_alder_dager":    round(float(np.percentile(ages, 90)), 2),
-            "kjoert_tidspunkt":   datetime.now(),
-            "kjoere_id":          BATCH_ID,
-        })
+spark.sql(f"""
+    DELETE FROM analyser.sak_alder_fordeling
+    WHERE snapshot_dato = DATE('{snapshot_dato.isoformat()}')
+""")
 
-print(f"Aggregerte rader: {len(agg_rows):,}")
+spark.sql(f"""
+    INSERT INTO analyser.sak_alder_fordeling
+    WITH open_cases AS (
+        SELECT
+            pr.indikator,
+            COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
+            DATEDIFF(CURRENT_DATE(), CAST(pr.startmilepaeldato AS DATE)) AS alder_dager
+        FROM saksbehandling.faser pr
+        INNER JOIN felles.indikator indikator
+            ON indikator.pk_indikator = pr.indikator
+        WHERE pr.startmilepaeldato IS NOT NULL
+          AND pr.sluttmilepaeldato IS NULL
+          AND pr.indikator NOT LIKE '%avtalt%'
+          AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+    ),
+    bucketed AS (
+        SELECT *, {aldersgruppe_case_sql("alder_dager")} AS aldersgruppe
+        FROM open_cases
+        WHERE alder_dager >= 0
+    )
+    SELECT
+        indikator,
+        enhet,
+        aldersgruppe,
+        DATE('{snapshot_dato.isoformat()}') AS snapshot_dato,
+        COUNT(*) AS antall_saker,
+        percentile_approx(alder_dager, 0.5, 1000) AS median_alder_dager,
+        percentile_approx(alder_dager, 0.9, 1000) AS p90_alder_dager,
+        current_timestamp() AS kjoert_tidspunkt,
+        '{BATCH_ID}' AS kjoere_id
+    FROM bucketed
+    GROUP BY indikator, enhet, aldersgruppe
+""")
 
-
-# =============================================================================
-# CELL 5 — Write to Lakehouse
-# =============================================================================
-
-SCHEMA = StructType([
-    StructField("indikator",          StringType(),    False),
-    StructField("enhet",              StringType(),    False),
-    StructField("aldersgruppe",       StringType(),    False),
-    StructField("snapshot_dato",      DateType(),      False),
-    StructField("antall_saker",       IntegerType(),   False),
-    StructField("median_alder_dager", DoubleType(),    True),
-    StructField("p90_alder_dager",    DoubleType(),    True),
-    StructField("kjoert_tidspunkt",   TimestampType(), False),
-    StructField("kjoere_id",          StringType(),    False),
-])
-
-
-def to_records(rows, schema):
-    casters = {
-        StringType():  lambda v: None if v is None else str(v),
-        IntegerType(): lambda v: None if v is None else int(v),
-        DoubleType():  lambda v: None if v is None else float(v),
-    }
-    out = []
-    for row in rows:
-        values = []
-        for field in schema.fields:
-            v = row.get(field.name)
-            if v is not None and pd.isna(v):
-                v = None
-            cast = casters.get(field.dataType)
-            values.append(cast(v) if cast else v)
-        out.append(tuple(values))
-    return out
-
-
-if agg_rows:
-    spark.sql(f"DELETE FROM analyser.sak_alder_fordeling WHERE snapshot_dato = DATE('{snapshot_dato.isoformat()}')")
-    agg_spark = spark.createDataFrame(to_records(agg_rows, SCHEMA), schema=SCHEMA)
-    agg_spark.write.mode("append").saveAsTable("analyser.sak_alder_fordeling")
-    print(f"sak_alder_fordeling oppdatert for {snapshot_dato}: {len(agg_rows):,} rader")
-else:
-    print("Ingen åpne saker å skrive til sak_alder_fordeling.")
+print(f"sak_alder_fordeling oppdatert for {snapshot_dato}")
 
 
 # =============================================================================
-# CELL 6 — Verification
+# CELL 3 — Verification
 # =============================================================================
 
 spark.sql(f"""

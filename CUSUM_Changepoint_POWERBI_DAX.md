@@ -4,7 +4,14 @@
 Skille mellom tidlig driftssignal (CUSUM) og bekreftet strukturelt skift (PELT), med drill-down for årsaksforklaring.
 
 Datakilder:
-- `analyser.cusum_analyse`
+- `analyser.cusum_analyse` — signal/score only; `signal` and `cusum_positiv`/`cusum_negativ`
+  are genuinely not reproducible in DAX (the recursive `max(0, S_{t-1} + ...)` reset at
+  each step is the same class of sequential logic that made the throughput monitor's
+  streak measure fragile — not something to fake in a measure). The raw underlying value
+  (Fristprosent/Behandlingstid/Produksjonsdifferanse) is deliberately **not** stored here
+  — it's the same live DAX measure used everywhere else in this repo (`Trendretning_POWERBI_DAX.md`'s
+  monthly measures for `granularitet = "Månedlig"`; build the analogous weekly version —
+  same pattern, a weekly `Kalender` grain instead of monthly — if you need a weekly raw line).
 - `analyser.pelt_analyse`
 - `analyser.pelt_analyse_detaljer`
 
@@ -12,7 +19,9 @@ Datakilder:
 
 ### 1) CUSUM-linje (tidlig varsling)
 - X-akse: `analyse_dato`
-- Linjer: `cusum_positiv`, `cusum_negativ`
+- Linjer: `cusum_positiv`, `cusum_negativ` (from `cusum_analyse`) — optionally add the raw
+  value as a third line from the live DAX measure above, joined on `indikator` +
+  `analyse_dato`
 - Referanselinje: terskel (`CUSUM_H`)
 - Filter: `indikator`, `maaltall`, `granularitet`
 

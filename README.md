@@ -1,133 +1,167 @@
 # PBE-GovernanceAlgorithms
 
-Statistical governance algorithms for indicator time series. Designed to run as nightly Fabric Notebooks (PySpark + pandas). All output tables are Delta Lake, all output values in Norwegian, DAX measure names in Norwegian.
+One system for monitoring case-processing indicators (`Fristprosent`, `Behandlingstid`,
+`Produksjonsdifferanse`) from several angles: trend, drift, forecast, flow, backlog,
+in-flight risk, workload. All views read the same fact table
+(`saksbehandling.faser`, `pk_indikator` from `felles.indikator`), all output values in
+Norwegian, DAX measure names in Norwegian.
 
-## Scripts
+## One rule, applied everywhere
 
-| File | Output table(s) | Schedule |
+A script exists only for what a live DAX measure structurally cannot do:
+- a genuine algorithm (changepoint detection, statistical forecasting, rank-based
+  concentration), or
+- a value that depends on `TODAY()` and needs its history preserved day by day, since a
+  live measure only ever knows "now," never what "now" looked like last week.
+
+Everything else — raw values, YTD ratios, per-period counts, per-person shares — is a live
+DAX measure straight against `saksbehandling.faser`, joined by `indikator` + `analyse_dato`
+(add `enhet` at team level, `saksbehandler` at individual level). A script's output table
+is the "addon" a live measure can't produce; it is never a copy of something the fact table
+already gives you for free.
+
+DAX stays simple: a plain measure or a standard time-intelligence pattern, nothing a
+report author has to squint at. If the only way to express something in DAX is an
+iterative window-scan, a disconnected-date trick, or a string built up in a table
+constructor — the kind of measure that's slow to evaluate and hard for the next person to
+read — that's a script, not a fancy measure. Being *possible* in DAX isn't being *simple*
+in DAX.
+
+`Kostra.py` is the one exception — it's SSB API ingestion, not a governance algorithm, and
+isn't part of this rule.
+
+## Scripts — the addon signal DAX can't produce
+
+| File | Output table(s) | What it computes |
 |---|---|---|
-| `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | Nightly after main data pipeline |
-| `EWMA.py` | `ewma_analyse` | Nightly after main pipeline |
-| `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Nightly after main pipeline |
-| `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Nightly after main data pipeline |
-| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Nightly after main data pipeline |
-| `Building_Application_Type.py` | `building_application_type` | Nightly |
-| `Kostra.py` | `kostra_*` (one Delta table per SSB KOSTRA series, `kostra_` prefix) | Independent — SSB API sync, not part of the governance-algorithm pipeline |
-| `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko`, `sak_frist_risiko_trend` | Nightly after main data pipeline |
-| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Nightly after main data pipeline |
-| `Caseworker_Load_Concentration.py` | `saksbehandler_arbeidsmengde`, `saksbehandler_konsentrasjon` | Nightly after main data pipeline |
-| `Process_Change_Impact_Analysis.py` | `prosessendring_effekt` | Nightly, ideally after `CUSUM_Changepoint.py` |
+| `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | CUSUM drift score + PELT changepoints — recursive/segmentation math |
+| `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
+| `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
+| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
+| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Daily snapshot of open-case age buckets — `TODAY()`-dependent trend |
+| `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko_trend` | Daily snapshot of open-case risk mix — `TODAY()`-dependent trend |
+| `Caseworker_Load_Concentration.py` | `saksbehandler_konsentrasjon` | Gini coefficient of workload concentration — rank-based math, `TODAY()`-dependent trend |
+| `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
-## CUSUM_Changepoint.py
+All scripts share `START_YEAR = 2015` at the top — adjust to match the earliest reliable
+data in your Lakehouse. All (except `Kostra.py`) run nightly after the main data pipeline.
 
-Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per indicator.
+Throughput_Pressure_Monitor and Phase_Bottleneck_Detector were briefly native DAX; reverted
+— the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
+role DAX has no clean primitive for, exactly the "possible but not simple" case above.
+
+## Live DAX pages — no script, computed directly against Faser
+
+| Page (see `*_POWERBI_DAX.md`) | Replaces the removed script |
+|---|---|
+| `Trendretning` | Rolling-average trend direction (was `EWMA.py`) |
+
+## Closed-case trend, drift, and forecast
+
+### CUSUM_Changepoint.py
+
+Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per indicator,
+on both monthly and weekly series.
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
-- **Granularitet:** `Månedlig` og `Ukentlig`
-- **Minimum historikk:** 24 månedlige / 52 ukentlige observasjoner
 - **External dependency:** `pip install ruptures` (PELT only — CUSUM runs without it)
-- **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `START_YEAR`, `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` (anchored baseline window for mu/sigma), `CUSUM_MIN_POST_BASELINE_OBS`
-- `signalretning` og `endringsretning` har verdiene `Økning` og `Nedgang`.
-- `signal` er en boolsk verdi.
-- CUSUM's mu/sigma are computed from a fixed, anchored baseline window (the series' first `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` observations), not the whole history — otherwise a slow persistent drift would partially get absorbed into "normal" and dampen detection sensitivity.
+- **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` (anchored baseline window for mu/sigma), `CUSUM_MIN_POST_BASELINE_OBS`
+- `signal` is boolean; `signalretning`/`endringsretning` are `Økning`/`Nedgang`
+- mu/sigma come from a fixed, anchored baseline window (the series' first N observations), not the whole history — a slow persistent drift would otherwise get partially absorbed into "normal" and dampen detection
+- `cusum_analyse` stores only `cusum_positiv`/`cusum_negativ`/`signal` — the raw value is a live DAX measure (see `CUSUM_Changepoint_POWERBI_DAX.md`)
 
-### pelt_analyse_detaljer
+**`pelt_analyse_detaljer`** breaks the most recent changepoint down by `enhet`/`fasetittel`, reusing PELT's before/after window instead of re-running detection.
+- Only drills into changepoints within `RECENT_CHANGEPOINT_DAYS` (90) days old
+- Saksbehandler is excluded — too thin per-segment volume, and individual-level flagging is out of scope
+- `bidrag_til_endring` is each segment's volume-weighted share of the aggregate shift
+- `tilstrekkelig_volum = FALSE` marks segments below `MIN_SEGMENT_OBS` (10) — don't trust these
 
-Breaks down the most recent PELT changepoint per indikator/maaltall/granularitet by `enhet` (team) and `fasetittel` (process step), reusing PELT's before/after window instead of re-running changepoint detection.
+### Trendretning (live DAX — see `Trendretning_POWERBI_DAX.md`)
 
-- Only drills into changepoints within `RECENT_CHANGEPOINT_DAYS` (default 90) — old changepoints aren't re-drilled every night.
-- Saksbehandler is intentionally excluded — too thin per-segment volume, and individual-level automated flagging is out of scope for this layer.
-- `bidrag_til_endring` is each segment's share of the aggregate shift (volume-weighted, sums to `pelt_analyse.endringsstoerrelse`).
-- `tilstrekkelig_volum = FALSE` marks segments below `MIN_SEGMENT_OBS` (default 10) — don't rank or trust these.
-- **Key constants:** `DRILLDOWN_DIMENSIONS`, `MIN_SEGMENT_OBS`, `RECENT_CHANGEPOINT_DAYS`
+Board/governance trend direction (`Stigende`/`Synkende`/`Stabil`) from the slope of a
+rolling average — 6-month window for board reporting, 3-month for operational.
 
-## EWMA.py
+### Seasonal_YTD_ratio_extrapolation.py
 
-Exponentially weighted moving average smoothing for trend lines in board and governance reports.
-
-- **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
-- **To hastigheter:** `ewma_sakte` (α=0.1, styret), `ewma_rask` (α=0.3, virksomhetsoppfølging)
-- `trendretning` har verdiene `Stigende`, `Synkende`, `Stabil`.
-- Full overwrite each run (EWMA depends on full history)
-
-## Seasonal_YTD_ratio_extrapolation.py
-
-Projects year-end `frist%` from current YTD using trimmed seasonal ratios from historical years.
+Projects year-end `frist%` from current YTD using trimmed seasonal ratios from historical
+years, only for what a live measure can't do: the forecast and its confidence interval.
+(Actual YTD is `Fristprosent YTD` — a live DAX time-intelligence measure.)
 
 - **Minimum history:** 3 complete years per indicator
 - **Confidence interval:** 80% (z=1.28), derived from ratio variance (delta method)
-- `type = 'actual'` for past months, `type = 'forecast'` for remaining months
+- `frist_prognose` holds only forecast rows, for the remaining months of the current year
 - Idempotent — deletes and rewrites current-year rows on each run
 
-## Throughput_Pressure_Monitor.py
+## Flow and queue health
 
-Detects where intake exceeds completions for multiple periods and where processing time deteriorates versus a recent baseline, at the team (`enhet`) level.
+### Throughput_Pressure_Monitor.py
 
-- **Output:** `gjennomstoremming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table showing which faser drive a team's pressure score)
-- `pressure_nivaa` har verdiene `Lav`, `Moderat`, `Hoy`, `Kritisk`
+Team-level (`enhet`) flow imbalance (received vs. completed) and processing-time
+deviation vs. a rolling baseline, combined into a `pressure_nivaa`
+(`Lav`/`Moderat`/`Hoy`/`Kritisk`).
+
+- **Output:** `gjennomstoremming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
 - **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`
-- Full overwrite each run (monthly time series recomputed from full history)
+- `netto_flyt_streak` (consecutive positive-flow months) is exactly the kind of
+  order-dependent running count DAX has no clean primitive for — a script, not a fancy
+  measure
 
-## Phase_Bottleneck_Detector.py
+### Phase_Bottleneck_Detector.py
 
-Same pattern as `Throughput_Pressure_Monitor.py`, one level down: detects queue pressure forming inside individual process phases (fase-nettoflyt + p90 fasetid deviation vs. baseline).
+Same pattern one level down — phase-level (`fasetittel`) queue pressure and tidsbruk
+deviation, `alvorlighet` (`Lav`/`Moderat`/`Hoy`/`Kritisk`) with an `arsak_kode`/`arsak_tekst`
+explaining the flag.
 
 - **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)
-- `alvorlighet` har verdiene `Lav`, `Moderat`, `Hoy`, `Kritisk`; `arsak_kode`/`arsak_tekst` explain the flag
 - **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`
 
-## Building_Application_Type.py
+## In-flight (currently-open) state
 
-For each process recorded in Fakturalinjer, identifies the product code accounting for the largest total invoice amount — a raw product code downstream models join against `prisliste_varer` and `Prosesser`.
+Both of these score cases that are **still open**, before a problem shows up in the
+closed-case ratio — and both split the same way: today's state is live DAX, only the
+day-by-day trend needs a script, since `TODAY()`-dependent values have no memory of what
+they looked like yesterday.
 
-- **Output:** `building_application_type` (one row per `fk_faser`, full overwrite)
-- Scoped to Byggesak and Eiendomssak fagomraade (not Plansak)
-- No date filter — all Fakturalinjer rows in scope are included
+### Inflight_SLA_Risk_Monitor.py
 
-## Inflight_SLA_Risk_Monitor.py
+`classify_risk()` (thresholds `RISK_THRESHOLD_KRITISK`=0.90, `RISK_THRESHOLD_RISIKO`=0.75)
+scores open cases against their own `frist_dager`. Today's per-case list is live DAX (see
+`Inflight_SLA_Risk_Monitor_POWERBI_DAX.md`, Del 1); the script writes only the daily
+`sak_frist_risiko_trend` risk-mix snapshot (Del 2) — one `INSERT INTO ... SELECT`, pure
+Spark SQL, `MIN_TEAM_VOLUME` (10) gating `tilstrekkelig_volum`. `classify_risk()` stays in
+the script as the tested spec `risikoklasse_case_sql()` generates its SQL `CASE` from.
 
-Leading indicator of SLA-breach risk. `Fristprosent` (EWMA/CUSUM) only scores cases that have already closed; this script scores cases that are **still open** against their own `frist_dager`, so a breach wave shows up here before it reaches the closed-case ratio.
+- Open assumption to verify: whether `frist_dager` is reliably populated on open rows (only proven populated on closed rows, via CUSUM) — rows missing it are excluded, not defaulted.
 
-- **Output:** `sak_frist_risiko` (one row per open case-phase `pk_faser`, full overwrite nightly — current-state detail), `sak_frist_risiko_trend` (indikator × enhet × snapshot_dato, append-mode idempotent per day — trend)
-- `risikoklasse` har verdiene `Bruddet`, `Kritisk`, `Risiko`, `Innenfor`
-- **Key constants:** `RISK_THRESHOLD_KRITISK` (0.90), `RISK_THRESHOLD_RISIKO` (0.75), `MIN_TEAM_VOLUME`
-- Open assumption to verify against the Lakehouse schema: whether `frist_dager` is reliably populated on rows that haven't closed yet — rows missing it are excluded, not defaulted.
+### Backlog_Aging_Distribution.py
 
-## Backlog_Aging_Distribution.py
+`bucket_age()` (buckets `0-30`/`31-60`/`61-90`/`91-180`/`180+`) ages open cases by
+`startmilepaeldato`. Today's shape is live DAX (see
+`Backlog_Aging_Distribution_POWERBI_DAX.md`, Del 1); the script writes only the daily
+`sak_alder_fordeling` age-bucket snapshot (Del 2) — one `INSERT INTO ... SELECT`, pure
+Spark SQL (`percentile_approx` + a `CASE` expression). `bucket_age()` stays in the script
+as the tested spec `aldersgruppe_case_sql()` generates its SQL `CASE` from.
 
-Tracks whether the *existing* open-case backlog is aging, independent of `Throughput_Pressure_Monitor.py`'s net-flow score (which measures flow imbalance, not the age of work already in the queue).
+## Workload
 
-- **Output:** `sak_alder_fordeling` (indikator × enhet × aldersgruppe × snapshot_dato, append-mode idempotent per day). `snapshot_dato` carries both roles — filter to `MAX(snapshot_dato)` for today's backlog shape, or chart the full table for the trend.
-- `aldersgruppe` buckets (default `AGE_BUCKETS`): `0-30`, `31-60`, `61-90`, `91-180`, `180+`
-- Percentiles (`median_alder_dager`, `p90_alder_dager`) computed in pandas/numpy, not Spark SQL — the grouping key is pandas-derived and backlog volume is small.
+### Caseworker_Load_Concentration.py
 
-## Caseworker_Load_Concentration.py
+Is active caseload concentrating on a few caseworkers within a team, even while the
+team's aggregate numbers look fine? Today's per-person counts/shares are live DAX
+(`Faser[saksbehandler]` is already in the model — see
+`Caseworker_Load_Concentration_POWERBI_DAX.md`, Del 1); the script writes only the daily
+Gini-coefficient snapshot (Del 2), since rank-based Lorenz-curve math genuinely can't be a
+DAX measure.
 
-Team-level workload concentration / bus-factor / burnout early warning: is active caseload piling up on a few caseworkers within a team, even while the team's aggregate numbers look fine? Concentration is measured with the Gini coefficient of open-caseload counts per saksbehandler within each enhet.
-
-- **Deliberate exception to repo convention:** this is the only script here that persists per-individual (per-saksbehandler) data. It exists for internal manager capacity-planning/workload-balancing use — **not** for automated escalation or individual performance flagging (the same reason `CUSUM_Changepoint.py`'s drilldown explicitly excludes saksbehandler). Do not repurpose `saksbehandler_arbeidsmengde` for automated per-person alerting.
-- **Output:** `saksbehandler_arbeidsmengde` (enhet × saksbehandler, **full overwrite nightly, no history retained at the individual grain**), `saksbehandler_konsentrasjon` (enhet × snapshot_dato, append-mode idempotent per day — Gini trend, **no individual data**, only accumulates history at the enhet level)
+- `saksbehandler_konsentrasjon` stores enhet-level aggregates only, never a per-person breakdown — individual-level flagging is out of scope for this layer, same reasoning as `CUSUM_Changepoint.py`'s drilldown exclusion
 - **Key constants:** `MIN_SAKSBEHANDLERE` (3) — Gini on 1-2 people is meaningless, gates `tilstrekkelig_volum`
-- `SAKSBEHANDLER_COL` is unverified against the Lakehouse schema — verify before relying on this script.
+- `SAKSBEHANDLER_COL` is unverified against the Lakehouse schema — verify before relying on this script
 
-## Process_Change_Impact_Analysis.py
+## External ingestion (not a governance algorithm)
 
-Did a specific process change actually work, net of seasonality and org-wide drift? A naive
-before/after comparison is confounded by exactly the seasonality
-`Seasonal_YTD_ratio_extrapolation.py` models and the secular drift `CUSUM_Changepoint.py`
-detects. This script instead computes a **difference-in-differences (DiD)** estimate:
-the before→after change in the affected population, net of the before→after change in an
-unaffected control population over the same window.
+### Kostra.py
 
-- **Config:** hand-edit the `PROCESS_CHANGES` list whenever a real process change ships (ships with one template entry — replace or delete it)
-- **Scope:** `Fristprosent` and `Behandlingstid` only — `Produksjonsdifferanse` has no per-case realization and can't be split into treatment/control rows
-- **Control group is optional per entry** — DiD when configured; otherwise a plain before/after with `har_kontrollgruppe = FALSE`, never silently skipped
-- **`effekt_retning`** har verdiene `Forbedring`, `Forverring`, `Ingen praktisk effekt` (statistically real but below the configured minimum size), `Ingen sikker effekt` (not statistically significant)
-- **Window length is independently configurable per side** via `vindu_dager_foer` (baseline/"control" period before the change) and `vindu_dager_etter` (test period after) — they don't have to match, e.g. when whatever's being measured hasn't existed for as long on one side as the other
-- **Volume reality:** some phases see only ~30 cases/year, so both default to `DEFAULT_VINDU_DAGER_FOER`/`_ETTER = 365` (a full year each side — also cancels seasonality on its own) and `MIN_OBS_PER_GROUP = 10` is a pragmatic floor, not a statistical ideal; thinness above that floor is surfaced via `lav_styrke` rather than suppressed. A mature reading (`tilstrekkelig_moden = TRUE`) is typically ~12 months after rollout — earlier snapshots are trend signal, not a conclusion
-- **`pelt_stotte`** cross-references `analyser.pelt_analyse` as corroborating context only — never feeds back into `effekt_retning`
-- Output: `prosessendring_effekt`, append-mode idempotent per day, so the confidence interval visibly narrows across successive nightly runs on the same change
-
-## Configuration
-
-All scripts share `START_YEAR = 2015` at the top. Adjust to match the earliest reliable data in your Lakehouse.
+Syncs selected SSB KOSTRA key-figure tables into the Lakehouse (`kostra_*`, one Delta
+table per series), append-only new rows via a pandas dedup against the existing table.
+Independent of the main pipeline and the rule above — this is a data source, not an
+analysis.

@@ -20,7 +20,8 @@
 #   Saksbehandler is deliberately excluded — too thin per-segment volume,
 #   and individual-level automated flagging is out of scope for this layer.
 #
-# Output tables:
+# Output tables (addon signal only — no raw value; that's a live DAX
+# measure against saksbehandling.faser, see CUSUM_Changepoint_POWERBI_DAX.md):
 #   cusum_analyse     — løpende CUSUM-verdier og signalflagg
 #   pelt_analyse      — oppdagede endringspunkter med gjennomsnitt før/etter
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
@@ -71,7 +72,6 @@ CREATE TABLE IF NOT EXISTS analyser.cusum_analyse (
     maaltall         STRING      NOT NULL,
     granularitet     STRING      NOT NULL,
     analyse_dato     DATE        NOT NULL,
-    verdi            DOUBLE,
     cusum_positiv    DOUBLE,
     cusum_negativ    DOUBLE,
     signal           BOOLEAN     NOT NULL,
@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS analyser.cusum_analyse (
     kjoere_id        STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Økning eller Nedgang.'
+COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Økning eller Nedgang. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato.'
 """)
 
 spark.sql("""
@@ -550,7 +550,6 @@ for metrikk, df, granularitet, min_obs in series_configs:
                             "maaltall":        metrikk,
                             "granularitet":    granularitet,
                             "analyse_dato":    _periode_to_date(idx, granularitet),
-                            "verdi":           float(ind_data[idx]) if idx in ind_data else None,
                             "cusum_positiv":   round(float(row["cusum_pos"]), 4),
                             "cusum_negativ":   round(float(row["cusum_neg"]), 4),
                             "signal":          bool(row["signal"]),
@@ -634,7 +633,6 @@ CUSUM_SCHEMA = StructType([
     StructField("maaltall",         StringType(),    False),
     StructField("granularitet",     StringType(),    False),
     StructField("analyse_dato",     DateType(),      False),
-    StructField("verdi",            DoubleType(),    True),
     StructField("cusum_positiv",    DoubleType(),    True),
     StructField("cusum_negativ",    DoubleType(),    True),
     StructField("signal",           BooleanType(),   False),

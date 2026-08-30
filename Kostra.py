@@ -15,12 +15,13 @@ import re
 import time
 import unicodedata
 import requests
+import pandas as pd
+from datetime import datetime
 from itertools import product
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F
-from pyspark.sql.types import StructType, StructField, StringType, DoubleType
+from pyspark.sql.types import StructType, StructField, StringType, DoubleType, TimestampType
 
 spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -265,55 +266,61 @@ for entry in tables:
         continue
 
     try:
-        sample    = rows[0]
-        fields    = []
-        for col in sample.keys():
-            if col == "verdi":
-                fields.append(StructField("verdi", DoubleType(), True))
-            else:
-                fields.append(StructField(col, StringType(), True))
-
-        schema    = StructType(fields)
-        col_order = [f.name for f in fields]
-        spark_rows = [tuple(r.get(c) for c in col_order) for r in rows]
-
-        df = spark.createDataFrame(spark_rows, schema=schema)
-        df = df.withColumn("kilde_tabell_id", F.lit(table_id))
-        df = df.withColumn("kilde_etikett",    F.lit(label))
-        df = df.withColumn("lastet_tidspunkt", F.current_timestamp())
+        # KOSTRA key-figure tables are small (a handful of national indicator
+        # tables, at most a few years of history) — small enough to dedupe in
+        # pandas rather than a Spark DataFrame join, matching every other
+        # script in this repo.
+        new_df = pd.DataFrame(rows)
+        new_df["kilde_tabell_id"] = table_id
+        new_df["kilde_etikett"]   = label
 
         full_name = f"{LAKEHOUSE_SCHEMA}.{tbl_name}" if LAKEHOUSE_SCHEMA else tbl_name
         migrate_metadata_columns(full_name)
 
         if spark.catalog.tableExists(full_name):
-            existing = spark.table(full_name).drop("lastet_tidspunkt")
-            new_data = df.drop("lastet_tidspunkt")
-            if set(existing.columns) != set(new_data.columns):
+            existing_df = spark.table(full_name).drop("lastet_tidspunkt").toPandas()
+            if set(existing_df.columns) != set(new_df.columns):
                 raise ValueError(
                     f"Schema mismatch for {full_name}; existing columns must match "
                     "the current SSB response before new rows can be appended."
                 )
 
-            comparison_columns = existing.columns
-            match_condition = F.col(f"ny.{comparison_columns[0]}").eqNullSafe(
-                F.col(f"eksisterende.{comparison_columns[0]}")
+            comparison_columns = list(existing_df.columns)
+            merged = new_df.merge(
+                existing_df[comparison_columns],
+                on=comparison_columns,
+                how="left",
+                indicator=True,
             )
-            for column in comparison_columns[1:]:
-                match_condition = match_condition & F.col(f"ny.{column}").eqNullSafe(
-                    F.col(f"eksisterende.{column}")
-                )
-
-            new_rows = new_data.alias("ny").join(
-                existing.alias("eksisterende"),
-                on=match_condition,
-                how="left_anti",
-            ).withColumn("lastet_tidspunkt", F.current_timestamp())
+            new_rows_df = merged.loc[merged["_merge"] == "left_only", comparison_columns]
         else:
-            new_rows = df
+            new_rows_df = new_df
 
-        new_row_count = new_rows.count()
+        new_row_count = len(new_rows_df)
         if new_row_count:
-            new_rows.write.format("delta").mode("append").saveAsTable(full_name)
+            new_rows_df = new_rows_df.copy()
+            new_rows_df["lastet_tidspunkt"] = datetime.now()
+
+            fields = [
+                StructField(
+                    col,
+                    DoubleType() if col == "verdi"
+                    else TimestampType() if col == "lastet_tidspunkt"
+                    else StringType(),
+                    True,
+                )
+                for col in new_rows_df.columns
+            ]
+            schema = StructType(fields)
+            # NaN (e.g. an all-blank status column) must become None, not a
+            # float, before it hits a StringType/TimestampType field.
+            spark_rows = [
+                tuple(None if pd.isna(v) else v for v in row)
+                for row in new_rows_df[[f.name for f in fields]].itertuples(index=False, name=None)
+            ]
+
+            spark.createDataFrame(spark_rows, schema=schema) \
+                .write.format("delta").mode("append").saveAsTable(full_name)
         print(f"  La til {new_row_count:>7,} nye rader  →  {full_name}")
         succeeded.append(table_id)
     except Exception as exc:

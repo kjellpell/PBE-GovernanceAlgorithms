@@ -5,23 +5,21 @@
 # Purpose:
 #   Team-level workload concentration / bus-factor / burnout early warning —
 #   is active caseload piling up on a few caseworkers within a team, even
-#   while the team's aggregate numbers (Throughput_Pressure_Monitor.py,
+#   while the team's aggregate numbers (throughput pressure monitor,
 #   Fristprosent) look fine? Concentration is measured with the Gini
 #   coefficient of open-caseload counts per saksbehandler within each enhet.
 #
-# DEPARTURE FROM REPO CONVENTION: unlike every other script here, this one
-# DOES persist a per-saksbehandler (individual caseworker) detail table.
-# This is a deliberate exception, made for internal capacity-planning /
-# workload-balancing use by team managers — NOT for automated escalation
-# or individual performance flagging (see CUSUM_Changepoint.py's explicit
-# exclusion of saksbehandler from its drilldown, for that exact reason).
-# Do not repurpose saksbehandler_arbeidsmengde for automated per-person
-# alerting.
+# Per-saksbehandler counts/shares are live DAX (Faser[saksbehandler] is
+# already in the model) — see Caseworker_Load_Concentration_POWERBI_DAX.md,
+# Del 1. This script's only job is the Gini coefficient (Del 2): rank-based
+# Lorenz-curve math genuinely can't be a DAX measure, and being a snapshot
+# of TODAY's open caseload, it's also a trend question a live measure can't
+# answer alone.
 #
-# Data retention: saksbehandler_arbeidsmengde is FULL OVERWRITE every night
-# and deliberately keeps NO history at the individual grain, to limit
-# personal-data retention. Only saksbehandler_konsentrasjon (enhet-level,
-# no individual data) accumulates history.
+# Individual-level automated flagging is out of scope for this layer (see
+# CUSUM_Changepoint.py's explicit exclusion of saksbehandler, for that exact
+# reason) — saksbehandler_konsentrasjon only ever stores enhet-level
+# aggregates, never a per-person breakdown.
 #
 # Schema assumption: the saksbehandler column name below is UNVERIFIED
 # against the Lakehouse schema (it is only ever mentioned in comments
@@ -29,8 +27,7 @@
 # verify before relying on this script, same caveat as
 # CUSUM_Changepoint.py's DRILLDOWN_DIMENSIONS.
 #
-# Output tables:
-#   saksbehandler_arbeidsmengde   — current open caseload per saksbehandler
+# Output table:
 #   saksbehandler_konsentrasjon   — Gini trend per enhet
 # Power BI/DAX guidance:
 #   see Caseworker_Load_Concentration_POWERBI_DAX.md
@@ -64,19 +61,6 @@ MIN_SAKSBEHANDLERE = 3   # Gini on 1-2 people is meaningless — gate the enhet-
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS analyser.saksbehandler_arbeidsmengde (
-    enhet                          STRING      NOT NULL,
-    saksbehandler                  STRING      NOT NULL,
-    aktiv_saksmengde               INT         NOT NULL,
-    andel_av_enhetens_saksmengde   DOUBLE      NOT NULL,
-    kjoert_tidspunkt               TIMESTAMP   NOT NULL,
-    kjoere_id                      STRING      NOT NULL
-)
-USING DELTA
-COMMENT 'Åpen saksmengde per saksbehandler/enhet. Kun for intern kapasitetsplanlegging hos ledere — ikke for automatisk individvarsling. Full overwrite hver natt, ingen historikk lagres på individnivå.'
-""")
-
-spark.sql("""
 CREATE TABLE IF NOT EXISTS analyser.saksbehandler_konsentrasjon (
     enhet                    STRING      NOT NULL,
     snapshot_dato            DATE        NOT NULL,
@@ -91,7 +75,7 @@ USING DELTA
 COMMENT 'Gini-koeffisient for arbeidsmengdekonsentrasjon per enhet. Ingen individdata — kun aggregert per enhet. Append-modus, idempotent per snapshot_dato.'
 """)
 
-print("saksbehandler_arbeidsmengde og saksbehandler_konsentrasjon tabeller er klare")
+print("saksbehandler_konsentrasjon-tabellen er klar")
 
 
 # =============================================================================
@@ -155,24 +139,13 @@ def gini_coefficient(values):
     return (2.0 * weighted_sum) / (n * total) - (n + 1) / n
 
 
-# ── Detail: current open caseload per saksbehandler ─────────────────────────
-detail_rows = []
-if not caseload.empty:
-    for enhet, grp in caseload.groupby("enhet"):
-        enhet_total = int(grp["aktiv_saksmengde"].sum())
-        for _, row in grp.iterrows():
-            detail_rows.append({
-                "enhet":                        enhet,
-                "saksbehandler":                row["saksbehandler"],
-                "aktiv_saksmengde":             int(row["aktiv_saksmengde"]),
-                "andel_av_enhetens_saksmengde": round(row["aktiv_saksmengde"] / enhet_total, 4)
-                                                if enhet_total else 0.0,
-                "kjoert_tidspunkt":             datetime.now(),
-                "kjoere_id":                    BATCH_ID,
-            })
-
-print(f"Arbeidsmengde-rader beregnet: {len(detail_rows):,}")
-
+# Per-saksbehandler counts and shares (aktiv_saksmengde,
+# andel_av_enhetens_saksmengde) are NOT written anywhere — both are a plain
+# COUNTROWS/DIVIDE grouped by saksbehandler, live DAX against
+# saksbehandling.faser (Faser[saksbehandler] is already in the semantic
+# model). See Caseworker_Load_Concentration_POWERBI_DAX.md. `caseload`
+# above stays in this script only as the input the Gini computation below
+# needs — that's the one thing here that genuinely can't be a DAX measure.
 
 # ── Trend: Gini per enhet ────────────────────────────────────────────────────
 snapshot_dato = date.today()
@@ -203,15 +176,6 @@ print(f"Konsentrasjon-rader beregnet: {len(trend_rows):,}")
 # =============================================================================
 # CELL 4 — Write to Lakehouse
 # =============================================================================
-
-DETAIL_SCHEMA = StructType([
-    StructField("enhet",                        StringType(),    False),
-    StructField("saksbehandler",                StringType(),    False),
-    StructField("aktiv_saksmengde",             IntegerType(),   False),
-    StructField("andel_av_enhetens_saksmengde", DoubleType(),    False),
-    StructField("kjoert_tidspunkt",              TimestampType(), False),
-    StructField("kjoere_id",                     StringType(),    False),
-])
 
 TREND_SCHEMA = StructType([
     StructField("enhet",                 StringType(),    False),
@@ -245,13 +209,6 @@ def to_records(rows, schema):
     return out
 
 
-if detail_rows:
-    detail_spark = spark.createDataFrame(to_records(detail_rows, DETAIL_SCHEMA), schema=DETAIL_SCHEMA)
-    detail_spark.write.mode("overwrite").saveAsTable("analyser.saksbehandler_arbeidsmengde")
-    print(f"saksbehandler_arbeidsmengde skrevet: {len(detail_rows):,} rader")
-else:
-    print("Ingen data å skrive til saksbehandler_arbeidsmengde.")
-
 if trend_rows:
     spark.sql(f"DELETE FROM analyser.saksbehandler_konsentrasjon WHERE snapshot_dato = DATE('{snapshot_dato.isoformat()}')")
     trend_spark = spark.createDataFrame(to_records(trend_rows, TREND_SCHEMA), schema=TREND_SCHEMA)
@@ -263,13 +220,21 @@ if trend_rows:
 # CELL 5 — Verification
 # =============================================================================
 
-spark.sql("""
-    SELECT enhet, COUNT(*) AS antall_saksbehandlere, SUM(aktiv_saksmengde) AS total_saker,
-           ROUND(MAX(andel_av_enhetens_saksmengde) * 100, 1) AS storste_andel_pct
-    FROM analyser.saksbehandler_arbeidsmengde
-    GROUP BY enhet
-    ORDER BY storste_andel_pct DESC
-""").show(50, truncate=False)
+# Per-saksbehandler counts/shares aren't written to a table anymore (see
+# note above CELL 3) — verify against the in-memory caseload frame instead.
+if not caseload.empty:
+    verify = caseload.copy()
+    verify["andel"] = verify.groupby("enhet")["aktiv_saksmengde"].transform(
+        lambda s: s / s.sum() if s.sum() else 0.0
+    )
+    summary = (
+        verify.groupby("enhet")
+        .agg(antall_saksbehandlere=("saksbehandler", "count"),
+             total_saker=("aktiv_saksmengde", "sum"),
+             storste_andel_pct=("andel", "max"))
+    )
+    summary["storste_andel_pct"] = (summary["storste_andel_pct"] * 100).round(1)
+    print(summary.sort_values("storste_andel_pct", ascending=False).to_string())
 
 spark.sql(f"""
     SELECT enhet, antall_saksbehandlere, total_aktive_saker, gini_koeffisient
