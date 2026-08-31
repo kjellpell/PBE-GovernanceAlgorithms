@@ -88,7 +88,7 @@ years, only for what a live measure can't do: the forecast and its confidence in
 (Actual YTD is `Fristprosent YTD` — a live DAX time-intelligence measure.)
 
 - **Minimum history:** 3 complete years per indicator
-- **Confidence interval:** 80% (z=1.28), derived from ratio variance (delta method)
+- **Confidence interval:** 90% (z=1.645), derived from ratio variance (delta method)
 - `frist_prognose` holds only forecast rows, for the remaining months of the current year
 - Idempotent — deletes and rewrites current-year rows on each run
 
