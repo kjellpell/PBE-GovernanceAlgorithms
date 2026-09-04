@@ -9,8 +9,8 @@
 #   Fristprosent) look fine? Concentration is measured with the Gini
 #   coefficient of open-caseload counts per saksbehandler within each enhet.
 #
-# Per-saksbehandler counts/shares are live DAX (Faser[saksbehandler] is
-# already in the model) — see Caseworker_Load_Concentration_POWERBI_DAX.md,
+# Per-saksbehandler counts/shares are live DAX (Saker[saksansvarlig] joined
+# to Faser is already in the model) — see Caseworker_Load_Concentration_POWERBI_DAX.md,
 # Del 1. This script's only job is the Gini coefficient (Del 2): rank-based
 # Lorenz-curve math genuinely can't be a DAX measure, and being a snapshot
 # of TODAY's open caseload, it's also a trend question a live measure can't
@@ -21,11 +21,9 @@
 # reason) — saksbehandler_konsentrasjon only ever stores enhet-level
 # aggregates, never a per-person breakdown.
 #
-# Schema assumption: the saksbehandler column name below is UNVERIFIED
-# against the Lakehouse schema (it is only ever mentioned in comments
-# elsewhere in this repo, never confirmed as an actual column name) —
-# verify before relying on this script, same caveat as
-# CUSUM_Changepoint.py's DRILLDOWN_DIMENSIONS.
+# Schema note: saksbehandling.faser has no saksbehandler column — the
+# caseworker is recorded as saksansvarlig on saksbehandling.saker, joined
+# via saker.pk_saker = faser.fk_saker.
 #
 # Output table:
 #   saksbehandler_konsentrasjon   — Gini trend per enhet
@@ -52,7 +50,7 @@ from datetime import datetime, date
 spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 BATCH_ID = datetime.now().strftime("%Y%m%dT%H%M%S")
 
-SAKSBEHANDLER_COL  = "saksbehandler"  # verify this column name against the Lakehouse schema
+SAKSBEHANDLER_COL  = "saksansvarlig"  # saksbehandling.saker.saksansvarlig, joined via saker.pk_saker = faser.fk_saker
 MIN_SAKSBEHANDLERE = 3   # Gini on 1-2 people is meaningless — gate the enhet-level metric
 
 
@@ -89,18 +87,20 @@ print("saksbehandler_konsentrasjon-tabellen er klar")
 caseload = spark.sql(f"""
     SELECT
         COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
-        TRIM(pr.{SAKSBEHANDLER_COL}) AS saksbehandler,
+        TRIM(sk.{SAKSBEHANDLER_COL}) AS saksbehandler,
         COUNT(*) AS aktiv_saksmengde
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikator
         ON indikator.pk_indikator = pr.indikator
+    INNER JOIN saksbehandling.saker sk
+        ON sk.pk_saker = pr.fk_saker
     WHERE pr.startmilepaeldato IS NOT NULL
       AND pr.sluttmilepaeldato IS NULL
-      AND pr.{SAKSBEHANDLER_COL} IS NOT NULL
-      AND TRIM(pr.{SAKSBEHANDLER_COL}) != ''
+      AND sk.{SAKSBEHANDLER_COL} IS NOT NULL
+      AND TRIM(sk.{SAKSBEHANDLER_COL}) != ''
       AND pr.indikator NOT LIKE '%avtalt%'
       AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-    GROUP BY COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'), TRIM(pr.{SAKSBEHANDLER_COL})
+    GROUP BY COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'), TRIM(sk.{SAKSBEHANDLER_COL})
 """).toPandas()
 
 caseload["aktiv_saksmengde"] = pd.to_numeric(caseload["aktiv_saksmengde"], errors="coerce").astype("int64")
