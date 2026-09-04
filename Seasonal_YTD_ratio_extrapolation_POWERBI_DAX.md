@@ -38,10 +38,29 @@ up in full, not diluted by the months before it. A cumulative YTD line barely mo
 autumn and can't drop several points in one step.
 
 This is the same quantity as `Fristprosent (måned)` in `Trendretning_POWERBI_DAX.md`,
-written differently — worth knowing, because it means the script's `innenfor`/`total`
-counts (`innenfor_frist = 1` over `frist_dager IS NOT NULL`) are the same numerator and
-denominator the report uses. If those ever drift apart, the projection stops matching the
-line it is drawn against.
+written differently — they give the same headline numbers, but do not assume from that
+alone that their filters are identical underneath. They aren't automatically: `[Produserte
+faser]` is its own measure,
+
+```DAX
+Produserte faser =
+    CALCULATE(
+        COUNTROWS('Faser'),
+        Faser[Sluttmilepældato] <> BLANK(),
+        Faser[Startmilepældato] <> BLANK()
+    )
+```
+
+— a fase counts once it has **both a start and an end milestone date**. Nothing about
+`frist_dager`. An earlier version of the script's SQL used `frist_dager IS NOT NULL` as the
+denominator instead, copied over from `Fristprosent (måned)`'s inline definition on the
+assumption that matching headline numbers meant matching filters. It doesn't: a fase type
+with no tracked deadline is still produced, and silently dropping it from the denominator
+(and, since it can't be "innenfor" a deadline it doesn't have, implicitly from the
+numerator's population too) shifts the rate — enough, for at least one indicator, to
+visibly detach the forecast's anchor from the actual line. The script's `innenfor`/`total`
+counts now match `[Faser innen frist]`/`[Produserte faser]` by construction:
+`innenfor_frist = 1` over `sluttmilepaeldato IS NOT NULL AND startmilepaeldato IS NOT NULL`.
 
 The forecast therefore has to be a **period rate too**. This is the one thing that has to
 match: a projection of a different quantity cannot continue this line, however it is
@@ -277,8 +296,10 @@ RETURN
   year, and for a single month that is usually several points.
 - The dashed line must *start* on the solid one. The `Anker` row is the last complete
   month's observed rate, computed from the same numerator and denominator as the report's
-  measure, so a visible step at the fork means the nightly run is stale or the two sides'
-  filters (fagomraade, `frist_dager`) have drifted apart. That check used to need a query;
+  measure — `innenfor_frist = 1` over `sluttmilepaeldato`/`startmilepaeldato` both present,
+  the same population `[Produserte faser]` counts — so a visible step at the fork means the
+  nightly run is stale, or the two sides' fagomraade filter has drifted, or the script's
+  SQL has stopped matching a measure definition again. That check used to need a query;
   now it is just looking at the chart.
 - The actual line's current-month point is provisional — a part-month rate that moves
   every day (see Del 1). The projection covers that month as a whole, so the two will
