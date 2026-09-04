@@ -6,7 +6,7 @@ Vise årssluttprognose for fristprosent med usikkerhetsintervall basert på seso
 This page is split in two, deliberately: **actual YTD so far** is standard DAX
 time-intelligence against the fact table (no script needed — it's the "YTD in scripts
 does not make sense" case), and **the year-end forecast with its confidence interval**
-comes from `prognoser.frist_prognose`, the one thing that genuinely can't be a DAX measure
+comes from `analyser.frist_prognose`, the one thing that genuinely can't be a DAX measure
 — the seasonal-ratio model (trimmed mean/std across historical years, delta-method CI) is
 a statistical model, not a lookup or a rollup.
 
@@ -35,7 +35,7 @@ monthly ratios.
 
 ## Del 2 — Årssluttprognose (persistert modell)
 
-Datakilde: `prognoser.frist_prognose` (written nightly by
+Datakilde: `analyser.frist_prognose` (written nightly by
 `Seasonal_YTD_ratio_extrapolation.py`).
 
 The table continues the YTD line from where the actuals stop to 31 December,

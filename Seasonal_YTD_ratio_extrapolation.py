@@ -58,7 +58,7 @@ START_YEAR    = 2015 # exclude data before this year — adjust if older data is
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS prognoser.frist_prognose (
+CREATE TABLE IF NOT EXISTS analyser.frist_prognose (
     indikator                   STRING      NOT NULL,
     analyse_dato                DATE        NOT NULL,
     type                        STRING      NOT NULL,
@@ -73,7 +73,7 @@ USING DELTA
 COMMENT 'Årssluttprognose for fristprosent per indikator som daglig YTD-bane — ett ankerpunkt på siste dato med data (type Anker, faktisk YTD) og én rad per dag derfra til 31. desember (type Prognose). Faktisk YTD fram til ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent, gjelder radens egen verdi og bygger på historisk variasjon i samme sesongposisjon. prognose_aarsslutt er 31. desember-punktet gjentatt på alle rader.'
 """)
 
-print("prognoser.frist-tabellen er klar")
+print("analyser.frist_prognose-tabellen er klar")
 
 
 # =============================================================================
@@ -467,14 +467,14 @@ else:
 
     # Idempotent — delete current year rows before inserting
     spark.sql(f"""
-            DELETE FROM prognoser.frist_prognose
+            DELETE FROM analyser.frist_prognose
             WHERE analyse_dato >= '{CURRENT_YEAR}-01-01'
                 AND analyse_dato <= '{CURRENT_YEAR}-12-31'
     """)
 
-    results_spark.write.mode("append").saveAsTable("prognoser.frist_prognose")
+    results_spark.write.mode("append").saveAsTable("analyser.frist_prognose")
 
-    print(f"prognoser.frist_prognose skrevet: {len(results)} rader")
+    print(f"analyser.frist_prognose skrevet: {len(results)} rader")
 
     # Summary — year-end estimates for current indicators. verdi_hittil
     # (actual YTD so far) isn't in this table anymore — it's a live DAX
@@ -487,7 +487,7 @@ else:
                      THEN nedre_konfidensgrense END)     AS nedre_konfidensgrense,
             MAX(CASE WHEN analyse_dato = '{CURRENT_YEAR}-12-31'
                      THEN oevre_konfidensgrense END)     AS oevre_konfidensgrense
-        FROM prognoser.frist_prognose
+        FROM analyser.frist_prognose
         WHERE kjoere_id = '{BATCH_ID}'
         GROUP BY indikator
         ORDER BY prognose_aarsslutt ASC
