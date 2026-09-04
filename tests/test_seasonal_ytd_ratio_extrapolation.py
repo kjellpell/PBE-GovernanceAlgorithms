@@ -10,9 +10,13 @@ import pandas as pd
 SOURCE = Path(__file__).parents[1] / "Seasonal_YTD_ratio_extrapolation.py"
 TREE = ast.parse(SOURCE.read_text())
 FUNCTION_NAMES = {
+    "trimmed_stats",
     "compute_ytd",
+    "monthly_rates",
+    "monthly_rate_ratios",
     "seasonal_ratios",
     "project_year_end",
+    "project_month_rate",
     "seasonal_ratio_on",
     "build_forecast_rows",
     "validate_results",
@@ -37,6 +41,9 @@ exec(compile(ast.Module(body=EXTRACTED, type_ignores=[]), str(SOURCE), "exec"), 
 compute_ytd = NAMESPACE["compute_ytd"]
 seasonal_ratios = NAMESPACE["seasonal_ratios"]
 project_year_end = NAMESPACE["project_year_end"]
+monthly_rates = NAMESPACE["monthly_rates"]
+monthly_rate_ratios = NAMESPACE["monthly_rate_ratios"]
+project_month_rate = NAMESPACE["project_month_rate"]
 seasonal_ratio_on = NAMESPACE["seasonal_ratio_on"]
 build_forecast_rows = NAMESPACE["build_forecast_rows"]
 validate_results = NAMESPACE["validate_results"]
@@ -63,12 +70,37 @@ def monthly_rows(years, missing_months=None, year_end_rate=0.8):
     return pd.DataFrame(rows)
 
 
-SEASONAL_RATIOS = {
-    8:  {"mean_ratio": 0.90, "std_ratio": 0.04, "n_years": 4},
-    9:  {"mean_ratio": 0.95, "std_ratio": 0.03, "n_years": 4},
-    10: {"mean_ratio": 0.97, "std_ratio": 0.02, "n_years": 4},
-    11: {"mean_ratio": 0.99, "std_ratio": 0.01, "n_years": 4},
-    12: {"mean_ratio": 1.00, "std_ratio": 0.00, "n_years": 4},
+def seasonal_monthly_rows(years, shape):
+    """One indicator, `shape` giving each month's rate, jittered per year."""
+    rows = []
+    for offset, year in enumerate(years):
+        for month, rate in shape.items():
+            total = 100
+            rows.append(
+                {
+                    "indikator": "A",
+                    "aar": year,
+                    "mnd": month,
+                    "innenfor": round(total * (rate + 0.01 * (offset % 3 - 1))),
+                    "total": total,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+# A year that erodes: strong spring, weak autumn.
+ERODING_YEAR = {
+    1: 0.90, 2: 0.90, 3: 0.89, 4: 0.87, 5: 0.86, 6: 0.85,
+    7: 0.80, 8: 0.82, 9: 0.78, 10: 0.76, 11: 0.74, 12: 0.72,
+}
+
+
+# Per-month rate ratios: how each month's own frist% sits against its year.
+MONTH_RATIOS = {
+    9:  {"mean_ratio": 1.02, "std_ratio": 0.05, "n_years": 4},
+    10: {"mean_ratio": 0.98, "std_ratio": 0.06, "n_years": 4},
+    11: {"mean_ratio": 0.94, "std_ratio": 0.07, "n_years": 4},
+    12: {"mean_ratio": 0.90, "std_ratio": 0.08, "n_years": 4},
 }
 
 
@@ -120,91 +152,139 @@ class SeasonalForecastTests(unittest.TestCase):
             seasonal_ratio_on(ratios, date(2025, 9, 4))["mean_ratio"], 0.91
         )
 
-    def test_forecast_runs_daily_from_the_anchor_to_year_end(self):
-        ratios = SEASONAL_RATIOS
+    def test_monthly_rates_are_per_month_not_cumulative(self):
+        data = pd.DataFrame(
+            [
+                {"indikator": "A", "aar": 2025, "mnd": 1, "innenfor": 1, "total": 2},
+                {"indikator": "A", "aar": 2025, "mnd": 2, "innenfor": 8, "total": 8},
+            ]
+        )
 
+        # February stands on its own at 8/8. compute_ytd would carry January in
+        # and give 9/10 — that difference is the whole reason this exists: the
+        # report's measure has no year-to-date filter over it.
+        self.assertEqual(monthly_rates(data, "A", 2025), {1: 0.5, 2: 1.0})
+        self.assertEqual(compute_ytd(data, "A", 2025)[2], 0.9)
+
+    def test_monthly_rate_ratios_capture_the_within_year_shape(self):
+        data = seasonal_monthly_rows([2021, 2022, 2023, 2024], ERODING_YEAR)
+
+        ratios = monthly_rate_ratios(data, "A", 2025, min_years=3, trim_n=1)
+
+        # A strong month sits above its year, a weak one below.
+        self.assertGreater(ratios[1]["mean_ratio"], 1.0)
+        self.assertLess(ratios[11]["mean_ratio"], 1.0)
+        self.assertGreater(ratios[1]["mean_ratio"], ratios[11]["mean_ratio"])
+
+    def test_month_band_carries_the_month_s_own_variation(self):
+        steady   = {"mean_ratio": 1.0, "std_ratio": 0.00, "n_years": 4}
+        volatile = {"mean_ratio": 1.0, "std_ratio": 0.06, "n_years": 4}
+
+        _, steady_lo, steady_hi = project_month_rate(0.84, 0.82, 0.86, steady)
+        _, wild_lo, wild_hi     = project_month_rate(0.84, 0.82, 0.86, volatile)
+
+        # A month that has swung a lot historically gets a wider band than one
+        # that hasn't, even off the same year-end estimate.
+        self.assertGreater(wild_hi - wild_lo, steady_hi - steady_lo)
+        # And the year-end uncertainty alone still gives it some width.
+        self.assertGreater(steady_hi - steady_lo, 0)
+
+    def test_forecast_is_a_period_rate_not_a_cumulative_path(self):
         rows = build_forecast_rows(
-            "A", date(2025, 9, 4), 0.80, ratios, 0.84, 0.79, 0.89,
+            "A", date(2025, 9, 1), MONTH_RATIOS, 0.84, 0.79, 0.89,
             pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
+            anchor_date=date(2025, 8, 31), anchor_rate=0.82,
+        )
+        by_month = {}
+        for row in rows[1:]:
+            by_month.setdefault(row["analyse_dato"].month, set()).add(row["verdi"])
+
+        # Every day of a month carries that month's rate — a monthly rate is a
+        # step, not a curve — and the months differ from each other.
+        self.assertEqual([len(values) for values in by_month.values()], [1, 1, 1, 1])
+        self.assertEqual(len(set(next(iter(v)) for v in by_month.values())), 4)
+        # The shape is the seasonal shape, not a drift towards the year-end
+        # number: a weak November projects below a strong September.
+        september = next(iter(by_month[9]))
+        november  = next(iter(by_month[11]))
+        self.assertGreater(september, november)
+
+    def test_forecast_forks_off_the_last_complete_month(self):
+        rows = build_forecast_rows(
+            "A", date(2025, 9, 1), MONTH_RATIOS, 0.84, 0.79, 0.89,
+            pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
+            anchor_date=date(2025, 8, 31), anchor_rate=0.82,
         )
         dates = [row["analyse_dato"] for row in rows]
 
-        # A continuous daily line, starting on the observed value and ending on
-        # 31 December — not a handful of month-end points.
+        # The anchor is August's observed rate, and the projection picks up the
+        # very next day — no gap, and the part-finished September is projected
+        # rather than anchored on.
         self.assertEqual(rows[0]["type"], "Anker")
-        self.assertEqual(rows[0]["analyse_dato"], date(2025, 9, 4))
-        self.assertEqual(rows[0]["verdi"], 0.80)
+        self.assertEqual(rows[0]["analyse_dato"], date(2025, 8, 31))
+        self.assertEqual(rows[0]["verdi"], 0.82)
+        self.assertEqual(
+            rows[0]["nedre_konfidensgrense"], rows[0]["oevre_konfidensgrense"]
+        )
+        self.assertEqual(dates[1], date(2025, 9, 1))
         self.assertEqual(dates[-1], date(2025, 12, 31))
-        self.assertEqual(len(dates), len(set(dates)))
         self.assertEqual(dates, sorted(dates))
-        self.assertEqual((dates[-1] - dates[0]).days + 1, len(dates))
+        self.assertEqual(len(dates), len(set(dates)))
         self.assertEqual(set(row["type"] for row in rows[1:]), {"Prognose"})
 
-    def test_forecast_band_widens_towards_the_year_end_interval(self):
+    def test_year_end_interval_is_separate_from_the_month_bands(self):
         rows = build_forecast_rows(
-            "A", date(2025, 9, 4), 0.80, SEASONAL_RATIOS, 0.84, 0.79, 0.89,
+            "A", date(2025, 9, 1), MONTH_RATIOS, 0.84, 0.79, 0.89,
             pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
+            anchor_date=date(2025, 8, 31), anchor_rate=0.82,
         )
-        width = {
-            row["analyse_dato"]:
-                row["oevre_konfidensgrense"] - row["nedre_konfidensgrense"]
-            for row in rows
-        }
-
-        # The anchor is observed, so it carries no uncertainty; the band then
-        # opens up with the horizon and closes on the year-end interval on
-        # 31 December, which is what the KPI cards read. Sampled monthly —
-        # day to day the widths move by less than the stored rounding.
-        self.assertEqual(width[date(2025, 9, 4)], 0)
-        self.assertLess(width[date(2025, 9, 30)], width[date(2025, 10, 31)])
-        self.assertLess(width[date(2025, 10, 31)], width[date(2025, 11, 30)])
-        self.assertLess(width[date(2025, 11, 30)], width[date(2025, 12, 31)])
-        self.assertEqual(rows[-1]["nedre_konfidensgrense"], 0.79)
-        self.assertEqual(rows[-1]["oevre_konfidensgrense"], 0.89)
-
-    def test_forecast_line_lands_on_the_year_end_card_value(self):
-        rows = build_forecast_rows(
-            "A", date(2025, 9, 4), 0.80, SEASONAL_RATIOS, 0.84, 0.79, 0.89,
-            pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
-        )
-
         december = rows[-1]
-        self.assertEqual(december["verdi"], december["prognose_aarsslutt"])
 
-    def test_forecast_path_may_decline(self):
-        # frist% YTD is a ratio, not a running count: if the months ahead are
-        # worse than the year so far, the projected line has to be allowed to
-        # fall, otherwise it flattens into a line that says nothing.
-        declining = {
-            9:  {"mean_ratio": 1.10, "std_ratio": 0.02, "n_years": 4},
-            10: {"mean_ratio": 1.06, "std_ratio": 0.02, "n_years": 4},
-            11: {"mean_ratio": 1.03, "std_ratio": 0.02, "n_years": 4},
-            12: {"mean_ratio": 1.00, "std_ratio": 0.00, "n_years": 4},
-        }
-
-        rows = build_forecast_rows(
-            "A", date(2025, 9, 30), 0.88, declining, 0.80, 0.76, 0.84,
-            pd.Timestamp("2025-10-01").to_pydatetime(), "batch",
+        # The year-end interval rides on every row untouched; a month's band is
+        # a different, wider thing and must not be read as the year's.
+        self.assertEqual(set(row["nedre_aarsslutt"] for row in rows), {0.79})
+        self.assertEqual(set(row["oevre_aarsslutt"] for row in rows), {0.89})
+        self.assertNotEqual(
+            december["nedre_konfidensgrense"], december["nedre_aarsslutt"]
         )
-        forecast = [row["verdi"] for row in rows[1:]]
 
-        self.assertEqual(forecast, sorted(forecast, reverse=True))
-        self.assertLess(forecast[-1], rows[0]["verdi"])
+    def test_every_row_carries_the_year_end_estimate_for_the_cards(self):
+        rows = build_forecast_rows(
+            "A", date(2025, 9, 1), MONTH_RATIOS, 0.84, 0.79, 0.89,
+            pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
+            anchor_date=date(2025, 8, 31), anchor_rate=0.82,
+        )
+
+        # The year-end number is cumulative YTD and is not the last point of
+        # the line any more — the line is a month rate. It rides along on every
+        # row so a card can read it without a date filter.
+        self.assertEqual(set(row["prognose_aarsslutt"] for row in rows), {0.84})
 
     def test_forecast_rows_pass_validation(self):
         rows = build_forecast_rows(
-            "A", date(2025, 9, 4), 0.80, SEASONAL_RATIOS, 0.84, 0.79, 0.89,
+            "A", date(2025, 9, 1), MONTH_RATIOS, 0.84, 0.79, 0.89,
             pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
+            anchor_date=date(2025, 8, 31), anchor_rate=0.82,
         )
 
         validate_results(rows)
 
-    def test_no_rows_when_there_is_nothing_left_to_forecast(self):
-        # The year is over — an anchor on its own is not a forecast.
+    def test_forecast_works_without_an_anchor(self):
+        # January: no complete month yet, so there is nothing to fork from.
+        rows = build_forecast_rows(
+            "A", date(2025, 9, 1), MONTH_RATIOS, 0.84, 0.79, 0.89,
+            pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
+        )
+
+        self.assertTrue(rows)
+        self.assertEqual(set(row["type"] for row in rows), {"Prognose"})
+
+    def test_no_rows_when_no_month_can_be_projected(self):
         self.assertEqual(
             build_forecast_rows(
-                "A", date(2025, 12, 31), 0.84, SEASONAL_RATIOS, 0.84, 0.80, 0.88,
-                pd.Timestamp("2026-01-01").to_pydatetime(), "batch",
+                "A", date(2025, 9, 1), {}, 0.84, 0.79, 0.89,
+                pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
+                anchor_date=date(2025, 8, 31), anchor_rate=0.82,
             ),
             [],
         )
@@ -218,6 +298,8 @@ class SeasonalForecastTests(unittest.TestCase):
             "nedre_konfidensgrense": 0.6,
             "oevre_konfidensgrense": 0.8,
             "prognose_aarsslutt": 0.75,
+            "nedre_aarsslutt": 0.72,
+            "oevre_aarsslutt": 0.78,
             "kjoert_tidspunkt": pd.Timestamp("2025-06-30").to_pydatetime(),
             "kjoere_id": "batch",
         }

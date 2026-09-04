@@ -83,17 +83,19 @@ rolling average — 6-month window for board reporting, 3-month for operational.
 
 ### Seasonal_YTD_ratio_extrapolation.py
 
-Projects year-end `frist%` from current YTD using trimmed seasonal ratios from historical
-years, only for what a live measure can't do: the forecast and its confidence interval.
-(Actual YTD is `Fristprosent YTD` — a live DAX time-intelligence measure.)
+Projects the rest of the year's `frist%` from current YTD using trimmed seasonal ratios
+from historical years, only for what a live measure can't do: the projection and its
+confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
 
 - **Minimum history:** 3 complete years per indicator
 - **Confidence interval:** 90% (z=1.645), derived from ratio variance (delta method)
-- `frist_prognose` continues the YTD line from the last date with data to 31 December,
-  one row per day — the grain the live `Fristprosent YTD` measure is plotted at. An
-  `Anker` row carries the observed YTD at that date so the projection leaves the actual
-  line where it ends; each row's band belongs to that row's `verdi` and closes on the
-  year-end interval on 31 December
+- Two seasonal models, two jobs: the cumulative-YTD ratios drive the year-end estimate
+  (`prognose_aarsslutt`, with its own interval), and the per-month rate ratios turn that
+  estimate back into the month rates the report plots
+- `frist_prognose[verdi]` is a **period rate**, matching `Faser innen frist %` /
+  `Fristprosent (måned)` — not a year-to-date value. An `Anker` row holds the last
+  complete month's observed rate so the projection forks off the actual line, then one row
+  per day to 31 December carries its month's projected rate
 - Idempotent — deletes and rewrites current-year rows on each run
 
 ## Flow and queue health
