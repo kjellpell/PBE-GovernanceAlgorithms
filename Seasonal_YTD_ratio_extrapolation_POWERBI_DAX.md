@@ -90,15 +90,25 @@ further.
 Datakilde: `analyser.frist_prognose` (written nightly by
 `Seasonal_YTD_ratio_extrapolation.py`).
 
-| `type` | rows | `verdi` | bånd |
-|---|---|---|---|
-| `Anker` | one, at the end of the last complete month | that month's observed rate | zero width — it's an observation |
-| `Prognose` | every day from the next month to 31 Dec | that month's projected rate | that month's historical spread |
+| `type` | rows | `verdi` | `innenfor_prognose` / `produserte_prognose` | bånd |
+|---|---|---|---|---|
+| `Anker` | one, at the end of the last complete month | that month's observed rate | the real counts for that month | zero width — it's an observation |
+| `Prognose` | every day from the next month to 31 Dec | that month's projected rate | a day's share of that month's modelled counts | that month's historical spread |
 
 `verdi` is a **month rate**, in the same units as `[Faser innen frist %]`, so the two go on
-one axis and mean the same thing. Every day inside a month carries that month's projected
-rate — a monthly rate is a step, not a curve — and the rows are daily only so the series
-lands on the axis whatever grain the report rolls it to.
+one axis and mean the same thing. But **do not build the primary measure on `verdi`
+directly** — see the DAX section below. `Faser innen frist %` is
+`DIVIDE(SUM(innenfor), SUM(total))`; averaging `verdi` across rows is different arithmetic
+and only happens to agree with that in the single-month, single-indicator case. Everywhere
+else — several indicators together, a rollup wider than one month — it gives a different
+number, and that mismatch is exactly what `innenfor_prognose`/`produserte_prognose` exist
+to prevent: sum those two and divide, the same pattern the report already uses, and the
+row-level `verdi` becomes redundant except as a quick single-row sanity check.
+
+Every day inside a month carries an equal fraction of that month's modelled counts — a
+monthly rate is a step, not a curve — and the rows are daily only so that summing a
+month's rows back up reconstitutes the month's modelled total, whatever grain the report
+rolls up to.
 
 `prognose_aarsslutt` is the year-end figure, repeated on every row so a card reads it
 without a date filter. That one *is* cumulative (volume-weighted across the whole year),
@@ -121,8 +131,9 @@ than drifting towards a single number.
 - **Serie 1 (hel linje):** `[Faser innen frist %]` — actual, through the last complete
   month.
 - **Serie 2 (stiplet linje):** `[Prognose rate]` — from that same month to December. The
-  `Anker` row carries the last complete month's observed rate, so the dashed line starts
-  *on* the solid one and the fork marks exactly where projection begins.
+  `Anker` row carries the last complete month's *real* counts, so this series reproduces
+  the actual measure exactly at that one point, and the dashed line starts *on* the solid
+  one — the fork marks exactly where projection begins.
 - **Bånd:** `[Prognose nedre]` and `[Prognose oevre]`. Power BI's core line chart has no
   band primitive — either two thin dashed lines, or a band-capable visual underneath.
 - **Mållinje:** constant line at `alert_config[terskel_amber]`.
@@ -144,8 +155,30 @@ band on a monthly rate would mean the model is hiding variation it has actually 
 ### DAX-forslag
 
 ```DAX
-Prognose rate = AVERAGE(frist_prognose[verdi])
+Prognose rate =
+DIVIDE(
+    SUM(frist_prognose[innenfor_prognose]),
+    SUM(frist_prognose[produserte_prognose])
+)
 ```
+
+The same shape as `Faser innen frist %` — `DIVIDE(SUM(numerator), SUM(denominator))` —
+because the table now carries a numerator and denominator, not just a pre-divided rate.
+That is what makes this measure agree with the report's own arithmetic at every grain, not
+only the single-month reading: two indicators together, several months rolled into one
+quarter, whatever the page is sliced to. An `AVERAGE(frist_prognose[verdi])` measure
+happens to return the same number in the single-month, single-indicator case — every day
+that month repeats the same value — but is different arithmetic underneath, and diverges
+everywhere else. That mismatch, not a filter or a grain problem, is why an
+`AVERAGE`-based version of this measure can show a different number than
+`[Faser innen frist % (lukket)]` even when both look at what should be the same data.
+
+At the `Anker` row this measure reproduces `[Faser innen frist %]` exactly for that month,
+because the anchor's counts are the real ones, not modelled — the two are the same
+arithmetic over the same numbers.
+
+Do not filter `frist_prognose[type]` on this visual. The `Anker` row is what joins the
+dashed line to the solid one; excluding it puts the gap back.
 
 ```DAX
 Prognose nedre = AVERAGE(frist_prognose[nedre_konfidensgrense])
@@ -155,12 +188,12 @@ Prognose nedre = AVERAGE(frist_prognose[nedre_konfidensgrense])
 Prognose oevre = AVERAGE(frist_prognose[oevre_konfidensgrense])
 ```
 
-`AVERAGE`, never `SUM`. Every day of a month repeats that month's rate, so averaging over
-a month returns the rate itself, and over a quarter returns a day-weighted average of its
-three months — both sensible. Summing would add a rate to itself thirty times.
-
-Do not filter `frist_prognose[type]` on this visual. The `Anker` row is what joins the
-dashed line to the solid one; excluding it puts the gap back.
+The band *is* `AVERAGE`, unlike the rate measure above — and that is fine, not an
+inconsistency. A confidence interval isn't a count; there's no sum-and-divide identity for
+it to preserve. Averaging is already only a rough combination of independent bounds across
+several rows (statistically, bounds don't sum), so this band is exact at single-month
+grain and an approximation of the band's centre at any wider rollup — read it that way
+rather than as a rigorously combined interval, at any grain wider than one month.
 
 ```DAX
 Prognose årslutt =
@@ -233,6 +266,10 @@ RETURN
   card measures above deliberately ignore the date filter)
 
 ## Tolkning
+- `[Prognose rate]` on this page reads `innenfor_prognose`/`produserte_prognose`, never
+  `verdi` directly, for any visual that might show more than one row at once (which is
+  almost all of them — a line chart, a table, a card sliced to a quarter). `verdi` is
+  there for a quick look at one row, not for a measure to aggregate.
 - Prognosert månedsrate under mål = risiko i den måneden.
 - `[Prognose årslutt]` under mål = risiko for året. The two can disagree: a weak December
   is normal for these indicators and doesn't by itself put the year below target.

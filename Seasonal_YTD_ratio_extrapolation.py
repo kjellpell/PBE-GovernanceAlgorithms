@@ -21,11 +21,21 @@
 #   context with nothing cumulative over it, so only a period rate can
 #   continue that line.
 #
-#   One anchor row at the end of the last complete month (type='Anker', that
-#   month's observed rate, so the projection leaves the actual line where it
-#   ends) and one row per day from the start of the next month to 31 December
-#   (type='Prognose'), each carrying its month's projected rate. Daily so the
-#   series lands on the axis at whatever grain the report rolls it to.
+#   `innenfor_prognose`/`produserte_prognose` carry that same rate as modelled
+#   faser counts, so a report can read this table with the same
+#   DIVIDE(SUM(...), SUM(...)) pattern it already uses on the fact table.
+#   That is what makes the projection agree with itself at any rollup — an
+#   average of `verdi` across rows only equals that arithmetic in the single-
+#   month, single-indicator case; everywhere else it is different arithmetic
+#   and gives a different number.
+#
+#   One anchor row at the end of the last complete month (type='Anker', the
+#   real counts and rate for that month, so the projection leaves the actual
+#   line where it ends, matching exactly) and one row per day from the start
+#   of the next month to 31 December (type='Prognose'), each carrying a
+#   fraction of its month's modelled counts. Daily so the series lands on the
+#   axis at whatever grain the report rolls it to, and so summing a month's
+#   rows back up reconstitutes that month's modelled total.
 #
 #   Actual rates before the anchor aren't written here: they're the report's
 #   own live measure. `prognose_aarsslutt`, with `nedre_aarsslutt` and
@@ -73,6 +83,8 @@ CREATE TABLE IF NOT EXISTS analyser.frist_prognose (
     verdi                       DOUBLE,
     nedre_konfidensgrense       DOUBLE,
     oevre_konfidensgrense       DOUBLE,
+    innenfor_prognose           DOUBLE,
+    produserte_prognose         DOUBLE,
     prognose_aarsslutt          DOUBLE,
     nedre_aarsslutt             DOUBLE,
     oevre_aarsslutt             DOUBLE,
@@ -80,8 +92,36 @@ CREATE TABLE IF NOT EXISTS analyser.frist_prognose (
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Prognose for fristprosent per indikator. verdi er en PERIODERATE — prognosert frist% for måneden, ikke kumulativ hittil-i-år — fordi det er det rapportens Faser innen frist % viser. Ett ankerpunkt ved slutten av siste komplette måned (type Anker, faktisk månedsrate) og én rad per dag derfra til 31. desember (type Prognose), hver med sin måneds prognoserte rate. Faktiske rater før ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og gjelder radens egen verdi. prognose_aarsslutt med nedre_aarsslutt og oevre_aarsslutt er årssluttprognosen for kumulativ YTD med 90 prosent intervall, gjentatt på alle rader.'
+COMMENT 'Prognose for fristprosent per indikator. verdi er en PERIODERATE — prognosert frist% for måneden, ikke kumulativ hittil-i-år — fordi det er det rapportens Faser innen frist % viser. innenfor_prognose og produserte_prognose er modellerte faser-tellinger for samme rad; summer disse og divider (som rapportens egen DIVIDE(SUM,SUM)-mål) for et resultat som stemmer på tvers av indikatorer og perioder — et gjennomsnitt av verdi gjør det ikke. Ett ankerpunkt ved slutten av siste komplette måned (type Anker, faktiske tellinger og faktisk rate) og én rad per dag derfra til 31. desember (type Prognose), hver med en brøkdel av sin måneds modellerte tellinger. Faktiske rater før ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og gjelder radens egen verdi. prognose_aarsslutt med nedre_aarsslutt og oevre_aarsslutt er årssluttprognosen for kumulativ YTD med 90 prosent intervall, gjentatt på alle rader.'
 """)
+
+# A table created by an earlier run predates columns added since, and
+# CREATE TABLE IF NOT EXISTS won't add them — which is what makes the
+# nightly append fail with a Delta schema mismatch. Evolve the schema here,
+# explicitly and idempotently, rather than putting mergeSchema on the write:
+# that would fix this one case and silently absorb every future drift too.
+NEW_COLUMNS = (
+    ("nedre_aarsslutt", "DOUBLE",
+     "Nedre 90 prosent konfidensgrense for arssluttprognosen"),
+    ("oevre_aarsslutt", "DOUBLE",
+     "Ovre 90 prosent konfidensgrense for arssluttprognosen"),
+    ("innenfor_prognose", "DOUBLE",
+     "Modellert antall faser innenfor frist for raden, til bruk i DIVIDE(SUM,SUM)"),
+    ("produserte_prognose", "DOUBLE",
+     "Modellert antall produserte faser for raden, til bruk i DIVIDE(SUM,SUM)"),
+)
+
+existing_columns = {
+    field.name.lower()
+    for field in spark.table("analyser.frist_prognose").schema
+}
+for column, column_type, column_comment in NEW_COLUMNS:
+    if column not in existing_columns:
+        spark.sql(
+            f"ALTER TABLE analyser.frist_prognose "
+            f"ADD COLUMNS ({column} {column_type} COMMENT '{column_comment}')"
+        )
+        print(f"La til kolonne {column}")
 
 print("analyser.frist_prognose-tabellen er klar")
 
@@ -186,6 +226,29 @@ def monthly_rates(df, indikator, year):
     }
 
 
+def monthly_counts(df, indikator, year):
+    """
+    Raw (innenfor, total) faser counts for each month of a year — the counts
+    `monthly_rates` divides, kept intact.
+
+    These are what let a stored row match the report's own measure exactly:
+    `Faser innen frist %` is DIVIDE(SUM(innenfor), SUM(total)), so a row that
+    carries the same two counts reproduces it by construction, at any
+    aggregation the report rolls up to. A stored rate alone cannot — averaging
+    a rate across months or indicators is not the same arithmetic as summing
+    counts and dividing once, and the two diverge everywhere except a single
+    month for a single indicator.
+
+    Returns dict {month: (innenfor, total)} for months with produced faser.
+    """
+    ind = df[(df["indikator"] == indikator) & (df["aar"] == year)].sort_values("mnd")
+    return {
+        int(row["mnd"]): (row["innenfor"], row["total"])
+        for _, row in ind.iterrows()
+        if row["total"] > 0
+    }
+
+
 def monthly_rate_ratios(df, indikator, current_year, min_years=3, trim_n=1):
     """
     For each calendar month, the trimmed mean and std of
@@ -233,6 +296,82 @@ def monthly_rate_ratios(df, indikator, current_year, min_years=3, trim_n=1):
             result[m] = stats
 
     return result if result else None
+
+
+def monthly_volume_ratios(df, indikator, current_year, min_years=3, trim_n=1):
+    """
+    For each calendar month, the trimmed mean share of a year's total
+    production (`total` faser) that fell in that month, across complete
+    historical years — the volume counterpart of `monthly_rate_ratios`.
+
+    This is what lets the projection carry real counts instead of a bare
+    rate: `project_month_volumes` extrapolates an annual case count from
+    this year's volume so far the same way `project_year_end` extrapolates
+    the frist% level, and this month-by-month share is what splits that
+    total back across the remaining months.
+
+    Returns dict {month: {mean_ratio, std_ratio, n_years}} or None.
+    """
+    years = sorted(df[(df["indikator"] == indikator) &
+                      (df["aar"] < current_year)]["aar"].unique())
+
+    complete_years = []
+    for y in years:
+        ind = df[(df["indikator"] == indikator) & (df["aar"] == y)]
+        totals = dict(zip(ind["mnd"], ind["total"]))
+        if set(totals) == set(range(1, 13)):
+            complete_years.append(totals)
+
+    if len(complete_years) < min_years:
+        return None
+
+    shares = {m: [] for m in range(1, 13)}
+    for totals in complete_years:
+        year_total = sum(totals.values())
+        if year_total <= 0:
+            continue
+        for m, total in totals.items():
+            shares[m].append(total / year_total)
+
+    result = {}
+    for m in range(1, 13):
+        stats = trimmed_stats(shares[m], min_years, trim_n)
+        if stats is not None:
+            result[m] = stats
+
+    return result if result else None
+
+
+def project_month_volumes(current_year_totals, last_complete_month, volume_ratios):
+    """
+    Projected produced-faser count for each remaining month, from this
+    year's observed monthly totals and each month's historical share of the
+    year.
+
+    Same pattern as `project_year_end`: sum the share observed so far,
+    scale up to a full-year total, then split that total by each remaining
+    month's own historical share.
+
+    Returns {month: projected_total} for months after last_complete_month.
+    Empty if the observed volume or share is degenerate.
+    """
+    observed_total = sum(
+        current_year_totals.get(m, 0) for m in range(1, last_complete_month + 1)
+    )
+    observed_share = sum(
+        volume_ratios[m]["mean_ratio"]
+        for m in range(1, last_complete_month + 1)
+        if m in volume_ratios
+    )
+    if observed_total <= 0 or observed_share <= 1e-9:
+        return {}
+
+    projected_annual_total = observed_total / observed_share
+    return {
+        m: max(0.0, projected_annual_total * volume_ratios[m]["mean_ratio"])
+        for m in range(last_complete_month + 1, 13)
+        if m in volume_ratios
+    }
 
 
 def project_month_rate(year_end_est, ci_lower, ci_upper, ratio, z=1.645):
@@ -387,34 +526,43 @@ def seasonal_ratio_on(ratios, on_date):
     return {"mean_ratio": float(mean), "std_ratio": float(std), "n_years": current["n_years"]}
 
 
-def build_forecast_rows(indikator, first_forecast_date, month_ratios,
+def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volumes,
                         year_end_est, ci_lower, ci_upper,
                         kjoert_tidspunkt, kjoere_id,
-                        anchor_date=None, anchor_rate=None):
+                        anchor_date=None, anchor_innenfor=None, anchor_total=None):
     """
     Continue the monthly frist% line from the last complete month to
     31 December, one row per day.
 
-    `verdi` is a *period* rate — the projected frist% for the month the day
-    falls in — because that is what the report draws. `Faser innen frist %` is
-    DIVIDE([Faser innen frist], [Produserte faser]) in the period's filter
-    context, with nothing cumulative over it, so a year-to-date projection is a
-    different quantity and cannot continue that line no matter how it is drawn.
+    Each row carries `innenfor_prognose`/`produserte_prognose` — modelled
+    faser counts — alongside `verdi`, the rate they imply. The counts are
+    what make the row aggregate the way `Faser innen frist %` does:
+    DIVIDE(SUM(innenfor_prognose), SUM(produserte_prognose)) reproduces the
+    report's own DIVIDE(SUM(innenfor), SUM(total)) arithmetic at any grain a
+    report might roll up to — indicator, quarter, several months at once.
+    `verdi` alone cannot: averaging a rate across rows is different
+    arithmetic from summing counts and dividing once, and the two only agree
+    in the single-month, single-indicator case.
 
-    One row per day, so the series lands on the axis at whatever grain it is
-    rolled to. Every day in a month carries that month's projected rate, which
-    makes the projection a step per month — which is what a monthly rate is.
+    The anchor row's counts are the real ones for the last complete month —
+    not modelled — so DIVIDE over the anchor row reproduces the live measure
+    exactly, with no drift at all, for that one month. Every day inside a
+    projected month carries an equal fraction of that month's modelled
+    counts (count / days in month), so summing them back up over the month
+    reconstitutes the month's total — the reason the rows are daily is so
+    this holds regardless of what grain the report rolls up to.
 
-    The anchor is the last *complete* month's observed rate, so the projection
-    leaves the actual line at a point that won't move. The current month is
-    projected rather than anchored on: part of a month is not a month, and its
-    running rate is the least stable number on the chart.
+    The anchor is the last *complete* month's observed rate, so the
+    projection leaves the actual line at a point that won't move. The
+    current month is projected rather than anchored on: part of a month is
+    not a month, and its running rate is the least stable number on the
+    chart.
     """
     year_end_date = date(first_forecast_date.year, 12, 31)
     if year_end_est is None or first_forecast_date > year_end_date:
         return []
 
-    def make_row(analyse_dato, type_, verdi, lower, upper):
+    def make_row(analyse_dato, type_, verdi, lower, upper, innenfor, total):
         return {
             "indikator":             indikator,
             "analyse_dato":          analyse_dato,
@@ -422,6 +570,8 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios,
             "verdi":                 round(float(verdi), 4),
             "nedre_konfidensgrense": None if lower is None else round(float(lower), 4),
             "oevre_konfidensgrense": None if upper is None else round(float(upper), 4),
+            "innenfor_prognose":     round(float(innenfor), 4),
+            "produserte_prognose":   round(float(total), 4),
             "prognose_aarsslutt":    year_end_est,
             "nedre_aarsslutt":       ci_lower,
             "oevre_aarsslutt":       ci_upper,
@@ -430,19 +580,30 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios,
         }
 
     rows = []
-    if anchor_date is not None and anchor_rate is not None:
-        # Observed, not projected — no band on it.
-        rows.append(make_row(anchor_date, "Anker", anchor_rate, anchor_rate, anchor_rate))
+    if anchor_date is not None and anchor_total:
+        anchor_rate = anchor_innenfor / anchor_total
+        # Observed, not projected — no band, and the real counts, not
+        # modelled ones, so this row reproduces the live measure exactly.
+        rows.append(make_row(
+            anchor_date, "Anker", anchor_rate, anchor_rate, anchor_rate,
+            anchor_innenfor, anchor_total
+        ))
 
     projected = {}
     for mnd in range(first_forecast_date.month, 13):
-        if mnd not in month_ratios:
+        if mnd not in month_ratios or mnd not in month_volumes:
             continue
         estimate, lower, upper = project_month_rate(
             year_end_est, ci_lower, ci_upper, month_ratios[mnd]
         )
-        if estimate is not None:
-            projected[mnd] = (estimate, lower, upper)
+        volume = month_volumes[mnd]
+        days_in_month = pd.Timestamp(year_end_date.year, mnd, 1).days_in_month
+        if estimate is not None and volume > 0 and days_in_month > 0:
+            projected[mnd] = (
+                estimate, lower, upper,
+                estimate * volume / days_in_month,   # innenfor, one day's share
+                volume / days_in_month,               # total, one day's share
+            )
 
     if not projected:
         return []
@@ -451,8 +612,8 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios,
         on_date = timestamp.date()
         if on_date.month not in projected:
             continue
-        estimate, lower, upper = projected[on_date.month]
-        rows.append(make_row(on_date, "Prognose", estimate, lower, upper))
+        estimate, lower, upper, innenfor, total = projected[on_date.month]
+        rows.append(make_row(on_date, "Prognose", estimate, lower, upper, innenfor, total))
 
     return rows
 
@@ -464,6 +625,8 @@ OUTPUT_COLUMNS = {
     "verdi",
     "nedre_konfidensgrense",
     "oevre_konfidensgrense",
+    "innenfor_prognose",
+    "produserte_prognose",
     "prognose_aarsslutt",
     "nedre_aarsslutt",
     "oevre_aarsslutt",
@@ -508,6 +671,28 @@ def validate_results(results):
             if lower > upper or (verdi is not None and not lower <= verdi <= upper):
                 raise ValueError(f"Invalid confidence interval in row {row_number}")
 
+        # innenfor_prognose/produserte_prognose are what let a report
+        # aggregate this row the way it aggregates the real data (SUM/SUM,
+        # not an average of rates) — so they have to actually agree with
+        # `verdi`, or a report reading the counts and one reading `verdi`
+        # would show two different numbers for the same row.
+        innenfor = row["innenfor_prognose"]
+        produserte = row["produserte_prognose"]
+        if innenfor is not None and produserte is not None:
+            if innenfor < 0 or produserte < 0:
+                raise ValueError(f"Negative faser count in row {row_number}")
+            if innenfor > produserte:
+                raise ValueError(
+                    f"innenfor_prognose exceeds produserte_prognose in row {row_number}"
+                )
+            if produserte > 0 and verdi is not None:
+                implied_rate = innenfor / produserte
+                if abs(implied_rate - verdi) > 0.01:
+                    raise ValueError(
+                        f"verdi does not match innenfor/produserte in row {row_number}: "
+                        f"{verdi} vs {implied_rate}"
+                    )
+
 
 # =============================================================================
 # CELL 4 — Compute projections per indicator
@@ -518,10 +703,12 @@ indicators = monthly["indikator"].unique()
 
 for indikator in indicators:
 
-    # Two seasonal models, two jobs. The YTD ratios drive the year-end
+    # Three seasonal models, three jobs. The YTD ratios drive the year-end
     # estimate — cumulative YTD is the stable thing to extrapolate from. The
-    # per-month ratios turn that estimate back into the period rates the
-    # report plots.
+    # per-month rate ratios turn that estimate back into the period rates the
+    # report plots. The per-month volume ratios turn this year's observed
+    # caseload into a projected faser count per remaining month, which is
+    # what lets the output carry counts instead of a bare rate.
     ratios = seasonal_ratios(
         monthly, indikator, CURRENT_YEAR,
         min_years=MIN_YEARS, trim_n=TRIM_N
@@ -530,14 +717,19 @@ for indikator in indicators:
         monthly, indikator, CURRENT_YEAR,
         min_years=MIN_YEARS, trim_n=TRIM_N
     )
+    volume_ratios = monthly_volume_ratios(
+        monthly, indikator, CURRENT_YEAR,
+        min_years=MIN_YEARS, trim_n=TRIM_N
+    )
 
-    if ratios is None or month_ratios is None:
+    if ratios is None or month_ratios is None or volume_ratios is None:
         print(f"Skipping {indikator} — insufficient history")
         continue
 
     # Current year actuals
-    current_ytd   = compute_ytd(monthly, indikator, CURRENT_YEAR)
-    current_rates = monthly_rates(monthly, indikator, CURRENT_YEAR)
+    current_ytd    = compute_ytd(monthly, indikator, CURRENT_YEAR)
+    current_rates  = monthly_rates(monthly, indikator, CURRENT_YEAR)
+    current_counts = monthly_counts(monthly, indikator, CURRENT_YEAR)
 
     if not current_ytd:
         print(f"Skipping {indikator} — no current year data")
@@ -577,23 +769,37 @@ for indikator in indicators:
         continue
 
     anchor_date = None
-    anchor_rate = current_rates.get(last_complete_month)
-    if anchor_rate is not None:
+    anchor_innenfor = anchor_total = None
+    if last_complete_month in current_counts:
+        anchor_innenfor, anchor_total = current_counts[last_complete_month]
         anchor_date = (pd.Timestamp(CURRENT_YEAR, last_complete_month, 1)
                        + pd.offsets.MonthEnd(0)).date()
+
+    # This year's observed monthly volume, used to extrapolate a projected
+    # faser count for the remaining months — the same "share observed so
+    # far, scaled up" pattern project_year_end uses for the rate.
+    current_year_totals = {m: total for m, (_, total) in current_counts.items()}
+    month_volumes = project_month_volumes(
+        current_year_totals, last_complete_month, volume_ratios
+    )
+    if not month_volumes:
+        print(f"Skipping {indikator} — no volume basis to project from")
+        continue
 
     # Actual rates for the months up to the anchor are NOT written here — that
     # is the report's own `Faser innen frist %` measure against
     # saksbehandling.faser, no algorithm needed. This table stores what a live
     # measure structurally can't produce: the projection and its band. The
-    # anchor row is the one observed value it duplicates, on purpose, so the
-    # projection has the actual line to leave from.
+    # anchor row is the one observed value it duplicates, on purpose — with
+    # its real counts, not modelled ones — so the projection has the actual
+    # line to leave from.
     # See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
     indicator_rows = build_forecast_rows(
-        indikator, date(CURRENT_YEAR, last_complete_month + 1, 1), month_ratios,
+        indikator, date(CURRENT_YEAR, last_complete_month + 1, 1),
+        month_ratios, month_volumes,
         year_end_est, ci_lo, ci_hi,
         datetime.now(), BATCH_ID,
-        anchor_date=anchor_date, anchor_rate=anchor_rate
+        anchor_date=anchor_date, anchor_innenfor=anchor_innenfor, anchor_total=anchor_total
     )
 
     if not indicator_rows:
@@ -621,6 +827,8 @@ else:
         StructField("verdi", DoubleType(), True),
         StructField("nedre_konfidensgrense", DoubleType(), True),
         StructField("oevre_konfidensgrense", DoubleType(), True),
+        StructField("innenfor_prognose", DoubleType(), True),
+        StructField("produserte_prognose", DoubleType(), True),
         StructField("prognose_aarsslutt", DoubleType(), True),
         StructField("nedre_aarsslutt", DoubleType(), True),
         StructField("oevre_aarsslutt", DoubleType(), True),
@@ -633,6 +841,13 @@ else:
         for row in results
     ]
     results_spark = spark.createDataFrame(output_rows, schema=output_schema)
+
+    # ALTER TABLE appends new columns at the end, so the table's column order
+    # need not match output_schema's. Select in the table's order — an append
+    # that lines columns up by position would otherwise write the wrong ones.
+    results_spark = results_spark.select(
+        *[field.name for field in spark.table("analyser.frist_prognose").schema]
+    )
 
     # Idempotent — delete current year rows before inserting
     spark.sql(f"""
