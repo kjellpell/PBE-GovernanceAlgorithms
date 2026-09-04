@@ -567,7 +567,10 @@ for indikator in indicators:
 
     # The line, though, forks off the last *complete* month: a part-month's
     # rate is the least stable number on the chart, and it moves every night.
-    # The current month is projected instead.
+    # The current month is projected instead. A month is complete on its last
+    # day here — a fase closing 31 August is in August's number, not still
+    # arriving in September — so this is the plain calendar month, with no
+    # registration lag to back off for.
     last_complete_month = latest_month - 1 if latest_month == CURRENT_MONTH else latest_month
     if last_complete_month >= 12:
         print(f"Skipping {indikator} — the year is complete, nothing to project")

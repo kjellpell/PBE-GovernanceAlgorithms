@@ -52,18 +52,38 @@ drawn.
   noise — a handful of faser)
 - Hel linje: `[Faser innen frist %]`
 
-The current month is worth cutting off. Its rate is computed from however many faser have
-closed so far, so early in the month it is a near-meaningless number that moves every day
-and drops off the bottom of the chart — the projection covers that month properly. Either
-filter the actual line to complete months, or read the last point as provisional:
+### Den pågående måneden
+
+The current month's point is not wrong, it is not comparable. On 3 September it is the
+rate of the faser that closed on the 1st, 2nd and 3rd — a handful, against ~120 in every
+other point on the line. Undifferentiated, three days of sampling noise reads as a
+performance collapse.
+
+Don't drop it; draw it as what it is. Two measures, overlapping by one month so the
+provisional segment connects to the solid line:
 
 ```DAX
-Faser innen frist % (komplette måneder) =
-IF(
-    MAX(Kalender[Dato]) < STARTOFMONTH(TODAY()),
-    [Faser innen frist %]
-)
+Faser innen frist % (lukket) =
+IF( MAX(Kalender[Dato]) < EOMONTH(TODAY(), -1) + 1, [Faser innen frist %] )
 ```
+
+```DAX
+Faser innen frist % (pågående) =
+IF( MAX(Kalender[Dato]) >= EOMONTH(TODAY(), -2) + 1, [Faser innen frist %] )
+```
+
+Plot both — `lukket` solid, `pågående` dotted or hollow-markered. A `Produserte faser`
+column behind the line makes it self-evident without anyone needing to know the rule: a
+stub bar under the thin point says "three days".
+
+Cutting the line at the last complete month instead is defensible, and rules out any
+misreading, but by the 28th it means looking at month-old data.
+
+**A month here is complete on its last day.** There is no registration lag to allow for —
+a fase closing on 31 August is in August's number, not still arriving in September — so
+"last complete month" is the plain calendar month. That is what the nightly run anchors
+on, and why it can anchor on the immediately preceding month rather than backing off
+further.
 
 ## Del 2 — Prognose (persistert modell)
 
@@ -223,9 +243,9 @@ RETURN
   measure, so a visible step at the fork means the nightly run is stale or the two sides'
   filters (fagomraade, `frist_dager`) have drifted apart. That check used to need a query;
   now it is just looking at the chart.
-- Ignore the actual line's current-month point, or filter it out. It is a part-month rate
-  computed from however many faser have closed so far, and it moves every day; the
-  projection covers that month as a whole.
+- The actual line's current-month point is provisional — a part-month rate that moves
+  every day (see Del 1). The projection covers that month as a whole, so the two will
+  differ, and the gap closes as the month fills in rather than indicating an error.
 - The year-end estimate does use the part-month data — it is a cumulative quantity, where
   a few extra days barely move the level, and the model accounts for how far into the
   month the data reaches rather than treating a part-finished month as finished.
