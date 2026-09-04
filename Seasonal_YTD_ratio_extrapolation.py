@@ -10,12 +10,16 @@
 #   5. Confidence interval from trimmed variance across historical years
 #
 # Output table: frist_prognose
-#   One row per indicator per remaining month of the current year — the
-#   forecast and its confidence interval only. Actual YTD for past months
-#   isn't written here: it's a plain live DAX year-to-date measure against
-#   saksbehandling.faser (standard time intelligence, no algorithm needed),
-#   so storing a copy of it here would just be duplicated data. See
-#   Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
+#   The forecast as a YTD trajectory, so it plots on the same axis as the live
+#   `Fristprosent YTD` measure: one anchor row at the last closed month
+#   (type='Anker', the observed YTD, so the forecast line starts where the
+#   actual line ends) plus one row per remaining month (type='Prognose').
+#   Actual YTD for the earlier months isn't written here: it's a plain live DAX
+#   year-to-date measure against saksbehandling.faser (standard time
+#   intelligence, no algorithm needed), so storing a copy of it here would just
+#   be duplicated data. The confidence band on each row belongs to that row's
+#   `verdi`; `prognose_aarsslutt` is the December endpoint repeated on every
+#   row for the KPI cards. See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
 #
 # Schedule: nightly, after main data pipeline.
 # Minimum history: 3 years per indicator. Suppressed below that.
@@ -60,7 +64,7 @@ CREATE TABLE IF NOT EXISTS prognoser.frist_prognose (
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Årssluttprognose for fristprosent per indikator — kun prognoserte gjenstående måneder (type alltid Prognose). Faktisk YTD er en live DAX-mål mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og bygger på historisk variasjon i samme sesongposisjon.'
+COMMENT 'Årssluttprognose for fristprosent per indikator som YTD-bane — ett ankerpunkt på siste lukkede måned (type Anker, faktisk YTD) og én rad per gjenstående måned (type Prognose). Faktisk YTD for tidligere måneder er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent, gjelder radens egen verdi og bygger på historisk variasjon i samme sesongposisjon. prognose_aarsslutt er desemberpunktet gjentatt på alle rader.'
 """)
 
 print("prognoser.frist-tabellen er klar")
@@ -212,6 +216,81 @@ def project_year_end(current_ytd, month, ratios, z=1.645):
     )
 
 
+def build_forecast_rows(indikator, latest_month, latest_ytd, ratios,
+                        year_end_est, ci_lower, ci_upper,
+                        current_year, kjoert_tidspunkt, kjoere_id):
+    """
+    Build the forecast series for one indicator, as YTD values.
+
+    The series is a YTD trajectory so it can be drawn on the same axis as the
+    live `Fristprosent YTD` measure — the only actual series it is comparable
+    with. Two things make it usable in a line chart:
+
+      * an anchor row at the last closed month carrying the observed YTD, so
+        the forecast line starts where the actual line ends instead of
+        floating unattached over the remaining months
+      * a confidence band that belongs to the line it surrounds: the year-end
+        interval scaled by the same seasonal ratio that shapes the trajectory,
+        so it opens up with the forecast horizon and closes on
+        [ci_lower, ci_upper] in December
+
+    Scaling `year_end_est` by the seasonal ratio (rather than re-deriving the
+    path from `latest_ytd`) keeps the trajectory and the year-end KPI card
+    telling the same story: the December point of the line is the number on
+    the card.
+    """
+    if year_end_est is None or latest_month not in ratios or latest_month >= 12:
+        return []
+
+    def month_end(mnd):
+        return (pd.Timestamp(current_year, mnd, 1) + pd.offsets.MonthEnd(0)).date()
+
+    def row(mnd, type_, verdi, lower, upper):
+        return {
+            "indikator":             indikator,
+            "analyse_dato":          month_end(mnd),
+            "type":                  type_,
+            "verdi":                 round(float(verdi), 4),
+            "nedre_konfidensgrense": None if lower is None else round(float(lower), 4),
+            "oevre_konfidensgrense": None if upper is None else round(float(upper), 4),
+            "prognose_aarsslutt":    year_end_est,
+            "kjoert_tidspunkt":      kjoert_tidspunkt,
+            "kjoere_id":             kjoere_id,
+        }
+
+    forecast_rows = []
+    previous_ytd  = latest_ytd
+
+    for mnd in range(latest_month + 1, 13):
+        if mnd not in ratios:
+            continue
+        ratio = ratios[mnd]["mean_ratio"]
+        if not np.isfinite(ratio) or ratio <= 1e-9:
+            continue
+
+        # YTD is cumulative, so the path may not fall back below the last
+        # observed (or last forecast) value.
+        forecast_ytd = min(1.0, max(previous_ytd, year_end_est * ratio))
+
+        lower = None if ci_lower is None else max(0.0, ci_lower * ratio)
+        upper = None if ci_upper is None else min(1.0, ci_upper * ratio)
+        # The clamps above can push the band off the line; keep it bracketing.
+        if lower is not None:
+            lower = min(lower, forecast_ytd)
+        if upper is not None:
+            upper = max(upper, forecast_ytd)
+
+        forecast_rows.append(row(mnd, "Prognose", forecast_ytd, lower, upper))
+        previous_ytd = forecast_ytd
+
+    if not forecast_rows:
+        return []
+
+    # The anchor is an observed value, not a projection — no band on it.
+    anchor = row(latest_month, "Anker", latest_ytd, latest_ytd, latest_ytd)
+    return [anchor] + forecast_rows
+
+
 OUTPUT_COLUMNS = {
     "indikator",
     "analyse_dato",
@@ -239,11 +318,14 @@ def validate_results(results):
                 raise ValueError(f"{column} out of bounds in row {row_number}: {value}")
         lower = row["nedre_konfidensgrense"]
         upper = row["oevre_konfidensgrense"]
-        estimate = row["prognose_aarsslutt"]
+        # The band is checked against `verdi` — the value on the same row, and
+        # the line it is drawn around — not against `prognose_aarsslutt`, which
+        # is the December endpoint repeated on every row for the KPI cards.
+        verdi = row["verdi"]
         if lower is not None and upper is not None:
             if not all(np.isfinite(value) and 0 <= value <= 1 for value in (lower, upper)):
                 raise ValueError(f"Confidence interval out of bounds in row {row_number}")
-            if lower > upper or (estimate is not None and not lower <= estimate <= upper):
+            if lower > upper or (verdi is not None and not lower <= verdi <= upper):
                 raise ValueError(f"Invalid confidence interval in row {row_number}")
 
 
@@ -282,58 +364,25 @@ for indikator in indicators:
         latest_ytd, latest_month, ratios
     )
 
-    # Actual YTD rows are NOT written here — verdi for type='Faktisk' months
-    # is just the YTD ratio, which is a plain live DAX measure against
-    # saksbehandling.faser (standard year-to-date time intelligence, no
-    # algorithm needed). This table only stores what a live measure
-    # structurally can't produce: the seasonal-ratio forecast and its
-    # confidence interval. See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
+    # Actual YTD rows for past months are NOT written here — that value is a
+    # plain live DAX measure against saksbehandling.faser (standard
+    # year-to-date time intelligence, no algorithm needed). This table only
+    # stores what a live measure structurally can't produce: the
+    # seasonal-ratio forecast and its confidence interval. The one exception
+    # is the anchor row build_forecast_rows() puts at the last closed month —
+    # a single observed point, duplicated on purpose so the forecast line has
+    # somewhere to start. See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
+    indicator_rows = build_forecast_rows(
+        indikator, latest_month, latest_ytd, ratios,
+        year_end_est, ci_lo, ci_hi,
+        CURRENT_YEAR, datetime.now(), BATCH_ID
+    )
 
-    # Write forecast rows — remaining months of current year
-    previous_forecast_ytd = latest_ytd
-    if latest_month not in ratios:
-        print(f"Skipping {indikator} — no seasonal ratio for month {latest_month}")
+    if not indicator_rows:
+        print(f"Skipping {indikator} — no forecast months from month {latest_month}")
         continue
 
-    for mnd in range(latest_month + 1, 13):
-        if mnd not in ratios:
-            continue
-        # Project forward: expected YTD at month mnd given current trajectory
-        # Use ratio at forecast month relative to ratio at current month
-        # to estimate what YTD will be at that future month
-        ratio_current  = ratios[latest_month]["mean_ratio"]
-        ratio_forecast = ratios[mnd]["mean_ratio"]
-        if ratio_current == 0:
-            continue
-        forecast_ytd = latest_ytd * (ratio_forecast / ratio_current)
-        forecast_ytd = min(1.0, max(previous_forecast_ytd, forecast_ytd))
-        _, f_ci_lo, f_ci_hi = project_year_end(forecast_ytd, mnd, ratios)
-        if f_ci_lo is None or f_ci_hi is None:
-            print(f"Skipping {indikator} month {mnd} — invalid projection")
-            continue
-
-        # f_ci_lo/f_ci_hi are guaranteed to bracket the per-month estimate
-        # returned by project_year_end, which is discarded above — not
-        # year_end_est, the fixed value stored below as prognose_aarsslutt.
-        # Widen the interval so it always brackets year_end_est too,
-        # otherwise validate_results can reject the row.
-        if year_end_est is not None:
-            f_ci_lo = min(f_ci_lo, year_end_est)
-            f_ci_hi = max(f_ci_hi, year_end_est)
-
-        analyse_dato = (pd.Timestamp(CURRENT_YEAR, mnd, 1) + pd.offsets.MonthEnd(0)).date()
-        results.append({
-            "indikator":         indikator,
-            "analyse_dato":      analyse_dato,
-            "type":              "Prognose",
-            "verdi":             round(float(forecast_ytd), 4),
-            "nedre_konfidensgrense": f_ci_lo,
-            "oevre_konfidensgrense": f_ci_hi,
-            "prognose_aarsslutt": year_end_est,
-            "kjoert_tidspunkt":  datetime.now(),
-            "kjoere_id":         BATCH_ID,
-        })
-        previous_forecast_ytd = forecast_ytd
+    results.extend(indicator_rows)
 
 print(f"\nProjection rows computed: {len(results)}")
 print(f"Indicators projected: {len(set(r['indikator'] for r in results))}")
