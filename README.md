@@ -89,7 +89,11 @@ years, only for what a live measure can't do: the forecast and its confidence in
 
 - **Minimum history:** 3 complete years per indicator
 - **Confidence interval:** 90% (z=1.645), derived from ratio variance (delta method)
-- `frist_prognose` holds only forecast rows, for the remaining months of the current year
+- `frist_prognose` continues the YTD line from the last date with data to 31 December,
+  one row per day — the grain the live `Fristprosent YTD` measure is plotted at. An
+  `Anker` row carries the observed YTD at that date so the projection leaves the actual
+  line where it ends; each row's band belongs to that row's `verdi` and closes on the
+  year-end interval on 31 December
 - Idempotent — deletes and rewrites current-year rows on each run
 
 ## Flow and queue health
