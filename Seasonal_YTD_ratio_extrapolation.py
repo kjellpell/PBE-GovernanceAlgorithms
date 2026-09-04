@@ -31,11 +31,10 @@
 #
 #   One anchor row at the end of the last complete month (type='Anker', the
 #   real counts and rate for that month, so the projection leaves the actual
-#   line where it ends, matching exactly) and one row per day from the start
-#   of the next month to 31 December (type='Prognose'), each carrying a
-#   fraction of its month's modelled counts. Daily so the series lands on the
-#   axis at whatever grain the report rolls it to, and so summing a month's
-#   rows back up reconstitutes that month's modelled total.
+#   line where it ends, matching exactly) and one row per remaining month
+#   (type='Prognose'), each carrying that month's modelled counts. One row
+#   per month, not per day: the report's axis groups by month, so a finer
+#   grain in the table bought nothing.
 #
 #   Actual rates before the anchor aren't written here: they're the report's
 #   own live measure. `prognose_aarsslutt`, with `nedre_aarsslutt` and
@@ -92,7 +91,7 @@ CREATE TABLE IF NOT EXISTS analyser.frist_prognose (
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Prognose for fristprosent per indikator. verdi er en PERIODERATE — prognosert frist% for måneden, ikke kumulativ hittil-i-år — fordi det er det rapportens Faser innen frist % viser. innenfor_prognose og produserte_prognose er modellerte faser-tellinger for samme rad; summer disse og divider (som rapportens egen DIVIDE(SUM,SUM)-mål) for et resultat som stemmer på tvers av indikatorer og perioder — et gjennomsnitt av verdi gjør det ikke. Ett ankerpunkt ved slutten av siste komplette måned (type Anker, faktiske tellinger og faktisk rate) og én rad per dag derfra til 31. desember (type Prognose), hver med en brøkdel av sin måneds modellerte tellinger. Faktiske rater før ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og gjelder radens egen verdi. prognose_aarsslutt med nedre_aarsslutt og oevre_aarsslutt er årssluttprognosen for kumulativ YTD med 90 prosent intervall, gjentatt på alle rader.'
+COMMENT 'Prognose for fristprosent per indikator. verdi er en PERIODERATE — prognosert frist% for måneden, ikke kumulativ hittil-i-år — fordi det er det rapportens Faser innen frist % viser. innenfor_prognose og produserte_prognose er modellerte faser-tellinger for samme rad; summer disse og divider (som rapportens egen DIVIDE(SUM,SUM)-mål) for et resultat som stemmer på tvers av indikatorer og perioder — et gjennomsnitt av verdi gjør det ikke. Ett ankerpunkt ved slutten av siste komplette måned (type Anker, faktiske tellinger og faktisk rate) og én rad per gjenstående måned (type Prognose), hver med sin måneds modellerte tellinger. Faktiske rater før ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og gjelder radens egen verdi. prognose_aarsslutt med nedre_aarsslutt og oevre_aarsslutt er årssluttprognosen for kumulativ YTD med 90 prosent intervall, gjentatt på alle rader.'
 """)
 
 # A table created by an earlier run predates columns added since, and
@@ -500,12 +499,14 @@ def seasonal_ratio_on(ratios, on_date):
     """
     Seasonal ratio at a specific *date*, not just at a month end.
 
-    `seasonal_ratios` gives one ratio per completed month. The report axis is
-    daily, and so is the run: a projection made on the 4th of September that
+    `seasonal_ratios` gives one ratio per completed month, but the run itself
+    happens on a specific day: a projection made on the 4th of September that
     divides by a whole September's ratio understates year-end, because it
     treats four days of data as a full month. Interpolate linearly between the
     previous month end and this one by how far through the month the date is —
     at the last day of the month this returns that month's ratio unchanged.
+    This is about *when the script runs*, not the grain of what it writes —
+    the output rows are one per month regardless.
 
     Linear within a month is an approximation: case completions aren't spread
     evenly across a month. It is a much smaller error than pretending the
@@ -543,7 +544,13 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
                         anchor_date=None, anchor_innenfor=None, anchor_total=None):
     """
     Continue the monthly frist% line from the last complete month to
-    31 December, one row per day.
+    31 December, one row per remaining month.
+
+    One row per month, not per day: the report's axis groups by month
+    (`Kalender[Dato]` at month grain), so a finer grain in the table bought
+    nothing — every day within a month would have carried an identical
+    value anyway, just more rows to write and more code to split a month's
+    counts across them.
 
     Each row carries `innenfor_prognose`/`produserte_prognose` — modelled
     faser counts — alongside `verdi`, the rate they imply. The counts are
@@ -557,11 +564,7 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
 
     The anchor row's counts are the real ones for the last complete month —
     not modelled — so DIVIDE over the anchor row reproduces the live measure
-    exactly, with no drift at all, for that one month. Every day inside a
-    projected month carries an equal fraction of that month's modelled
-    counts (count / days in month), so summing them back up over the month
-    reconstitutes the month's total — the reason the rows are daily is so
-    this holds regardless of what grain the report rolls up to.
+    exactly, with no drift at all, for that one month.
 
     The anchor is the last *complete* month's observed rate, so the
     projection leaves the actual line at a point that won't move. The
@@ -569,8 +572,7 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
     not a month, and its running rate is the least stable number on the
     chart.
     """
-    year_end_date = date(first_forecast_date.year, 12, 31)
-    if year_end_est is None or first_forecast_date > year_end_date:
+    if year_end_est is None or first_forecast_date.month > 12:
         return []
 
     def make_row(analyse_dato, type_, verdi, lower, upper, innenfor, total):
@@ -590,6 +592,9 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
             "kjoere_id":             kjoere_id,
         }
 
+    def month_end(mnd):
+        return (pd.Timestamp(first_forecast_date.year, mnd, 1) + pd.offsets.MonthEnd(0)).date()
+
     rows = []
     if anchor_date is not None and anchor_total:
         anchor_rate = anchor_innenfor / anchor_total
@@ -600,7 +605,6 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
             anchor_innenfor, anchor_total
         ))
 
-    projected = {}
     for mnd in range(first_forecast_date.month, 13):
         if mnd not in month_ratios or mnd not in month_volumes:
             continue
@@ -608,25 +612,15 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
             year_end_est, ci_lower, ci_upper, month_ratios[mnd]
         )
         volume = month_volumes[mnd]
-        days_in_month = pd.Timestamp(year_end_date.year, mnd, 1).days_in_month
-        if estimate is not None and volume > 0 and days_in_month > 0:
-            projected[mnd] = (
-                estimate, lower, upper,
-                estimate * volume / days_in_month,   # innenfor, one day's share
-                volume / days_in_month,               # total, one day's share
-            )
-
-    if not projected:
-        return []
-
-    for timestamp in pd.date_range(first_forecast_date, year_end_date, freq="D"):
-        on_date = timestamp.date()
-        if on_date.month not in projected:
+        if estimate is None or volume <= 0:
             continue
-        estimate, lower, upper, innenfor, total = projected[on_date.month]
-        rows.append(make_row(on_date, "Prognose", estimate, lower, upper, innenfor, total))
+        rows.append(make_row(
+            month_end(mnd), "Prognose", estimate, lower, upper,
+            estimate * volume, volume
+        ))
 
-    return rows
+    # An anchor on its own is not a forecast.
+    return rows if any(row["type"] == "Prognose" for row in rows) else []
 
 
 OUTPUT_COLUMNS = {

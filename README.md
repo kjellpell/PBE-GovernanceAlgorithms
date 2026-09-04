@@ -100,7 +100,8 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
   table — an average of `verdi` across rows is different arithmetic and only agrees with
   that in the single-month, single-indicator case. An `Anker` row holds the last complete
   month's real counts (not modelled) so the projection forks off the actual line exactly,
-  then one row per day to 31 December carries a share of its month's modelled counts
+  then one row per remaining month carries that month's modelled counts (one row per
+  month, not per day — the report's axis groups by month, so a finer grain bought nothing)
 - Idempotent — deletes and rewrites current-year rows on each run
 
 ## Flow and queue health

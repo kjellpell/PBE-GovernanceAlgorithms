@@ -260,13 +260,11 @@ class SeasonalForecastTests(unittest.TestCase):
         self.assertEqual(anchor["innenfor_prognose"], 82)
         self.assertEqual(anchor["produserte_prognose"], 100)
 
-        # Summing a projected month's daily rows back up reconstitutes that
-        # month's modelled total — the reason the rows are daily.
-        september = [r for r in rows[1:] if r["analyse_dato"].month == 9]
+        # One row per month, carrying that month's modelled total directly —
+        # no splitting to reassemble.
+        september = next(r for r in rows[1:] if r["analyse_dato"].month == 9)
         self.assertAlmostEqual(
-            sum(r["produserte_prognose"] for r in september),
-            MONTH_VOLUMES[9],
-            delta=0.5,
+            september["produserte_prognose"], MONTH_VOLUMES[9], delta=0.5
         )
 
     def test_a_rate_average_would_disagree_with_sum_divide_across_months(self):
@@ -296,19 +294,14 @@ class SeasonalForecastTests(unittest.TestCase):
             pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
             anchor_date=date(2025, 8, 31), anchor_innenfor=82, anchor_total=100,
         )
-        by_month = {}
-        for row in rows[1:]:
-            by_month.setdefault(row["analyse_dato"].month, set()).add(row["verdi"])
+        by_month = {row["analyse_dato"].month: row["verdi"] for row in rows[1:]}
 
-        # Every day of a month carries that month's rate — a monthly rate is a
-        # step, not a curve — and the months differ from each other.
-        self.assertEqual([len(values) for values in by_month.values()], [1, 1, 1, 1])
-        self.assertEqual(len(set(next(iter(v)) for v in by_month.values())), 4)
-        # The shape is the seasonal shape, not a drift towards the year-end
+        # One row per month, and the months differ from each other — the
+        # shape is the seasonal shape, not a drift towards the year-end
         # number: a weak November projects below a strong September.
-        september = next(iter(by_month[9]))
-        november  = next(iter(by_month[11]))
-        self.assertGreater(september, november)
+        self.assertEqual(set(by_month), {9, 10, 11, 12})
+        self.assertEqual(len(set(by_month.values())), 4)
+        self.assertGreater(by_month[9], by_month[11])
 
     def test_forecast_forks_off_the_last_complete_month(self):
         rows = build_forecast_rows(
@@ -318,19 +311,20 @@ class SeasonalForecastTests(unittest.TestCase):
         )
         dates = [row["analyse_dato"] for row in rows]
 
-        # The anchor is August's observed rate, and the projection picks up the
-        # very next day — no gap, and the part-finished September is projected
-        # rather than anchored on.
+        # The anchor is August's observed rate, one row per remaining month
+        # picks up from September, and the part-finished September is
+        # projected rather than anchored on.
         self.assertEqual(rows[0]["type"], "Anker")
         self.assertEqual(rows[0]["analyse_dato"], date(2025, 8, 31))
         self.assertEqual(rows[0]["verdi"], 0.82)
         self.assertEqual(
             rows[0]["nedre_konfidensgrense"], rows[0]["oevre_konfidensgrense"]
         )
-        self.assertEqual(dates[1], date(2025, 9, 1))
+        self.assertEqual(dates[1], date(2025, 9, 30))
         self.assertEqual(dates[-1], date(2025, 12, 31))
         self.assertEqual(dates, sorted(dates))
         self.assertEqual(len(dates), len(set(dates)))
+        self.assertEqual(len(rows), 5)  # anchor + Sep, Oct, Nov, Dec
         self.assertEqual(set(row["type"] for row in rows[1:]), {"Prognose"})
 
     def test_year_end_interval_is_separate_from_the_month_bands(self):
@@ -377,7 +371,7 @@ class SeasonalForecastTests(unittest.TestCase):
             pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
         )
 
-        self.assertTrue(rows)
+        self.assertEqual(len(rows), 4)  # Sep, Oct, Nov, Dec
         self.assertEqual(set(row["type"] for row in rows), {"Prognose"})
 
     def test_no_rows_when_no_month_can_be_projected(self):
