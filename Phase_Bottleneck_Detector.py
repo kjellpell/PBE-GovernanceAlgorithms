@@ -260,6 +260,12 @@ def to_records(rows_in, schema):
         IntegerType(): lambda v: None if v is None else int(v),
         DoubleType(): lambda v: None if v is None else float(v),
         BooleanType(): lambda v: None if v is None else bool(v),
+        TimestampType(): lambda v: None if v is None else (
+            v.to_pydatetime() if isinstance(v, pd.Timestamp) else v
+        ),
+        DateType(): lambda v: None if v is None else (
+            v.to_pydatetime().date() if isinstance(v, pd.Timestamp) else v
+        ),
     }
     out = []
     for row in rows_in:
