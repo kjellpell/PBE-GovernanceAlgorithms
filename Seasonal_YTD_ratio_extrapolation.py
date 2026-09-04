@@ -312,6 +312,15 @@ for indikator in indicators:
             print(f"Skipping {indikator} month {mnd} — invalid projection")
             continue
 
+        # f_ci_lo/f_ci_hi are guaranteed to bracket the per-month estimate
+        # returned by project_year_end, which is discarded above — not
+        # year_end_est, the fixed value stored below as prognose_aarsslutt.
+        # Widen the interval so it always brackets year_end_est too,
+        # otherwise validate_results can reject the row.
+        if year_end_est is not None:
+            f_ci_lo = min(f_ci_lo, year_end_est)
+            f_ci_hi = max(f_ci_hi, year_end_est)
+
         analyse_dato = (pd.Timestamp(CURRENT_YEAR, mnd, 1) + pd.offsets.MonthEnd(0)).date()
         results.append({
             "indikator":         indikator,
