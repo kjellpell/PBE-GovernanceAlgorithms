@@ -30,124 +30,114 @@ the months so far this year) — the same definition the old script used, not an
 monthly ratios.
 
 ### Visual — faktisk linje
-- X-akse: `Kalender[År måned]` (jan–des inneværende år) — månedsgrain, ikke dagsgrain
+- X-akse: `Kalender[Dato]` (daglig)
 - Hel linje: `[Fristprosent YTD]`
-
-Note the axis grain. A YTD measure on a *daily* axis draws a sawtooth; on a monthly axis
-it draws the cumulative curve everyone expects. Both parts of this page use the same
-monthly axis, which is what lets them share one chart in Del 2.
 
 ## Del 2 — Årssluttprognose (persistert modell)
 
 Datakilde: `prognoser.frist_prognose` (written nightly by
 `Seasonal_YTD_ratio_extrapolation.py`).
 
-The table holds the forecast **as a YTD trajectory**, one row per month:
+The table continues the YTD line from where the actuals stop to 31 December,
+**one row per day** — the same grain `[Fristprosent YTD]` is plotted at, so the two go on
+one axis and meet:
 
-| `type` | months | `verdi` | band |
+| `type` | rows | `verdi` | bånd |
 |---|---|---|---|
-| `Anker` | the last closed month | observed YTD | zero width — it's an observation |
-| `Prognose` | remaining months | expected YTD at that month | widens with the horizon |
+| `Anker` | one, at the last date with data | observed YTD that day | zero width — it's an observation |
+| `Prognose` | every day from there to 31 Dec | projected YTD that day | opens up with the horizon |
 
-`prognose_aarsslutt` is the December endpoint, repeated on every row so the KPI cards can
+`prognose_aarsslutt` is the 31 December endpoint, repeated on every row so the KPI cards
 read it without a date filter. `nedre_konfidensgrense`/`oevre_konfidensgrense` belong to
-that row's own `verdi` — they are the 90% year-end interval scaled along the same seasonal
-path, so they close on the year-end interval in December.
+that row's own `verdi` — the 90% year-end interval scaled along the same seasonal path, so
+the band closes on the year-end interval on 31 December.
 
-### Hva prognosen faktisk er — og hva den ikke tåler å bli tegnet som
+Two things follow from the daily grain, and both were what made the earlier version of
+this page useless:
 
-The forecast is, at heart, **one number with an interval**: årsslutt ± CI. Everything else
-is that number projected backwards along a seasonal path. That has two consequences for
-the report layout:
-
-1. The KPI card is the primary visual, not the line chart. A three-point line in the last
-   quarter carries one number and spends a third of the chart doing it.
-2. The line chart is worth building *only* if it shows the trajectory joined to the actual
-   line and carries the uncertainty band. Without those, it adds nothing the card doesn't
-   already say — and it invites the anti-pattern below.
-
-#### Anti-mønster: prognose lagt oppå månedskurven
-
-The one to avoid: `[Fristprosent (måned)]` (from `Trendretning_POWERBI_DAX.md`) as the
-actual series, with the forecast as a short flat line hanging over okt–des. It looks
-plausible and is wrong in three ways at once:
-
-- **Two different quantities on one axis.** The monthly measure is each month on its own
-  (it swings — 63% one month, 90% the next); the forecast is cumulative YTD. A viewer
-  reads the flat forecast segment as "we expect 84% *in* October", which is not what the
-  model says. It says: 84% *for the year as a whole*.
-- **The gap.** The forecast series starts in the first unforecast month, so it floats
-  disconnected from the actual line. Nothing tells the eye where the projection departs
-  from observed data.
-- **No band.** Drawn as a bare line, a 90% interval that may span several points reads as
-  a point estimate.
-
-If the monthly curve is the chart the board wants — a fair choice, it carries the real
-variation — then keep it, and put the forecast on it as a **labelled constant reference
-line** with `nedre`/`oevre` as a shaded region across the *whole* x-axis, titled
-`Prognose årslutt 84 % (90 % KI: 79–89 %)`. A reference line makes no claim about
-individual months; a series over okt–des does.
+- **A month-end-only forecast is three points on a daily axis**, which a smoothed line
+  draws as a flat segment hanging over the last quarter. Hence one row per day.
+- **The forecast starts on the actual value**, not one period after it. The `Anker` row
+  carries the observed YTD at the last date with data, so the dashed line leaves the solid
+  one at exactly the point the solid one reaches — the fork is where the projection
+  begins, and there is no gap to interpret.
 
 ### Visualforslag
 
-#### 1) KPI-kort med intervall (primærvisual)
+#### 1) Linjediagram: faktisk YTD + prognose til årsslutt
+
+- **Modell:** relate `Kalender[Dato]` (1) → `frist_prognose[analyse_dato]` (*), single
+  direction. Both are daily, so this is a plain date relationship.
+- **X-akse:** `Kalender[Dato]`, 1. jan – 31. des, same axis as Del 1.
+- **Serie 1 (hel linje):** `[Fristprosent YTD]` — actual, up to the last date with data.
+- **Serie 2 (stiplet linje):** `[Prognose YTD]` — from that same date to 31 December.
+- **Bånd:** `[Prognose nedre]` and `[Prognose oevre]`. Power BI's core line chart has no
+  band primitive — either add them as two thin dashed lines, or lay a band-capable visual
+  underneath. Zero width at the anchor, widest at 31 December: uncertainty grows with the
+  horizon.
+- **Mållinje:** constant line at `alert_config[terskel_amber]`.
+
+Both series are the same quantity — YTD frist% — one observed, one projected. The last
+point of the dashed line is `[Prognose årslutt]` on the card; if they ever disagree, the
+semantic model is filtering the two sides differently.
+
+The projected line is *not* flat, and is not forced to rise. YTD frist% is a ratio, so it
+falls whenever the months ahead are historically worse than the year so far — for most of
+these indicators the seasonal pattern erodes towards December, and that slope is the part
+of the picture worth looking at.
+
+#### Én felle: månedsmålet på samme akse
+
+`[Fristprosent (måned)]` (from `Trendretning_POWERBI_DAX.md`) is each month on its own and
+swings; this forecast is cumulative YTD. On one axis a viewer reads the projected line as
+"we expect 84% *in* October", which the model does not say — it says 84% *for the year*.
+Keep the two apart, or, if the monthly curve is the chart you want, put the forecast on it
+as a labelled constant reference line (`Prognose årslutt 84 %, 90 % KI 79–89 %`) rather
+than as a series over the remaining months.
+
+#### 2) KPI-kort med intervall
 - Stor verdi: `[Prognose årslutt]`
 - Undertekst: `[Prognose intervalltekst]` — "90 % KI: 79–89 %"
 - Farge: `[Prognose RAG]` mot `alert_config`
 - Sammenlign mot målverdi (`alert_config[terskel_amber]`)
 
-A bullet/KPI visual with the target as the reference marker and the CI as the range says
-everything the model has to say, in the space of a tile.
-
-#### 2) Linjediagram: faktisk YTD + prognosebane
-
-Only worth the space if built as follows — otherwise use #1 alone.
-
-- **Modell:** relate `Kalender[Dato]` (1) → `frist_prognose[analyse_dato]` (*), single
-  direction. `analyse_dato` is month-end, so the two sides line up on a monthly axis.
-- **X-akse:** `Kalender[År måned]` — the *same* axis as Del 1.
-- **Serie 1 (hel linje):** `[Fristprosent YTD]` — actual, jan → last closed month.
-- **Serie 2 (stiplet linje):** `[Prognose YTD]` — the trajectory. Because the table
-  carries the `Anker` row at the last closed month, this series starts *on* the actual
-  line: no gap, and the fork is visible at the exact month the projection takes over.
-- **Bånd:** `[Prognose nedre]` and `[Prognose oevre]`. Power BI's core line chart has no
-  band primitive — either add them as two thin dashed lines, or lay a
-  `Line and stacked area` / band-capable visual underneath. The band is zero-width at the
-  anchor and widest in December, which is the honest shape: uncertainty grows with the
-  horizon.
-- **Mållinje:** constant line at `alert_config[terskel_amber]`.
-
-Both series are YTD, so the fork reads correctly: same quantity, one observed, one
-projected. The December point of the dashed line is the number on the KPI card — if the
-two ever disagree, the semantic model is filtering the two sides differently.
-
 #### 3) Oppsummeringstabell
-- `indikator`, `[Fristprosent YTD]` (Del 1), `[Prognose årslutt]`, `[Prognose nedre]`, `[Prognose oevre]`
+- `indikator`, `[Fristprosent YTD]` (Del 1), `[Prognose årslutt]`, `[Prognose CI lower]`, `[Prognose CI upper]`
 - Sortering: `[Prognose årslutt]` asc
 
 ### DAX-forslag
 
 ```DAX
-Prognose YTD = MAX(frist_prognose[verdi])
+Prognose YTD =
+LASTNONBLANKVALUE(
+    frist_prognose[analyse_dato],
+    MAX(frist_prognose[verdi])
+)
 ```
+
+```DAX
+Prognose nedre =
+LASTNONBLANKVALUE(
+    frist_prognose[analyse_dato],
+    MAX(frist_prognose[nedre_konfidensgrense])
+)
+```
+
+```DAX
+Prognose oevre =
+LASTNONBLANKVALUE(
+    frist_prognose[analyse_dato],
+    MAX(frist_prognose[oevre_konfidensgrense])
+)
+```
+
+`LASTNONBLANKVALUE`, not a plain `MAX`, so the line still reads correctly if someone rolls
+the axis up to months or quarters: a YTD value belongs to the *end* of the period, and the
+projected path can slope downwards, where `MAX` would silently pick the period's first day
+instead of its last. At the daily grain the two are the same.
 
 Do not filter `frist_prognose[type]` on this visual. The `Anker` row is what joins the
-dashed line to the solid one; excluding it gives back the disconnected series from the
-anti-pattern above.
-
-```DAX
-Prognose nedre = MAX(frist_prognose[nedre_konfidensgrense])
-```
-
-```DAX
-Prognose oevre = MAX(frist_prognose[oevre_konfidensgrense])
-```
-
-The card measures below must ignore the page's month filter (they are year-end values, the
-same no matter which month is in context) while keeping the `indikator` filter — so they
-remove the *date* filters only, both the ones on `frist_prognose` itself and the ones
-`Kalender` propagates through the relationship. `REMOVEFILTERS(frist_prognose)` would
-strip `indikator` as well and give every indicator the same number.
+dashed line to the solid one; excluding it puts the gap back.
 
 ```DAX
 Prognose årslutt =
@@ -227,23 +217,25 @@ RETURN
 
 ## Slicer-oppsett
 - `indikator`
-- `Kalender[Dato]` (Del 1 only — Del 2 is scoped to the current year already, and the card
-  measures above deliberately ignore the month filter)
+- `Kalender[Dato]` (Del 1 only — Del 2 covers the current year by construction, and the
+  card measures above deliberately ignore the date filter)
 
 ## Tolkning
 - Prognose under mål = risiko.
 - Konfidensbånd som krysser mållinjen = usikker måloppnåelse.
-- Når flere måneder blir faktiske, skal båndene normalt bli smalere — the band is scaled
-  from the year-end interval, and that interval narrows as more of the year is observed.
-- The dashed line's December point equals `[Prognose årslutt]` on the card. They come from
-  the same column, so a mismatch means the visual is filtering, not that the model
-  disagrees with itself.
-- Del 1's `[Fristprosent YTD]` at the latest closed month should match the `Anker` row's
-  `verdi` within rounding — the anchor is that same observed YTD, written by the nightly
-  run. This is the one check that catches a stale run or drifted filters (`%avtalt%`,
-  fagomraade) between the two sides, and now it is visible on the chart itself: if the
-  dashed line does not start exactly on the solid one, one of the two is wrong. There is
-  still no single source of truth enforcing it automatically.
+- Båndet blir smalere etter hvert som mer av året er faktisk — it is scaled from the
+  year-end interval, and that interval narrows as the year fills in.
+- The last point of the dashed line equals `[Prognose årslutt]` on the card. Same column,
+  so a mismatch means the visual is filtering, not that the model disagrees with itself.
+- The dashed line must *start* on the solid one. The `Anker` row is the same observed YTD
+  the live measure computes, so a visible step at the fork means the nightly run is stale
+  or the two sides' filters (`%avtalt%`, fagomraade) have drifted apart. That check used to
+  need a query; now it is just looking at the chart. There is still nothing enforcing it
+  automatically.
+- Early in a month the anchor sits a few days into it. The projection accounts for that —
+  it uses the seasonal ratio interpolated to the actual date rather than treating a
+  part-finished month as finished, which otherwise biases the year-end estimate downwards
+  by roughly the size of one month's seasonal step.
 
 ## Åpenbar begrensning
 The nightly run deletes and rewrites the whole current year, so the table holds only the
