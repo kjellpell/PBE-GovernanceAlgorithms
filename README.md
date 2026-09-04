@@ -89,13 +89,18 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
 
 - **Minimum history:** 3 complete years per indicator
 - **Confidence interval:** 90% (z=1.645), derived from ratio variance (delta method)
-- Two seasonal models, two jobs: the cumulative-YTD ratios drive the year-end estimate
-  (`prognose_aarsslutt`, with its own interval), and the per-month rate ratios turn that
-  estimate back into the month rates the report plots
+- Three seasonal models: cumulative-YTD ratios drive the year-end estimate
+  (`prognose_aarsslutt`, with its own interval); per-month rate ratios turn that estimate
+  back into the month rates the report plots; per-month volume ratios turn this year's
+  observed caseload into a projected faser count per month
 - `frist_prognose[verdi]` is a **period rate**, matching `Faser innen frist %` /
-  `Fristprosent (måned)` — not a year-to-date value. An `Anker` row holds the last
-  complete month's observed rate so the projection forks off the actual line, then one row
-  per day to 31 December carries its month's projected rate
+  `Fristprosent (måned)` — not a year-to-date value. `innenfor_prognose`/
+  `produserte_prognose` carry that same rate as modelled faser counts, so a report can
+  read it with the same `DIVIDE(SUM(...), SUM(...))` pattern it already uses on the fact
+  table — an average of `verdi` across rows is different arithmetic and only agrees with
+  that in the single-month, single-indicator case. An `Anker` row holds the last complete
+  month's real counts (not modelled) so the projection forks off the actual line exactly,
+  then one row per day to 31 December carries a share of its month's modelled counts
 - Idempotent — deletes and rewrites current-year rows on each run
 
 ## Flow and queue health
