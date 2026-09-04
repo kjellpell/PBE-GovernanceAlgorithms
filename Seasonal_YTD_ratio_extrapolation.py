@@ -131,18 +131,29 @@ print("analyser.frist_prognose-tabellen er klar")
 # =============================================================================
 # Full history — all years, all indicators.
 
+# "Produced" mirrors the report's own [Produserte faser] measure exactly —
+# a fase counts once it has both a start and an end milestone date, nothing
+# to do with frist_dager. (An earlier version of this query used
+# `frist_dager IS NOT NULL` as the denominator, copied from a different
+# measure, Fristprosent (måned), that happens to give the same headline
+# numbers elsewhere but is not what [Produserte faser] actually filters on —
+# it silently dropped faser without a tracked deadline from both sides of the
+# ratio, which is why an indicator like Endringstillatelse could show a
+# script-computed month rate a couple of points off the live measure's.)
+# Every row that survives the WHERE clause is produced by that same
+# definition, so `total` is a plain COUNT(*), not a conditional one.
 monthly = spark.sql(f"""
     SELECT
         pr.indikator,
         YEAR(pr.sluttmilepaeldato)                 AS aar,
         MONTH(pr.sluttmilepaeldato)                AS mnd,
         COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END)           AS innenfor,
-        COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END)             AS total
+        COUNT(*)                                                    AS total
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikatorer
         ON indikatorer.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
-            AND pr.frist_dager IS NOT NULL
+            AND pr.startmilepaeldato IS NOT NULL
             AND indikatorer.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
             AND (
