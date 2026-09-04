@@ -4,26 +4,34 @@
 #
 # Method:
 #   1. Compute monthly YTD frist% per indicator for all historical years
-#   2. At each calendar month, compute the ratio: YTD_at_month / year_end
+#   2. At each calendar month, compute two ratios against the full-year rate:
+#      one from cumulative YTD, one from that month alone
 #   3. Trim best and worst year per seasonal position (handles outliers)
-#   4. Apply trimmed mean ratio to current YTD to project year-end, taking the
-#      ratio at the day the data actually reaches — a part-finished month is
-#      not a finished one
+#   4. Apply the trimmed YTD ratio to current YTD to project year-end, taking
+#      the ratio at the day the data actually reaches — a part-finished month
+#      is not a finished one
 #   5. Confidence interval from trimmed variance across historical years
-#   6. Scale both back along the seasonal path to draw a daily line from today
-#      to 31 December
+#   6. Turn that year-end estimate back into a per-month rate for each
+#      remaining month, which is the quantity the report plots
 #
 # Output table: frist_prognose
-#   The projection as a daily YTD series, because that is the grain the actual
-#   `Fristprosent YTD` measure is plotted at: one anchor row at the last date
-#   with data (type='Anker', the observed YTD, so the projection leaves the
-#   actual line at the point the actual line reaches) and one row per day from
-#   there to 31 December (type='Prognose'). Actual YTD for the earlier days
-#   isn't written here: it's a plain live DAX year-to-date measure against
-#   saksbehandling.faser (standard time intelligence, no algorithm needed), so
-#   storing a copy of it would just be duplicated data. Each row's band belongs
-#   to that row's `verdi`; `prognose_aarsslutt` is the 31 December endpoint,
-#   repeated on every row for the KPI cards.
+#   `verdi` is a PERIOD RATE — the projected frist% for the month, not a
+#   cumulative year-to-date value. The report's `Faser innen frist %` is
+#   DIVIDE([Faser innen frist], [Produserte faser]) in the period's filter
+#   context with nothing cumulative over it, so only a period rate can
+#   continue that line.
+#
+#   One anchor row at the end of the last complete month (type='Anker', that
+#   month's observed rate, so the projection leaves the actual line where it
+#   ends) and one row per day from the start of the next month to 31 December
+#   (type='Prognose'), each carrying its month's projected rate. Daily so the
+#   series lands on the axis at whatever grain the report rolls it to.
+#
+#   Actual rates before the anchor aren't written here: they're the report's
+#   own live measure. `prognose_aarsslutt`, with `nedre_aarsslutt` and
+#   `oevre_aarsslutt`, is the year-end YTD estimate and its interval, repeated
+#   on every row for the KPI cards — that one IS cumulative, and is the
+#   governance number. It is not the last point of the line.
 #   See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
 #
 # Schedule: nightly, after main data pipeline.
@@ -66,11 +74,13 @@ CREATE TABLE IF NOT EXISTS analyser.frist_prognose (
     nedre_konfidensgrense       DOUBLE,
     oevre_konfidensgrense       DOUBLE,
     prognose_aarsslutt          DOUBLE,
+    nedre_aarsslutt             DOUBLE,
+    oevre_aarsslutt             DOUBLE,
     kjoert_tidspunkt            TIMESTAMP   NOT NULL,
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Årssluttprognose for fristprosent per indikator som daglig YTD-bane — ett ankerpunkt på siste dato med data (type Anker, faktisk YTD) og én rad per dag derfra til 31. desember (type Prognose). Faktisk YTD fram til ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent, gjelder radens egen verdi og bygger på historisk variasjon i samme sesongposisjon. prognose_aarsslutt er 31. desember-punktet gjentatt på alle rader.'
+COMMENT 'Prognose for fristprosent per indikator. verdi er en PERIODERATE — prognosert frist% for måneden, ikke kumulativ hittil-i-år — fordi det er det rapportens Faser innen frist % viser. Ett ankerpunkt ved slutten av siste komplette måned (type Anker, faktisk månedsrate) og én rad per dag derfra til 31. desember (type Prognose), hver med sin måneds prognoserte rate. Faktiske rater før ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og gjelder radens egen verdi. prognose_aarsslutt med nedre_aarsslutt og oevre_aarsslutt er årssluttprognosen for kumulativ YTD med 90 prosent intervall, gjentatt på alle rader.'
 """)
 
 print("analyser.frist_prognose-tabellen er klar")
@@ -132,6 +142,132 @@ def compute_ytd(df, indikator, year):
     return result
 
 
+def trimmed_stats(values, min_years, trim_n):
+    """
+    Trimmed mean and std of one seasonal position's ratios across years.
+
+    Drops the best and worst year, but not when that would reduce a three-year
+    sample to a single observation and a false zero-width interval.
+    """
+    if len(values) < min_years:
+        return None
+
+    values_sorted = sorted(values)
+    if len(values_sorted) >= 2 * trim_n + 2:
+        trimmed = values_sorted[trim_n:-trim_n]
+    else:
+        trimmed = values_sorted
+
+    return {
+        "mean_ratio": float(np.mean(trimmed)),
+        "std_ratio":  float(np.std(trimmed)) if len(trimmed) > 1 else 0.0,
+        "n_years":    len(trimmed),
+    }
+
+
+def monthly_rates(df, indikator, year):
+    """
+    frist% for each month of a year on its own — not cumulative.
+
+    This is the shape the report plots. `Faser innen frist %` is
+    DIVIDE([Faser innen frist], [Produserte faser]) evaluated in whatever
+    period the axis puts it in, with no year-to-date filter over it, so it is a
+    period rate: each month independent of the ones before it. Despite the
+    name, it is not a YTD measure — which is why a cumulative projection could
+    never line up with it.
+
+    Returns dict {month: rate} for months with produced faser.
+    """
+    ind = df[(df["indikator"] == indikator) & (df["aar"] == year)].sort_values("mnd")
+    return {
+        int(row["mnd"]): row["innenfor"] / row["total"]
+        for _, row in ind.iterrows()
+        if row["total"] > 0
+    }
+
+
+def monthly_rate_ratios(df, indikator, current_year, min_years=3, trim_n=1):
+    """
+    For each calendar month, the trimmed mean and std of
+        that month's frist% / that year's full-year frist%
+    across complete historical years.
+
+    The per-month counterpart of `seasonal_ratios`. Both are needed, and they
+    do different jobs: `seasonal_ratios` drives the year-end estimate, because
+    cumulative YTD is the stable thing to extrapolate from; this one turns that
+    estimate back into the per-month values the report actually draws.
+
+    Its spread is also the honest uncertainty for a single month. A month's
+    rate swings far more than the year does — that width is the point, not
+    noise to be smoothed away.
+
+    Returns dict {month: {mean_ratio, std_ratio, n_years}} or None.
+    """
+    years = sorted(df[(df["indikator"] == indikator) &
+                      (df["aar"] < current_year)]["aar"].unique())
+
+    complete_years = []
+    for y in years:
+        rates = monthly_rates(df, indikator, y)
+        year_rate = compute_ytd(df, indikator, y).get(12)
+        if set(rates) == set(range(1, 13)) and year_rate and np.isfinite(year_rate) and year_rate > 0:
+            complete_years.append((rates, year_rate))
+
+    if len(complete_years) < min_years:
+        return None
+
+    ratios = {m: [] for m in range(1, 13)}
+    for rates, year_rate in complete_years:
+        for m, rate in rates.items():
+            ratio = rate / year_rate
+            # A month's rate varies far more around the year than a YTD value
+            # does, so this bound is wider than the one in seasonal_ratios —
+            # it is there to drop broken months, not to tame real variation.
+            if np.isfinite(ratio) and 0 <= ratio <= 3:
+                ratios[m].append(ratio)
+
+    result = {}
+    for m in range(1, 13):
+        stats = trimmed_stats(ratios[m], min_years, trim_n)
+        if stats is not None:
+            result[m] = stats
+
+    return result if result else None
+
+
+def project_month_rate(year_end_est, ci_lower, ci_upper, ratio, z=1.645):
+    """
+    Turn the year-end estimate into one month's projected frist%.
+
+    Two independent sources of uncertainty, combined by the delta method: how
+    uncertain the year-end level is, and how much this month has varied around
+    its year historically. The second usually dominates, and should — a single
+    month is a much smaller sample than a year.
+
+    Returns (estimate, ci_lower, ci_upper) or (None, None, None).
+    """
+    if year_end_est is None or ratio is None:
+        return None, None, None
+
+    mean_ratio = ratio["mean_ratio"]
+    std_ratio  = ratio["std_ratio"]
+    if not np.isfinite(mean_ratio) or not np.isfinite(std_ratio) or mean_ratio < 0:
+        return None, None, None
+
+    estimate = min(1.0, max(0.0, year_end_est * mean_ratio))
+
+    std_year_end = 0.0
+    if ci_lower is not None and ci_upper is not None and ci_upper > ci_lower:
+        std_year_end = (ci_upper - ci_lower) / (2 * z)
+    std_estimate = np.sqrt((mean_ratio * std_year_end) ** 2
+                           + (year_end_est * std_ratio) ** 2)
+
+    lower = min(estimate, max(0.0, estimate - z * std_estimate))
+    upper = max(estimate, min(1.0, estimate + z * std_estimate))
+
+    return round(float(estimate), 4), round(float(lower), 4), round(float(upper), 4)
+
+
 def seasonal_ratios(df, indikator, current_year, min_years=3, trim_n=1):
     """
     For each calendar month 1-12, compute the trimmed mean and std of
@@ -168,21 +304,9 @@ def seasonal_ratios(df, indikator, current_year, min_years=3, trim_n=1):
 
     result = {}
     for m in range(1, 13):
-        vals = ratios[m]
-        if len(vals) < min_years:
-            continue
-        # Avoid reducing a three-year sample to one observation and a false
-        # zero-width uncertainty interval.
-        vals_sorted = sorted(vals)
-        if len(vals_sorted) >= 2 * trim_n + 2:
-            trimmed = vals_sorted[trim_n:-trim_n]
-        else:
-            trimmed = vals_sorted
-        result[m] = {
-            "mean_ratio": float(np.mean(trimmed)),
-            "std_ratio":  float(np.std(trimmed)) if len(trimmed) > 1 else 0.0,
-            "n_years":    len(trimmed)
-        }
+        stats = trimmed_stats(ratios[m], min_years, trim_n)
+        if stats is not None:
+            result[m] = stats
 
     return result if result else None
 
@@ -263,31 +387,31 @@ def seasonal_ratio_on(ratios, on_date):
     return {"mean_ratio": float(mean), "std_ratio": float(std), "n_years": current["n_years"]}
 
 
-def build_forecast_rows(indikator, anchor_date, anchor_ytd, ratios,
+def build_forecast_rows(indikator, first_forecast_date, month_ratios,
                         year_end_est, ci_lower, ci_upper,
-                        kjoert_tidspunkt, kjoere_id):
+                        kjoert_tidspunkt, kjoere_id,
+                        anchor_date=None, anchor_rate=None):
     """
-    Continue the YTD line from where the actuals end to 31 December, one row
-    per day, with the confidence band around it.
+    Continue the monthly frist% line from the last complete month to
+    31 December, one row per day.
 
-    Daily, because that's the grain the actual `Fristprosent YTD` measure is
-    plotted at. A forecast written only at month ends is three points on a
-    daily axis, which is a flat segment floating over the last quarter, not a
-    continuation of the line.
+    `verdi` is a *period* rate — the projected frist% for the month the day
+    falls in — because that is what the report draws. `Faser innen frist %` is
+    DIVIDE([Faser innen frist], [Produserte faser]) in the period's filter
+    context, with nothing cumulative over it, so a year-to-date projection is a
+    different quantity and cannot continue that line no matter how it is drawn.
 
-    The first row is the anchor: the observed YTD at `anchor_date`, with no
-    band, so the projection leaves the actual line at exactly the point the
-    actual line reaches. Every day after that is `year_end_est` scaled by the
-    seasonal ratio for that date, and the band is the year-end interval scaled
-    the same way — zero width at the anchor, opening up with the horizon, and
-    closing on [ci_lower, ci_upper] on 31 December.
+    One row per day, so the series lands on the axis at whatever grain it is
+    rolled to. Every day in a month carries that month's projected rate, which
+    makes the projection a step per month — which is what a monthly rate is.
 
-    Scaling `year_end_est` (rather than re-deriving the path from
-    `anchor_ytd`) keeps the line and the year-end KPI card telling the same
-    story: the last point of the line is the number on the card.
+    The anchor is the last *complete* month's observed rate, so the projection
+    leaves the actual line at a point that won't move. The current month is
+    projected rather than anchored on: part of a month is not a month, and its
+    running rate is the least stable number on the chart.
     """
-    year_end_date = date(anchor_date.year, 12, 31)
-    if year_end_est is None or anchor_date >= year_end_date:
+    year_end_date = date(first_forecast_date.year, 12, 31)
+    if year_end_est is None or first_forecast_date > year_end_date:
         return []
 
     def make_row(analyse_dato, type_, verdi, lower, upper):
@@ -299,32 +423,38 @@ def build_forecast_rows(indikator, anchor_date, anchor_ytd, ratios,
             "nedre_konfidensgrense": None if lower is None else round(float(lower), 4),
             "oevre_konfidensgrense": None if upper is None else round(float(upper), 4),
             "prognose_aarsslutt":    year_end_est,
+            "nedre_aarsslutt":       ci_lower,
+            "oevre_aarsslutt":       ci_upper,
             "kjoert_tidspunkt":      kjoert_tidspunkt,
             "kjoere_id":             kjoere_id,
         }
 
-    # The anchor is observed, not projected — no band on it.
-    rows = [make_row(anchor_date, "Anker", anchor_ytd, anchor_ytd, anchor_ytd)]
+    rows = []
+    if anchor_date is not None and anchor_rate is not None:
+        # Observed, not projected — no band on it.
+        rows.append(make_row(anchor_date, "Anker", anchor_rate, anchor_rate, anchor_rate))
 
-    for timestamp in pd.date_range(anchor_date + timedelta(days=1), year_end_date, freq="D"):
-        on_date = timestamp.date()
-        ratio = seasonal_ratio_on(ratios, on_date)
-        if ratio is None:
+    projected = {}
+    for mnd in range(first_forecast_date.month, 13):
+        if mnd not in month_ratios:
             continue
+        estimate, lower, upper = project_month_rate(
+            year_end_est, ci_lower, ci_upper, month_ratios[mnd]
+        )
+        if estimate is not None:
+            projected[mnd] = (estimate, lower, upper)
 
-        scale = ratio["mean_ratio"]
-        # No monotonic floor here: this is a ratio, not a running count. YTD
-        # frist% falls whenever the months ahead are worse than the year so
-        # far, and forcing the path never to decline is what flattens it into
-        # a line that says nothing.
-        verdi = min(1.0, max(0.0, year_end_est * scale))
-        lower = None if ci_lower is None else min(verdi, max(0.0, ci_lower * scale))
-        upper = None if ci_upper is None else max(verdi, min(1.0, ci_upper * scale))
+    if not projected:
+        return []
 
-        rows.append(make_row(on_date, "Prognose", verdi, lower, upper))
+    for timestamp in pd.date_range(first_forecast_date, year_end_date, freq="D"):
+        on_date = timestamp.date()
+        if on_date.month not in projected:
+            continue
+        estimate, lower, upper = projected[on_date.month]
+        rows.append(make_row(on_date, "Prognose", estimate, lower, upper))
 
-    # An anchor on its own is not a forecast.
-    return rows if len(rows) > 1 else []
+    return rows
 
 
 OUTPUT_COLUMNS = {
@@ -335,6 +465,8 @@ OUTPUT_COLUMNS = {
     "nedre_konfidensgrense",
     "oevre_konfidensgrense",
     "prognose_aarsslutt",
+    "nedre_aarsslutt",
+    "oevre_aarsslutt",
     "kjoert_tidspunkt",
     "kjoere_id",
 }
@@ -352,11 +484,23 @@ def validate_results(results):
             value = row[column]
             if value is not None and (not np.isfinite(value) or not 0 <= value <= 1):
                 raise ValueError(f"{column} out of bounds in row {row_number}: {value}")
+        year_end = row["prognose_aarsslutt"]
+        year_end_lower = row["nedre_aarsslutt"]
+        year_end_upper = row["oevre_aarsslutt"]
+        if year_end_lower is not None and year_end_upper is not None:
+            if not all(np.isfinite(value) and 0 <= value <= 1
+                       for value in (year_end_lower, year_end_upper)):
+                raise ValueError(f"Year-end interval out of bounds in row {row_number}")
+            if year_end_lower > year_end_upper or (
+                year_end is not None and not year_end_lower <= year_end <= year_end_upper
+            ):
+                raise ValueError(f"Invalid year-end interval in row {row_number}")
+
         lower = row["nedre_konfidensgrense"]
         upper = row["oevre_konfidensgrense"]
-        # The band is checked against `verdi` — the value on the same row, and
-        # the line it is drawn around — not against `prognose_aarsslutt`, which
-        # is the December endpoint repeated on every row for the KPI cards.
+        # This band belongs to `verdi` — the month rate on the same row, and
+        # the line it is drawn around. The year-end estimate has its own
+        # interval, checked just above; the two are different quantities.
         verdi = row["verdi"]
         if lower is not None and upper is not None:
             if not all(np.isfinite(value) and 0 <= value <= 1 for value in (lower, upper)):
@@ -374,18 +518,26 @@ indicators = monthly["indikator"].unique()
 
 for indikator in indicators:
 
-    # Compute seasonal ratios from history
+    # Two seasonal models, two jobs. The YTD ratios drive the year-end
+    # estimate — cumulative YTD is the stable thing to extrapolate from. The
+    # per-month ratios turn that estimate back into the period rates the
+    # report plots.
     ratios = seasonal_ratios(
         monthly, indikator, CURRENT_YEAR,
         min_years=MIN_YEARS, trim_n=TRIM_N
     )
+    month_ratios = monthly_rate_ratios(
+        monthly, indikator, CURRENT_YEAR,
+        min_years=MIN_YEARS, trim_n=TRIM_N
+    )
 
-    if ratios is None:
+    if ratios is None or month_ratios is None:
         print(f"Skipping {indikator} — insufficient history")
         continue
 
     # Current year actuals
-    current_ytd = compute_ytd(monthly, indikator, CURRENT_YEAR)
+    current_ytd   = compute_ytd(monthly, indikator, CURRENT_YEAR)
+    current_rates = monthly_rates(monthly, indikator, CURRENT_YEAR)
 
     if not current_ytd:
         print(f"Skipping {indikator} — no current year data")
@@ -395,42 +547,54 @@ for indikator in indicators:
     latest_month = max(current_ytd.keys())
     latest_ytd   = current_ytd[latest_month]
 
-    # Anchor where the actual line actually ends: today if the current month
-    # already has data, otherwise the end of the last month that does (the
-    # nightly load can lag). Everything after that date is projected.
+    # The year-end estimate uses everything loaded, current part-month
+    # included, against the seasonal ratio for the point in the year that data
+    # actually reaches — a part-finished month is not a finished one.
     if latest_month == CURRENT_MONTH:
-        anchor_date = TODAY
+        data_date = TODAY
     else:
-        anchor_date = (pd.Timestamp(CURRENT_YEAR, latest_month, 1)
-                       + pd.offsets.MonthEnd(0)).date()
+        data_date = (pd.Timestamp(CURRENT_YEAR, latest_month, 1)
+                     + pd.offsets.MonthEnd(0)).date()
 
-    # Year-end estimate from the YTD we have, against the seasonal ratio for
-    # the point in the year that YTD actually reaches — a part-finished month
-    # is not a finished one.
-    ratio_now = seasonal_ratio_on(ratios, anchor_date)
+    ratio_now = seasonal_ratio_on(ratios, data_date)
     if ratio_now is None:
-        print(f"Skipping {indikator} — no seasonal ratio at {anchor_date}")
+        print(f"Skipping {indikator} — no seasonal ratio at {data_date}")
         continue
 
     year_end_est, ci_lo, ci_hi = project_year_end(
-        latest_ytd, anchor_date.month, {anchor_date.month: ratio_now}
+        latest_ytd, data_date.month, {data_date.month: ratio_now}
     )
 
-    # Actual YTD for the days up to the anchor is NOT written here — that is a
-    # plain live DAX year-to-date measure against saksbehandling.faser
-    # (standard time intelligence, no algorithm needed). This table stores what
-    # a live measure structurally can't produce: the seasonal-ratio projection
-    # and its confidence band. The anchor row is the one observed value it
-    # duplicates, on purpose, so the projection has the actual line to leave
-    # from. See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
+    # The line, though, forks off the last *complete* month: a part-month's
+    # rate is the least stable number on the chart, and it moves every night.
+    # The current month is projected instead.
+    last_complete_month = latest_month - 1 if latest_month == CURRENT_MONTH else latest_month
+    if last_complete_month >= 12:
+        print(f"Skipping {indikator} — the year is complete, nothing to project")
+        continue
+
+    anchor_date = None
+    anchor_rate = current_rates.get(last_complete_month)
+    if anchor_rate is not None:
+        anchor_date = (pd.Timestamp(CURRENT_YEAR, last_complete_month, 1)
+                       + pd.offsets.MonthEnd(0)).date()
+
+    # Actual rates for the months up to the anchor are NOT written here — that
+    # is the report's own `Faser innen frist %` measure against
+    # saksbehandling.faser, no algorithm needed. This table stores what a live
+    # measure structurally can't produce: the projection and its band. The
+    # anchor row is the one observed value it duplicates, on purpose, so the
+    # projection has the actual line to leave from.
+    # See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
     indicator_rows = build_forecast_rows(
-        indikator, anchor_date, latest_ytd, ratios,
+        indikator, date(CURRENT_YEAR, last_complete_month + 1, 1), month_ratios,
         year_end_est, ci_lo, ci_hi,
-        datetime.now(), BATCH_ID
+        datetime.now(), BATCH_ID,
+        anchor_date=anchor_date, anchor_rate=anchor_rate
     )
 
     if not indicator_rows:
-        print(f"Skipping {indikator} — nothing left to project from {anchor_date}")
+        print(f"Skipping {indikator} — no month could be projected")
         continue
 
     results.extend(indicator_rows)
@@ -455,6 +619,8 @@ else:
         StructField("nedre_konfidensgrense", DoubleType(), True),
         StructField("oevre_konfidensgrense", DoubleType(), True),
         StructField("prognose_aarsslutt", DoubleType(), True),
+        StructField("nedre_aarsslutt", DoubleType(), True),
+        StructField("oevre_aarsslutt", DoubleType(), True),
         StructField("kjoert_tidspunkt", TimestampType(), False),
         StructField("kjoere_id", StringType(), False),
     ])
@@ -476,17 +642,15 @@ else:
 
     print(f"analyser.frist_prognose skrevet: {len(results)} rader")
 
-    # Summary — year-end estimates for current indicators. verdi_hittil
-    # (actual YTD so far) isn't in this table anymore — it's a live DAX
-    # measure — so this only shows what the table actually holds.
+    # Summary — year-end estimates for current indicators. The per-row band is
+    # a month rate's band now, so it isn't the year-end interval and isn't
+    # summarised here; the year-end number is what this table adds.
     spark.sql(f"""
         SELECT
             indikator,
-            MAX(prognose_aarsslutt)                      AS prognose_aarsslutt,
-            MAX(CASE WHEN analyse_dato = '{CURRENT_YEAR}-12-31'
-                     THEN nedre_konfidensgrense END)     AS nedre_konfidensgrense,
-            MAX(CASE WHEN analyse_dato = '{CURRENT_YEAR}-12-31'
-                     THEN oevre_konfidensgrense END)     AS oevre_konfidensgrense
+            MAX(prognose_aarsslutt)                             AS prognose_aarsslutt,
+            MIN(CASE WHEN type = 'Prognose' THEN verdi END)     AS laveste_maanedsrate,
+            MAX(CASE WHEN type = 'Prognose' THEN verdi END)     AS hoeyeste_maanedsrate
         FROM analyser.frist_prognose
         WHERE kjoere_id = '{BATCH_ID}'
         GROUP BY indikator
