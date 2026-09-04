@@ -112,7 +112,11 @@ Datakilde: `analyser.frist_prognose` (written nightly by
 | `type` | rows | `verdi` | `innenfor_prognose` / `produserte_prognose` | bånd |
 |---|---|---|---|---|
 | `Anker` | one, at the end of the last complete month | that month's observed rate | the real counts for that month | zero width — it's an observation |
-| `Prognose` | every day from the next month to 31 Dec | that month's projected rate | a day's share of that month's modelled counts | that month's historical spread |
+| `Prognose` | one per remaining month, dated at each month's end | that month's projected rate | that month's modelled counts | that month's historical spread |
+
+One row per remaining month, not per day: the report's axis groups by month
+(`Kalender[Dato]` at month grain), so a finer grain in the table bought nothing — every
+day within a month would carry an identical value anyway.
 
 `verdi` is a **month rate**, in the same units as `[Faser innen frist %]`, so the two go on
 one axis and mean the same thing. But **do not build the primary measure on `verdi`
@@ -123,11 +127,6 @@ else — several indicators together, a rollup wider than one month — it gives
 number, and that mismatch is exactly what `innenfor_prognose`/`produserte_prognose` exist
 to prevent: sum those two and divide, the same pattern the report already uses, and the
 row-level `verdi` becomes redundant except as a quick single-row sanity check.
-
-Every day inside a month carries an equal fraction of that month's modelled counts — a
-monthly rate is a step, not a curve — and the rows are daily only so that summing a
-month's rows back up reconstitutes the month's modelled total, whatever grain the report
-rolls up to.
 
 `prognose_aarsslutt` is the year-end figure, repeated on every row so a card reads it
 without a date filter. That one *is* cumulative (volume-weighted across the whole year),
@@ -145,7 +144,8 @@ than drifting towards a single number.
 #### 1) Linjediagram: faktisk + prognose
 
 - **Modell:** relate `Kalender[Dato]` (1) → `frist_prognose[analyse_dato]` (*), single
-  direction. Both are daily dates, so this is a plain date relationship.
+  direction — `analyse_dato` is month-end, so this is a plain date relationship at month
+  grain.
 - **X-akse:** `Kalender[Dato]` at month grain, jan–des.
 - **Serie 1 (hel linje):** `[Faser innen frist %]` — actual, through the last complete
   month.
@@ -186,8 +186,8 @@ because the table now carries a numerator and denominator, not just a pre-divide
 That is what makes this measure agree with the report's own arithmetic at every grain, not
 only the single-month reading: two indicators together, several months rolled into one
 quarter, whatever the page is sliced to. An `AVERAGE(frist_prognose[verdi])` measure
-happens to return the same number in the single-month, single-indicator case — every day
-that month repeats the same value — but is different arithmetic underneath, and diverges
+happens to return the same number in the single-month, single-indicator case — there is
+only one row there to average — but is different arithmetic underneath, and diverges
 everywhere else. That mismatch, not a filter or a grain problem, is why an
 `AVERAGE`-based version of this measure can show a different number than
 `[Faser innen frist % (lukket)]` even when both look at what should be the same data.
