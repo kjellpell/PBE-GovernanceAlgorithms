@@ -41,7 +41,6 @@ self-explanatory labels with numbers that need a briefing:
 - `Backlog_Aging_Distribution` — "X% of cases are 365+ days old on `Tidsbruk`," plus a
   simple reference count for `Bransjetid` — standard domain terms here, same category as
   `Fristprosent`/`Behandlingstid`, not something that needs paraphrasing
-- `Inflight_SLA_Risk_Monitor` — `Bruddet`/`Kritisk`/`Risiko`/`Innenfor`, plus the due-in-14-days list
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
@@ -66,7 +65,6 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 | `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
 | `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Daily snapshot of open-case age buckets, per clock (Tidsbruk/Bransjetid) — `TODAY()`-dependent trend |
-| `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko_trend` | Daily snapshot of open-case risk mix — `TODAY()`-dependent trend |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_konsentrasjon` | Gini coefficient of workload concentration — rank-based math, `TODAY()`-dependent trend |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
@@ -110,13 +108,25 @@ rolling average — 6-month window for board reporting, 3-month for operational.
 
 ### Seasonal_YTD_ratio_extrapolation.py
 
-Projects year-end `frist%` from current YTD using trimmed seasonal ratios from historical
-years, only for what a live measure can't do: the forecast and its confidence interval.
-(Actual YTD is `Fristprosent YTD` — a live DAX time-intelligence measure.)
+Projects the rest of the year's `frist%` from current YTD using trimmed seasonal ratios
+from historical years, only for what a live measure can't do: the projection and its
+confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
 
 - **Minimum history:** 3 complete years per indicator
-- **Confidence interval:** 80% (z=1.28), derived from ratio variance (delta method)
-- `frist_prognose` holds only forecast rows, for the remaining months of the current year
+- **Confidence interval:** 90% (z=1.645), derived from ratio variance (delta method)
+- Three seasonal models: cumulative-YTD ratios drive the year-end estimate
+  (`prognose_aarsslutt`, with its own interval); per-month rate ratios turn that estimate
+  back into the month rates the report plots; per-month volume ratios turn this year's
+  observed caseload into a projected faser count per month
+- `frist_prognose[verdi]` is a **period rate**, matching `Faser innen frist %` /
+  `Fristprosent (måned)` — not a year-to-date value. `innenfor_prognose`/
+  `produserte_prognose` carry that same rate as modelled faser counts, so a report can
+  read it with the same `DIVIDE(SUM(...), SUM(...))` pattern it already uses on the fact
+  table — an average of `verdi` across rows is different arithmetic and only agrees with
+  that in the single-month, single-indicator case. An `Anker` row holds the last complete
+  month's real counts (not modelled) so the projection forks off the actual line exactly,
+  then one row per remaining month carries that month's modelled counts (one row per
+  month, not per day — the report's axis groups by month, so a finer grain bought nothing)
 - Idempotent — deletes and rewrites current-year rows on each run
 
 ## Flow and queue health
@@ -144,21 +154,9 @@ explaining the flag.
 
 ## In-flight (currently-open) state
 
-Both of these score cases that are **still open**, before a problem shows up in the
-closed-case ratio — and both split the same way: today's state is live DAX, only the
-day-by-day trend needs a script, since `TODAY()`-dependent values have no memory of what
-they looked like yesterday.
-
-### Inflight_SLA_Risk_Monitor.py
-
-`classify_risk()` (thresholds `RISK_THRESHOLD_KRITISK`=0.90, `RISK_THRESHOLD_RISIKO`=0.75)
-scores open cases against their own `frist_dager`. Today's per-case list is live DAX (see
-`Inflight_SLA_Risk_Monitor_POWERBI_DAX.md`, Del 1); the script writes only the daily
-`sak_frist_risiko_trend` risk-mix snapshot (Del 2) — one `INSERT INTO ... SELECT`, pure
-Spark SQL, `MIN_TEAM_VOLUME` (10) gating `tilstrekkelig_volum`. `classify_risk()` stays in
-the script as the tested spec `risikoklasse_case_sql()` generates its SQL `CASE` from.
-
-- Open assumption to verify: whether `frist_dager` is reliably populated on open rows (only proven populated on closed rows, via CUSUM) — rows missing it are excluded, not defaulted.
+This scores cases that are **still open**, before a problem shows up in the closed-case
+ratio — today's state is live DAX, only the day-by-day trend needs a script, since
+`TODAY()`-dependent values have no memory of what they looked like yesterday.
 
 ### Backlog_Aging_Distribution.py
 

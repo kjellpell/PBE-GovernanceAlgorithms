@@ -702,21 +702,21 @@ if cusum_rows:
     cusum_spark = spark.createDataFrame(
         to_records(cusum_rows, CUSUM_SCHEMA), schema=CUSUM_SCHEMA
     )
-    cusum_spark.write.mode("overwrite").saveAsTable("analyser.cusum_analyse")
+    cusum_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.cusum_analyse")
     print(f"cusum_analyse skrevet: {len(cusum_rows)} rader")
 
 if changepoint_rows:
     cp_spark = spark.createDataFrame(
         to_records(changepoint_rows, PELT_SCHEMA), schema=PELT_SCHEMA
     )
-    cp_spark.write.mode("overwrite").saveAsTable("analyser.pelt_analyse")
+    cp_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.pelt_analyse")
     print(f"pelt_analyse skrevet: {len(changepoint_rows)} rader")
 
 if drilldown_rows:
     drilldown_spark = spark.createDataFrame(
         to_records(drilldown_rows, DRILLDOWN_SCHEMA), schema=DRILLDOWN_SCHEMA
     )
-    drilldown_spark.write.mode("overwrite").saveAsTable("analyser.pelt_analyse_detaljer")
+    drilldown_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.pelt_analyse_detaljer")
     print(f"pelt_analyse_detaljer skrevet: {len(drilldown_rows)} rader")
 
 # Summary — active signals

@@ -16,7 +16,7 @@ BI-rapportsikkerheten, uansett om tallene kommer fra `Faser` direkte (Del 1) ell
 ikke ved å gjemme en tabell.
 
 This page is split in two: **today's per-caseworker counts and shares** are live DAX
-straight from `Faser` (`Faser[saksbehandler]` is already in the semantic model, so a
+straight from `Saker` (`Saker[saksansvarlig]` is already in the semantic model, so a
 nightly copy of a plain `COUNTROWS`/`DIVIDE` would just be duplicated data), and **the
 Gini concentration trend** comes from `saksbehandler_konsentrasjon` — the one thing here
 that genuinely can't be a DAX measure (rank-based Lorenz-curve math) and, being a snapshot
@@ -25,10 +25,12 @@ of today's open caseload, is also a trend question a live measure can't answer o
 ## Del 1 — Dagens arbeidsmengde (live DAX)
 
 ### Antagelser (rename to match your model)
-- `Faser` — `saksbehandling.faser`, with `enhet`, `saksbehandler`, `startmilepaeldato`,
+- `Faser` — `saksbehandling.faser`, with `enhet`, `fk_saker`, `startmilepaeldato`,
   `sluttmilepaeldato`
+- `Saker` — `saksbehandling.saker`, with `pk_saker`, `saksansvarlig`, related to `Faser`
+  via `Saker[pk_saker]` = `Faser[fk_saker]`
 - Same fagomraade/`%avtalt%` filtering assumption as the rest of this repo's DAX docs
-- Rows with blank/null `saksbehandler` (unassigned cases) should be excluded, not
+- Rows with blank/null `saksansvarlig` (unassigned cases) should be excluded, not
   coalesced to "Ukjent" — an "Ukjent" pseudo-caseworker would corrupt the per-person
   concentration picture
 
@@ -40,7 +42,7 @@ CALCULATE(
     COUNTROWS(Faser),
     NOT ISBLANK(Faser[startmilepaeldato]),
     ISBLANK(Faser[sluttmilepaeldato]),
-    NOT ISBLANK(Faser[saksbehandler])
+    NOT ISBLANK(Saker[saksansvarlig])
 )
 ```
 
@@ -48,12 +50,12 @@ CALCULATE(
 Andel av enhetens saksmengde =
 DIVIDE(
     [Aktiv saksmengde (saksbehandler)],
-    CALCULATE([Aktiv saksmengde (saksbehandler)], REMOVEFILTERS(Faser[saksbehandler]))
+    CALCULATE([Aktiv saksmengde (saksbehandler)], REMOVEFILTERS(Saker[saksansvarlig]))
 )
 ```
 
 ### Visual — arbeidsmengde-fordeling (individnivå, tilgangsbegrenset)
-- Stolpediagram: `Faser[saksbehandler]` (X) vs `[Aktiv saksmengde (saksbehandler)]` (Y),
+- Stolpediagram: `Saker[saksansvarlig]` (X) vs `[Aktiv saksmengde (saksbehandler)]` (Y),
   per `enhet`
 - Referanselinje: gjennomsnittlig saksmengde for enheten
 

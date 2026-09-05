@@ -375,6 +375,12 @@ def to_records(rows, schema):
         IntegerType(): lambda v: None if v is None else int(v),
         DoubleType(): lambda v: None if v is None else float(v),
         BooleanType(): lambda v: None if v is None else bool(v),
+        # pandas may hand back pandas.Timestamp/np.datetime64-backed dates here
+        # (e.g. after a DataFrame round-trip). Spark's type verifier only
+        # accepts the exact datetime.datetime/datetime.date types, not
+        # subclasses, so these must be converted to native python objects.
+        TimestampType(): lambda v: None if v is None else pd.Timestamp(v).to_pydatetime(),
+        DateType(): lambda v: None if v is None else pd.Timestamp(v).date(),
     }
     out = []
     for row in rows:
