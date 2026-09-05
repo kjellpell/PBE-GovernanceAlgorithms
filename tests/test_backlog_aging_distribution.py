@@ -44,12 +44,16 @@ class BucketAgeTests(unittest.TestCase):
         self.assertEqual(bucket_age(90), "61-90")
         self.assertEqual(bucket_age(91), "91-180")
 
-    def test_seam_between_fourth_and_open_ended_bucket(self):
+    def test_seam_between_fourth_and_fifth_bucket(self):
         self.assertEqual(bucket_age(180), "91-180")
-        self.assertEqual(bucket_age(181), "180+")
+        self.assertEqual(bucket_age(181), "181-365")
+
+    def test_seam_between_fifth_and_open_ended_bucket(self):
+        self.assertEqual(bucket_age(365), "181-365")
+        self.assertEqual(bucket_age(366), "365+")
 
     def test_open_ended_top_bucket_has_no_upper_limit(self):
-        self.assertEqual(bucket_age(10_000), "180+")
+        self.assertEqual(bucket_age(10_000), "365+")
 
     def test_negative_age_is_none(self):
         self.assertIsNone(bucket_age(-1))

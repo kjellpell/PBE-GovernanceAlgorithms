@@ -2,18 +2,43 @@
 # Backlog aging TREND snapshot per indicator and team.
 # Runs nightly after main data pipeline.
 #
-# Aldersgruppe depends on TODAY() — this script's only job is writing that
-# day's age-bucket shape down so Power BI can chart the trend. Today's shape
-# itself is live DAX against saksbehandling.faser, no table needed — see
-# Backlog_Aging_Distribution_POWERBI_DAX.md (Del 1: live, Del 2: this table).
+# Two separate clocks, not one blended "age" — the whole reason this was
+# rebuilt. The old version computed age as pure calendar time
+# (TODAY() - startmilepaeldato), which blends client-caused delay into what
+# looked like an internal-performance problem: a case open 90 days where 80
+# of those days were us waiting on the client looked identical to one where
+# all 90 days were on us.
+#
+#   Tidsbruk    — accumulated time on OUR side. This is the real internal
+#                 performance signal ("is our processing keeping up").
+#   Bransjetid  — accumulated time on the CLIENT's side, waiting for them to
+#                 provide what's needed. Not our team's performance.
+#
+# Both are live, independently-accumulating totals already on the fact
+# table (confirmed: they update continuously while a case is open) — so
+# there's no need to determine which clock is "currently" running. A case
+# can carry both a Tidsbruk figure and a Bransjetid figure at once; each is
+# bucketed on its own, same age buckets, distinguished by the new `klokke`
+# column ('Tidsbruk' / 'Bransjetid'). The completion-status column exists on
+# the fact table but isn't used here — the two accumulators already say
+# everything this page needs.
+#
+# Today's shape itself is live DAX against saksbehandling.faser, no table
+# needed — see Backlog_Aging_Distribution_POWERBI_DAX.md (Del 1: live,
+# Del 2: this table).
 #
 # Output table: sak_alder_fordeling
-#   One row per indikator x enhet x aldersgruppe x snapshot_dato.
+#   One row per indikator x enhet x klokke x aldersgruppe x snapshot_dato.
 #
 # Pure Spark SQL, no pandas/numpy — age bucketing is a SQL CASE expression,
 # percentiles use percentile_approx. AGE_BUCKETS and bucket_age() stay in
 # Python only as the tested spec aldersgruppe_case_sql() generates its SQL
 # CASE expression from, so the two can't drift apart.
+#
+# Unit assumption: tidsbruk/bransjetid are assumed to already be day counts
+# (same assumption every other script in this repo makes about tidsbruk,
+# e.g. CUSUM_Changepoint.py's Behandlingstid). Verify against the Lakehouse
+# schema before relying on this if that turns out to be wrong.
 #
 # Schedule: nightly after main data pipeline.
 # =============================================================================
@@ -25,14 +50,23 @@ spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAcc
 BATCH_ID = datetime.now().strftime("%Y%m%dT%H%M%S")
 
 # Ordered (min_days, max_days, label) age buckets. max_days=None means
-# unbounded (open-ended top bucket). Must stay contiguous — no gaps.
+# unbounded (open-ended top bucket). Must stay contiguous — no gaps. Same
+# buckets apply to both clocks — Bransjetid can run up to ~1000 days, so the
+# tail is wider than a pure Tidsbruk-calibrated set would need.
 AGE_BUCKETS = [
     (0,   30,   "0-30"),
     (31,  60,   "31-60"),
     (61,  90,   "61-90"),
     (91,  180,  "91-180"),
-    (181, None, "180+"),
+    (181, 365,  "181-365"),
+    (366, None, "365+"),
 ]
+
+# Which fact-table column feeds which klokke label.
+CLOCKS = {
+    "Tidsbruk":   "tidsbruk",
+    "Bransjetid": "bransjetid",
+}
 
 
 def bucket_age(age_days, buckets=AGE_BUCKETS):
@@ -44,7 +78,8 @@ def bucket_age(age_days, buckets=AGE_BUCKETS):
 
     Not used at runtime (aldersgruppe_case_sql() below builds the equivalent
     SQL CASE expression instead) — kept as the tested spec the two must
-    agree on.
+    agree on. Applies identically regardless of which clock (Tidsbruk or
+    Bransjetid) the age_days value came from.
     """
     if age_days is None or age_days < 0:
         return None
@@ -68,6 +103,30 @@ def aldersgruppe_case_sql(column, buckets=AGE_BUCKETS):
     return "\n".join(lines)
 
 
+def clock_snapshot_sql(klokke_label, column, snapshot_dato, batch_id):
+    """
+    Build the SELECT that buckets open cases by one clock column
+    (tidsbruk or bransjetid). Both clocks share the exact same shape —
+    generated once here instead of duplicated per clock.
+    """
+    return f"""
+    SELECT
+        indikator,
+        enhet,
+        '{klokke_label}' AS klokke,
+        {aldersgruppe_case_sql(column)} AS aldersgruppe,
+        DATE('{snapshot_dato.isoformat()}') AS snapshot_dato,
+        COUNT(*) AS antall_saker,
+        percentile_approx({column}, 0.5, 1000) AS median_alder_dager,
+        percentile_approx({column}, 0.9, 1000) AS p90_alder_dager,
+        current_timestamp() AS kjoert_tidspunkt,
+        '{batch_id}' AS kjoere_id
+    FROM open_cases
+    WHERE {column} IS NOT NULL
+    GROUP BY indikator, enhet, {aldersgruppe_case_sql(column)}
+    """
+
+
 # =============================================================================
 # CELL 1 — Create output table
 # =============================================================================
@@ -76,6 +135,7 @@ spark.sql("""
 CREATE TABLE IF NOT EXISTS analyser.sak_alder_fordeling (
     indikator            STRING      NOT NULL,
     enhet                STRING      NOT NULL,
+    klokke               STRING      NOT NULL,
     aldersgruppe         STRING      NOT NULL,
     snapshot_dato        DATE        NOT NULL,
     antall_saker         INT         NOT NULL,
@@ -85,14 +145,14 @@ CREATE TABLE IF NOT EXISTS analyser.sak_alder_fordeling (
     kjoere_id            STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Aldersfordeling for åpne saker per indikator/enhet/aldersgruppe. Append-modus, idempotent per snapshot_dato — filtrer på MAX(snapshot_dato) for dagens bilde, eller bruk hele tabellen for trend.'
+COMMENT 'Aldersfordeling for åpne saker per indikator/enhet/klokke/aldersgruppe. klokke=Tidsbruk (vårt ansvar) eller Bransjetid (venter på bransje) — samme sak kan ha en rad i hver, uavhengig av hverandre. Append-modus, idempotent per snapshot_dato — filtrer på MAX(snapshot_dato) for dagens bilde, eller bruk hele tabellen for trend.'
 """)
 
 print("sak_alder_fordeling-tabellen er klar")
 
 
 # =============================================================================
-# CELL 2 — Snapshot today's open-case age distribution
+# CELL 2 — Snapshot today's open-case age distribution, per clock
 # =============================================================================
 
 snapshot_dato = date.today()
@@ -102,13 +162,16 @@ spark.sql(f"""
     WHERE snapshot_dato = DATE('{snapshot_dato.isoformat()}')
 """)
 
-spark.sql(f"""
-    INSERT INTO analyser.sak_alder_fordeling
+open_cases_cte = """
     WITH open_cases AS (
         SELECT
             pr.indikator,
             COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
-            DATEDIFF(CURRENT_DATE(), CAST(pr.startmilepaeldato AS DATE)) AS alder_dager
+            -- Guard: a negative Tidsbruk/Bransjetid should never happen (both
+            -- are monotonically increasing accumulators), but null it out
+            -- rather than let a bad value produce a nonsensical bucket.
+            CASE WHEN pr.tidsbruk   >= 0 THEN CAST(pr.tidsbruk   AS DOUBLE) END AS tidsbruk,
+            CASE WHEN pr.bransjetid >= 0 THEN CAST(pr.bransjetid AS DOUBLE) END AS bransjetid
         FROM saksbehandling.faser pr
         INNER JOIN felles.indikator indikator
             ON indikator.pk_indikator = pr.indikator
@@ -116,27 +179,21 @@ spark.sql(f"""
           AND pr.sluttmilepaeldato IS NULL
           AND pr.indikator NOT LIKE '%avtalt%'
           AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-    ),
-    bucketed AS (
-        SELECT *, {aldersgruppe_case_sql("alder_dager")} AS aldersgruppe
-        FROM open_cases
-        WHERE alder_dager >= 0
     )
-    SELECT
-        indikator,
-        enhet,
-        aldersgruppe,
-        DATE('{snapshot_dato.isoformat()}') AS snapshot_dato,
-        COUNT(*) AS antall_saker,
-        percentile_approx(alder_dager, 0.5, 1000) AS median_alder_dager,
-        percentile_approx(alder_dager, 0.9, 1000) AS p90_alder_dager,
-        current_timestamp() AS kjoert_tidspunkt,
-        '{BATCH_ID}' AS kjoere_id
-    FROM bucketed
-    GROUP BY indikator, enhet, aldersgruppe
+"""
+
+clock_queries = [
+    clock_snapshot_sql(label, column, snapshot_dato, BATCH_ID)
+    for label, column in CLOCKS.items()
+]
+
+spark.sql(f"""
+    INSERT INTO analyser.sak_alder_fordeling
+    {open_cases_cte}
+    {" UNION ALL ".join(clock_queries)}
 """)
 
-print(f"sak_alder_fordeling oppdatert for {snapshot_dato}")
+print(f"sak_alder_fordeling oppdatert for {snapshot_dato} (klokker: {', '.join(CLOCKS)})")
 
 
 # =============================================================================
@@ -144,24 +201,24 @@ print(f"sak_alder_fordeling oppdatert for {snapshot_dato}")
 # =============================================================================
 
 spark.sql(f"""
-    SELECT indikator, enhet, aldersgruppe, antall_saker, median_alder_dager, p90_alder_dager
+    SELECT indikator, enhet, klokke, aldersgruppe, antall_saker, median_alder_dager, p90_alder_dager
     FROM analyser.sak_alder_fordeling
     WHERE snapshot_dato = DATE('{snapshot_dato.isoformat()}')
-    ORDER BY indikator, enhet,
+    ORDER BY indikator, enhet, klokke,
         CASE aldersgruppe
             WHEN '0-30' THEN 1 WHEN '31-60' THEN 2 WHEN '61-90' THEN 3
-            WHEN '91-180' THEN 4 ELSE 5
+            WHEN '91-180' THEN 4 WHEN '181-365' THEN 5 ELSE 6
         END
-""").show(100, truncate=False)
+""").show(200, truncate=False)
 
-print("\n=== ELDSTE ALDERSGRUPPE PER INDIKATOR/ENHET, SISTE 2 SNAPSHOT ===")
+print("\n=== ELDSTE ALDERSGRUPPE PER INDIKATOR/ENHET/KLOKKE, SISTE 2 SNAPSHOT ===")
 spark.sql("""
-    SELECT indikator, enhet, snapshot_dato,
-           SUM(CASE WHEN aldersgruppe = '180+' THEN antall_saker ELSE 0 END) AS antall_180_pluss
+    SELECT indikator, enhet, klokke, snapshot_dato,
+           SUM(CASE WHEN aldersgruppe = '365+' THEN antall_saker ELSE 0 END) AS antall_365_pluss
     FROM analyser.sak_alder_fordeling
-    GROUP BY indikator, enhet, snapshot_dato
-    ORDER BY indikator, enhet, snapshot_dato DESC
-""").show(50, truncate=False)
+    GROUP BY indikator, enhet, klokke, snapshot_dato
+    ORDER BY indikator, enhet, klokke, snapshot_dato DESC
+""").show(100, truncate=False)
 
 
 # =============================================================================

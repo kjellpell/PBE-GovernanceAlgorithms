@@ -30,6 +30,32 @@ in DAX.
 `Kostra.py` is the one exception — it's SSB API ingestion, not a governance algorithm, and
 isn't part of this rule.
 
+## Two reports, not one
+
+Not every output here is intuitive to a leader without someone explaining the method
+first. Split into two Power BI reports along that line, rather than one report mixing
+self-explanatory labels with numbers that need a briefing:
+
+**Leder-rapport** — reads cold, no explanation needed:
+- `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
+- `Backlog_Aging_Distribution` — "X% of cases are 365+ days old on `Tidsbruk`," plus a
+  simple reference count for `Bransjetid` — standard domain terms here, same category as
+  `Fristprosent`/`Behandlingstid`, not something that needs paraphrasing
+- `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
+
+**Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
+step removed from the raw quantity, and needs someone who can defend the method:
+- `CUSUM_Changepoint` — why *this* month triggered, not last month, is an anchored-baseline judgment call
+- `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
+- `Throughput_Pressure_Monitor` — `pressure_nivaa` reads fine; the five-factor weighted score behind it doesn't
+- `Caseworker_Load_Concentration` — a Gini coefficient teaches a leader nothing on sight the way a percentage or a day count does; the color band is doing all the communicating, so keep the raw number out of any leader-facing view entirely
+
+Note the asymmetry between the two flow/queue pages: `Phase_Bottleneck_Detector` earns
+leader-report placement specifically because of `arsak_tekst` — its sibling
+`Throughput_Pressure_Monitor` has no equivalent plain-language field, only the composite
+score, so it stays in the analyst report despite being the same pattern one grain up.
+That's a real difference in what the two tables expose, not an inconsistency to fix.
+
 ## Scripts — the addon signal DAX can't produce
 
 | File | Output table(s) | What it computes |
@@ -38,8 +64,7 @@ isn't part of this rule.
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
 | `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
-| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Daily snapshot of open-case age buckets — `TODAY()`-dependent trend |
-| `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko_trend` | Daily snapshot of open-case risk mix — `TODAY()`-dependent trend |
+| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Daily snapshot of open-case age buckets, per clock (Tidsbruk/Bransjetid) — `TODAY()`-dependent trend |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_konsentrasjon` | Gini coefficient of workload concentration — rank-based math, `TODAY()`-dependent trend |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
@@ -129,30 +154,40 @@ explaining the flag.
 
 ## In-flight (currently-open) state
 
-Both of these score cases that are **still open**, before a problem shows up in the
-closed-case ratio — and both split the same way: today's state is live DAX, only the
-day-by-day trend needs a script, since `TODAY()`-dependent values have no memory of what
-they looked like yesterday.
-
-### Inflight_SLA_Risk_Monitor.py
-
-`classify_risk()` (thresholds `RISK_THRESHOLD_KRITISK`=0.90, `RISK_THRESHOLD_RISIKO`=0.75)
-scores open cases against their own `frist_dager`. Today's per-case list is live DAX (see
-`Inflight_SLA_Risk_Monitor_POWERBI_DAX.md`, Del 1); the script writes only the daily
-`sak_frist_risiko_trend` risk-mix snapshot (Del 2) — one `INSERT INTO ... SELECT`, pure
-Spark SQL, `MIN_TEAM_VOLUME` (10) gating `tilstrekkelig_volum`. `classify_risk()` stays in
-the script as the tested spec `risikoklasse_case_sql()` generates its SQL `CASE` from.
-
-- Open assumption to verify: whether `frist_dager` is reliably populated on open rows (only proven populated on closed rows, via CUSUM) — rows missing it are excluded, not defaulted.
+This scores cases that are **still open**, before a problem shows up in the closed-case
+ratio — today's state is live DAX, only the day-by-day trend needs a script, since
+`TODAY()`-dependent values have no memory of what they looked like yesterday.
 
 ### Backlog_Aging_Distribution.py
 
-`bucket_age()` (buckets `0-30`/`31-60`/`61-90`/`91-180`/`180+`) ages open cases by
-`startmilepaeldato`. Today's shape is live DAX (see
-`Backlog_Aging_Distribution_POWERBI_DAX.md`, Del 1); the script writes only the daily
-`sak_alder_fordeling` age-bucket snapshot (Del 2) — one `INSERT INTO ... SELECT`, pure
-Spark SQL (`percentile_approx` + a `CASE` expression). `bucket_age()` stays in the script
-as the tested spec `aldersgruppe_case_sql()` generates its SQL `CASE` from.
+Two clocks, not one blended age: **`Tidsbruk`** (accumulated time on our side — the real
+internal-performance signal) and **`Bransjetid`** (accumulated time waiting on the client
+— not our team's performance, and can run up to roughly 1000 days). A pure calendar-age
+version blends the two, making a case stuck on the client look identical to one stuck on
+us. Both are confirmed monotonic accumulators (`Tidsbruk + Bransjetid` always equals total
+elapsed days since `startmilepaeldato`), so no "which clock is running now" detection is
+needed — a case can carry both figures at once, bucketed separately (`bucket_age()`,
+buckets `0-30`/`31-60`/`61-90`/`91-180`/`181-365`/`365+`, applied identically to each —
+widened from an original `180+` catch-all once it became clear `Bransjetid`'s range needed
+the extra tail resolution). The completion-status column on the fact table isn't used — the
+two accumulators already say everything this page needs. A negative value on either column
+is guarded to `NULL` rather than allowed to produce a nonsensical bucket, even though
+neither should ever go negative given they're accumulators.
+
+On the leder-rapport page itself, the two clocks aren't given equal visual weight —
+`Tidsbruk` gets the full bucket-distribution-plus-P90 treatment as the headline (it's ours
+to act on), `Bransjetid` is a single reference count ("X cases waiting 365+ days on
+Bransjetid"). That's an actionability distinction, not a comprehension one — `Tidsbruk`
+and `Bransjetid` are standard terms here and stay as the actual panel titles. The full
+`Bransjetid` breakdown still exists as a measure for the analytiker-rapport if someone
+wants to dig in.
+
+Today's shape (both clocks) is live DAX (see `Backlog_Aging_Distribution_POWERBI_DAX.md`,
+Del 1); the script writes only the daily `sak_alder_fordeling` age-bucket snapshot per
+clock (Del 2) — one `INSERT INTO ... SELECT`, pure Spark SQL (`percentile_approx` + a
+`CASE` expression), now with a `klokke` column distinguishing `Tidsbruk` from
+`Bransjetid`. `bucket_age()` stays in the script as the tested spec
+`aldersgruppe_case_sql()` generates its SQL `CASE` from.
 
 ## Workload
 

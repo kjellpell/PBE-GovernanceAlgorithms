@@ -1,5 +1,8 @@
 # Seasonal_YTD_ratio_extrapolation.py — Power BI and DAX
 
+**Målgruppe:** Analytiker-rapport — prognosen og intervallet leses greit, men å stole på
+tallet krever å stole på sesongratio-metoden bak det.
+
 ## Formål
 Continue the `Faser innen frist %` line from the last complete month to year end, with an
 uncertainty band, and give the year-end figure as a KPI.

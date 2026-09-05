@@ -1,5 +1,7 @@
 # Trendretning — native DAX (replaces EWMA.py)
 
+**Målgruppe:** Leder-rapport — leser kaldt, ingen forklaring nødvendig.
+
 ## Formål
 Trend direction (`Stigende` / `Synkende` / `Stabil`) for `Fristprosent`, `Behandlingstid`
 and `Produksjonsdifferanse`, from the slope of a rolling average — simpler to read than an
