@@ -38,7 +38,7 @@ self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
 - `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
-- `Backlog_Aging_Distribution` — "X% of cases are 180+ days old"
+- `Backlog_Aging_Distribution` — "X% of cases are 180+ days old on our clock" (Tidsbruk vs. Bransjetid, kept separate)
 - `Inflight_SLA_Risk_Monitor` — `Bruddet`/`Kritisk`/`Risiko`/`Innenfor`, plus the due-in-14-days list
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
 
@@ -63,7 +63,7 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
 | `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
-| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Daily snapshot of open-case age buckets — `TODAY()`-dependent trend |
+| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Daily snapshot of open-case age buckets, per clock (Tidsbruk/Bransjetid) — `TODAY()`-dependent trend |
 | `Inflight_SLA_Risk_Monitor.py` | `sak_frist_risiko_trend` | Daily snapshot of open-case risk mix — `TODAY()`-dependent trend |
 | `Caseworker_Load_Concentration.py` | `saksbehandler_konsentrasjon` | Gini coefficient of workload concentration — rank-based math, `TODAY()`-dependent trend |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
@@ -160,12 +160,21 @@ the script as the tested spec `risikoklasse_case_sql()` generates its SQL `CASE`
 
 ### Backlog_Aging_Distribution.py
 
-`bucket_age()` (buckets `0-30`/`31-60`/`61-90`/`91-180`/`180+`) ages open cases by
-`startmilepaeldato`. Today's shape is live DAX (see
-`Backlog_Aging_Distribution_POWERBI_DAX.md`, Del 1); the script writes only the daily
-`sak_alder_fordeling` age-bucket snapshot (Del 2) — one `INSERT INTO ... SELECT`, pure
-Spark SQL (`percentile_approx` + a `CASE` expression). `bucket_age()` stays in the script
-as the tested spec `aldersgruppe_case_sql()` generates its SQL `CASE` from.
+Two clocks, not one blended age: **`Tidsbruk`** (accumulated time on our side — the real
+internal-performance signal) and **`Bransjetid`** (accumulated time waiting on the client
+— not our team's performance). A pure calendar-age version blends the two, making a case
+stuck on the client look identical to one stuck on us. Both are live, independently
+accumulating totals, so no "which clock is running now" detection is needed — a case can
+carry both figures at once, bucketed separately (`bucket_age()`, buckets
+`0-30`/`31-60`/`61-90`/`91-180`/`180+`, applied to each). The completion-status column on
+the fact table isn't used — the two accumulators already say everything this page needs.
+
+Today's shape (both clocks) is live DAX (see `Backlog_Aging_Distribution_POWERBI_DAX.md`,
+Del 1); the script writes only the daily `sak_alder_fordeling` age-bucket snapshot per
+clock (Del 2) — one `INSERT INTO ... SELECT`, pure Spark SQL (`percentile_approx` + a
+`CASE` expression), now with a `klokke` column distinguishing `Tidsbruk` from
+`Bransjetid`. `bucket_age()` stays in the script as the tested spec
+`aldersgruppe_case_sql()` generates its SQL `CASE` from.
 
 ## Workload
 
