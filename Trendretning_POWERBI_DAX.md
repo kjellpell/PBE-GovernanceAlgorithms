@@ -42,6 +42,40 @@ CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[startmilepaeldato]))
     - CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[sluttmilepaeldato]))
 ```
 
+## Siste dato med data (hjelpemål)
+
+Every measure below anchors its window on "the last relevant date." A bare
+`MAX(Kalender[Dato])` is not safe for that: it returns the last date **in the current
+filter context**, and `Kalender` is a full calendar table that typically extends past the
+fact data (through year-end, or further). Filter to a year with no month selected, or drop
+the measure on a card with no date filter at all, and `MAX(Kalender[Dato])` returns a date
+months into the future with zero `Faser` rows behind it — every measure downstream
+(`DATESINPERIOD`, the glidende snitt, `helning`) silently evaluates to blank in that
+window, and `Trendretning` reports "Stabil" forever, not because nothing is moving but
+because there's nothing there to look at.
+
+```DAX
+Siste dato med data =
+VAR SisteFaktaDato =
+    CALCULATE(
+        MAX(Faser[sluttmilepaeldato]),
+        ALL(Kalender)
+    )
+RETURN
+    CALCULATE(
+        MAX(Kalender[Dato]),
+        Kalender[Dato] <= SisteFaktaDato
+    )
+```
+
+`SisteFaktaDato` ignores whatever filter is active and finds the true last date with a
+closed fase. The outer `CALCULATE` then intersects that cap with the *existing* filter
+context rather than replacing it — so a visual that already pins a narrower date (a line
+chart axis, a single month) is unaffected, since its own max date is already at or before
+the cap; only a wide-open context (a year filter, a filter-less card) gets reined in from
+running off the end of the calendar. Every `SisteDato` below uses this measure instead of
+`MAX(Kalender[Dato])` directly.
+
 ## Glidende snitt (moving average measure pattern)
 
 Standard DAX idiom: average the monthly measure over each of the last N months
@@ -51,7 +85,7 @@ a separate formula per shape.
 
 ```DAX
 Fristprosent glidende snitt rask (3 mnd) =
-VAR SisteDato = MAX(Kalender[Dato])
+VAR SisteDato = [Siste dato med data]
 VAR Maaneder = DATESINPERIOD(Kalender[Dato], SisteDato, -3, MONTH)
 RETURN
     AVERAGEX(
@@ -62,7 +96,7 @@ RETURN
 
 ```DAX
 Fristprosent glidende snitt sakte (6 mnd) =
-VAR SisteDato = MAX(Kalender[Dato])
+VAR SisteDato = [Siste dato med data]
 VAR Maaneder = DATESINPERIOD(Kalender[Dato], SisteDato, -6, MONTH)
 RETURN
     AVERAGEX(
@@ -73,7 +107,9 @@ RETURN
 
 Repeat both for `Behandlingstid (måned)` and `Produksjonsdifferanse (måned)`
 (`Behandlingstid glidende snitt rask/sakte`, `Produksjonsdifferanse glidende snitt
-rask/sakte`) — same two measures, swap the inner `[...]` reference.
+rask/sakte`) — same two measures, swap the inner `[...]` reference. Keep
+`VAR SisteDato = [Siste dato med data]` in all of them; only the innermost `[...]`
+reference changes per metric.
 
 ## Helning og trendretning
 
@@ -82,7 +118,7 @@ same choice the old script made ("stable signal for board").
 
 ```DAX
 Fristprosent helning sakte =
-VAR SisteDato = MAX(Kalender[Dato])
+VAR SisteDato = [Siste dato med data]
 VAR ForrigeMaaned = EOMONTH(SisteDato, -1)
 VAR SnittNaa = [Fristprosent glidende snitt sakte (6 mnd)]
 VAR SnittForrige =
@@ -91,8 +127,17 @@ VAR SnittForrige =
         FILTER(ALL(Kalender), Kalender[Dato] = ForrigeMaaned)
     )
 RETURN
-    SnittNaa - SnittForrige
+    IF(
+        ISBLANK(SnittNaa) || ISBLANK(SnittForrige),
+        BLANK(),
+        SnittNaa - SnittForrige
+    )
 ```
+
+`SnittNaa`/`SnittForrige` are guarded explicitly rather than trusting `Helning`'s own
+blankness: DAX's `-` operator coerces a lone blank operand to 0, so without this guard a
+genuinely missing side (e.g. no 6-month history yet at the start of the dataset) reads as
+a large fake swing instead of "no signal."
 
 ```DAX
 Trendretning Fristprosent =
@@ -113,7 +158,7 @@ sakte (6 mnd)]`-referansen med den tilsvarende måltall-versjonen):
 
 ```DAX
 Behandlingstid helning sakte =
-VAR SisteDato = MAX(Kalender[Dato])
+VAR SisteDato = [Siste dato med data]
 VAR ForrigeMaaned = EOMONTH(SisteDato, -1)
 VAR SnittNaa = [Behandlingstid glidende snitt sakte (6 mnd)]
 VAR SnittForrige =
@@ -122,12 +167,16 @@ VAR SnittForrige =
         FILTER(ALL(Kalender), Kalender[Dato] = ForrigeMaaned)
     )
 RETURN
-    SnittNaa - SnittForrige
+    IF(
+        ISBLANK(SnittNaa) || ISBLANK(SnittForrige),
+        BLANK(),
+        SnittNaa - SnittForrige
+    )
 ```
 
 ```DAX
 Produksjonsdifferanse helning sakte =
-VAR SisteDato = MAX(Kalender[Dato])
+VAR SisteDato = [Siste dato med data]
 VAR ForrigeMaaned = EOMONTH(SisteDato, -1)
 VAR SnittNaa = [Produksjonsdifferanse glidende snitt sakte (6 mnd)]
 VAR SnittForrige =
@@ -136,7 +185,11 @@ VAR SnittForrige =
         FILTER(ALL(Kalender), Kalender[Dato] = ForrigeMaaned)
     )
 RETURN
-    SnittNaa - SnittForrige
+    IF(
+        ISBLANK(SnittNaa) || ISBLANK(SnittForrige),
+        BLANK(),
+        SnittNaa - SnittForrige
+    )
 ```
 
 Med samme terskler som `EWMA.py` brukte:
