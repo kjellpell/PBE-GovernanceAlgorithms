@@ -206,3 +206,25 @@ column.)
   per klokke) — if they diverge, the nightly run is stale or the live filters have drifted
   from the script's filters. Keep both filter sets in sync by hand; there's no single
   source of truth to enforce it automatically.
+- **A bucket count can jump in a single day without new cases arriving.** `Tidsbruk` and
+  `Bransjetid` only accumulate while that specific clock is active — a case waiting 150
+  days for the client has a `Tidsbruk` value that's been frozen the whole time. The moment
+  the client responds, `Tidsbruk` starts climbing again and the case can cross one or more
+  bucket boundaries in a single night. A spike in a bucket's `antall_saker` from one
+  `snapshot_dato` to the next is not necessarily new intake — check whether it's existing
+  cases whose clock just resumed before treating it as an anomaly. The old calendar-age
+  version never had this, since raw age always incremented by exactly one day for every
+  case, every day.
+- **Same bucket boundaries (`0-30`/`31-60`/`61-90`/`91-180`/`180+`) are applied to both
+  clocks — unvalidated.** If `Bransjetid` typically runs longer than `Tidsbruk` (plausible,
+  if clients are routinely slower than internal processing), the same boundaries won't
+  discriminate meaningfully for `Bransjetid` — most cases could sit in the higher buckets
+  as a normal baseline, not a signal, making `Andel 180 pluss (Bransjetid)` structurally
+  alarming even when nothing is wrong. Check the real distribution before trusting it; if
+  the two clocks differ structurally in typical magnitude, `Bransjetid` needs its own
+  bucket boundaries, not a shared `AGE_BUCKETS`.
+- **Assumes both columns are monotonically non-decreasing while a case is open** — true
+  accumulators that only go up. If the upstream system ever recalculates or corrects
+  `Tidsbruk`/`Bransjetid` downward, a case would appear to "get younger" in the daily
+  trend, which would read as a data-quality problem to anyone watching the chart. Worth
+  confirming that can't happen before trusting a year of accumulated history.
