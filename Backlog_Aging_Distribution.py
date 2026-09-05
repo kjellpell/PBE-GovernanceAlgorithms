@@ -127,9 +127,31 @@ def clock_snapshot_sql(klokke_label, column, snapshot_dato, batch_id):
     """
 
 
+# Column order the INSERT below writes, kept next to the CREATE TABLE it must
+# match. Named explicitly in the INSERT so a schema change can never silently
+# shift values into the wrong column.
+OUTPUT_COLUMNS = [
+    "indikator", "enhet", "klokke", "aldersgruppe", "snapshot_dato",
+    "antall_saker", "median_alder_dager", "p90_alder_dager",
+    "kjoert_tidspunkt", "kjoere_id",
+]
+
+
 # =============================================================================
 # CELL 1 — Create output table
 # =============================================================================
+
+# Pre-klokke versions of this script wrote a table without the `klokke` column,
+# holding blended calendar-age rows at a different grain. CREATE TABLE IF NOT
+# EXISTS leaves such a table untouched, so the INSERT below would fail (or, with
+# a name-less INSERT, quietly write values into the wrong columns). The old rows
+# measure something else entirely — calendar time, not the two accumulators — so
+# they can't be carried over; drop the legacy table and let it rebuild.
+if spark.catalog.tableExists("analyser.sak_alder_fordeling"):
+    eksisterende = {f.name for f in spark.table("analyser.sak_alder_fordeling").schema.fields}
+    if "klokke" not in eksisterende:
+        spark.sql("DROP TABLE analyser.sak_alder_fordeling")
+        print("Gammel sak_alder_fordeling uten klokke-kolonne slettet — bygges på nytt")
 
 spark.sql("""
 CREATE TABLE IF NOT EXISTS analyser.sak_alder_fordeling (
@@ -188,7 +210,7 @@ clock_queries = [
 ]
 
 spark.sql(f"""
-    INSERT INTO analyser.sak_alder_fordeling
+    INSERT INTO analyser.sak_alder_fordeling ({", ".join(OUTPUT_COLUMNS)})
     {open_cases_cte}
     {" UNION ALL ".join(clock_queries)}
 """)
