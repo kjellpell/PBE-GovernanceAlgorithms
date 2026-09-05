@@ -38,7 +38,10 @@ self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
 - `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
-- `Backlog_Aging_Distribution` — "X% of cases are 180+ days old on our clock" (Tidsbruk vs. Bransjetid, kept separate)
+- `Backlog_Aging_Distribution` — "X% of cases are 180+ days old on our clock," plus a
+  simple reference count for cases waiting on the client — panel titles say "our
+  responsibility" / "waiting on client," not the underlying `Tidsbruk`/`Bransjetid`
+  field names
 - `Inflight_SLA_Risk_Monitor` — `Bruddet`/`Kritisk`/`Risiko`/`Innenfor`, plus the due-in-14-days list
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
 
@@ -168,6 +171,13 @@ accumulating totals, so no "which clock is running now" detection is needed — 
 carry both figures at once, bucketed separately (`bucket_age()`, buckets
 `0-30`/`31-60`/`61-90`/`91-180`/`180+`, applied to each). The completion-status column on
 the fact table isn't used — the two accumulators already say everything this page needs.
+
+On the leder-rapport page itself, the two clocks aren't given equal visual weight —
+`Tidsbruk` gets the full bucket-distribution-plus-P90 treatment as the headline (it's ours
+to act on), `Bransjetid` is a single reference count ("X cases waiting 180+ days on the
+client"), and both panels are titled in plain language rather than the raw field names.
+The full `Bransjetid` breakdown still exists as a measure for the analytiker-rapport if
+someone wants to dig in.
 
 Today's shape (both clocks) is live DAX (see `Backlog_Aging_Distribution_POWERBI_DAX.md`,
 Del 1); the script writes only the daily `sak_alder_fordeling` age-bucket snapshot per

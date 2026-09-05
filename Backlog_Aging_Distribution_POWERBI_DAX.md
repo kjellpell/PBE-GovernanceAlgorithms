@@ -120,14 +120,24 @@ Repeat all four for `Bransjetid` (`Åpne saker (Bransjetid)`, `Median Bransjetid
 (åpne)`, `P90 Bransjetid dager (åpne)`, `Andel 180 pluss (Bransjetid, nå)`) — identical
 shape, swap the column.
 
-### Visual — dagens fordeling, to paneler
-- **Panel 1 (vårt ansvar):** X-akse `enhet` (eller `indikator`), stabler
-  `Faser[Aldersgruppe_Tidsbruk]`, verdi `[Åpne saker (Tidsbruk)]`. Dette er
-  handlingspanelet — høy `P90 Tidsbruk` eller voksende `180+`-andel her betyr vi må
-  bemanne/prioritere disse sakene.
-- **Panel 2 (venter på bransje):** samme oppsett med `Aldersgruppe_Bransjetid` /
-  `[Åpne saker (Bransjetid)]`. Høy `180+`-andel her er en kunde-/bransje-oppfølgingssak,
-  ikke et internt kapasitetsproblem.
+### Visual — dagens bilde, asymmetrisk med vilje
+Ikke to like store paneler — de to klokkene er ikke like handlingsrelevante for en leder,
+og et speilvendt par gjør siden tyngre å lese enn den trenger å være. Bruk plain-language
+titler i selve visualet, ikke feltnavnene `Tidsbruk`/`Bransjetid` — de er interne
+kolonnenavn, ikke noe en leder skal måtte vite betydningen av.
+
+- **Hovedpanel, tittel "Vårt ansvar":** X-akse `enhet` (eller `indikator`), stabler
+  `Faser[Aldersgruppe_Tidsbruk]`, verdi `[Åpne saker (Tidsbruk)]`, med `[P90 Tidsbruk
+  dager (åpne)]` som KPI-kort ved siden av. Dette er handlingspanelet — høy P90 eller
+  voksende `180+`-andel her betyr vi må bemanne/prioritere disse sakene, og det er
+  genuint vårt å fikse.
+- **Referansetall, tittel "Venter på klient":** ett KPI-kort —
+  `[Åpne saker (Bransjetid)]` filtrert til `Faser[Aldersgruppe_Bransjetid] = "180+"` —
+  "X saker har ventet over 180 dager på klienten." Ikke en full søylefordeling; det er
+  nok til at en leder vet det er verdt å spørre om, uten å måtte tolke en hel
+  bøttefordeling for noe som ikke er internt vårt ansvar. Den fulle
+  `Aldersgruppe_Bransjetid`-fordelingen (median/P90/alle bøtter) finnes fortsatt som mål
+  ovenfor hvis analytiker-rapporten vil bruke den — den er bare ikke på leder-siden.
 
 ## Del 2 — Trend over tid (persistert snapshot)
 
@@ -138,8 +148,10 @@ multiple dimension to show both at once.
 
 ### Visualforslag
 - X-akse: `snapshot_dato`, Y-akse: `antall_saker`, farge: `aldersgruppe`
+- Default filter: `klokke = "Tidsbruk"` — leder-siden viser vår egen trend som standard;
+  bytt til `"Bransjetid"` via slicer for å se klient-siden, samme asymmetri som Del 1
 - Slicer: `indikator`, `enhet`, `klokke`
-- Shows: vokser den eldste bøtten (`180+`) over tid — på vår klokke, eller på bransjens?
+- Shows: vokser den eldste bøtten (`180+`) over tid, på vår klokke?
 
 ### DAX-forslag
 
@@ -177,7 +189,8 @@ column.)
 ## Slicer-oppsett
 - `indikator`
 - `enhet`
-- `klokke` (Del 2 only — Del 1 shows both panels side by side instead)
+- `klokke` (Del 2 only, default `"Tidsbruk"` — Del 1 shows the Tidsbruk panel plus the
+  Bransjetid reference card side by side instead of a slicer)
 - `snapshot_dato` (Del 2 only — Del 1 is always "now")
 
 ## Tolkning
