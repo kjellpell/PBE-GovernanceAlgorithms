@@ -153,6 +153,43 @@ RETURN
     )
 ```
 
+### Alternativ: helning rask (3 mnd, ikke-overlappende sammenligning)
+
+`helning sakte` sammenligner et 6-måneders snitt mot seg selv **én måned** tilbake — et
+lite steg mot et bredt vindu. Det kan gi et fortegn som virker "feil" mot det du ser i
+den rå linjen: siden bare 1 av de 6 månedene i vinduet byttes ut per steg, er det
+måneden som *forsvinner ut* av vinduet som avgjør fortegnet like mye som måneden som
+kommer inn — et glidende snitt kan derfor vise et lite fall en måned der de siste par
+månedene faktisk har vært bedre, rett og slett fordi en spesielt sterk måned nettopp falt
+ut av vinduet.
+
+Et alternativ som unngår dette: bruk **samme lengde på vindu og sammenligningssteg** — et
+3-måneders snitt sammenlignet mot seg selv 3 måneder tilbake, ikke-overlappende kvartal
+mot kvartal:
+
+```DAX
+Fristprosent helning rask (3 mnd) =
+VAR SisteDato = [Siste dato med data]
+VAR TreMaanederTilbake = EOMONTH(SisteDato, -3)
+VAR SnittNaa = [Fristprosent glidende snitt rask (3 mnd)]
+VAR SnittForrige =
+    CALCULATE(
+        [Fristprosent glidende snitt rask (3 mnd)],
+        FILTER(ALL(Kalender), Kalender[Dato] = TreMaanederTilbake)
+    )
+RETURN
+    IF(
+        ISBLANK(SnittNaa) || ISBLANK(SnittForrige),
+        BLANK(),
+        SnittNaa - SnittForrige
+    )
+```
+
+Terskelen bør da også reflektere en meningsfull endring over et helt kvartal, ikke en
+måned-til-måned-endring — `0.02` (2 prosentpoeng over 3 måneder) er en rimelig
+utgangsverdi, ikke `0.002`. Samme mønster gjelder for `Behandlingstid`/
+`Produksjonsdifferanse`, med hver sin skala.
+
 Samme helningsmønster for de to andre måltallene (bytt ut `[Fristprosent glidende snitt
 sakte (6 mnd)]`-referansen med den tilsvarende måltall-versjonen):
 
