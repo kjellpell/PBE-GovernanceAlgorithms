@@ -15,11 +15,12 @@ by tracking the two accumulators separately:
 - **Tidsbruk** — accumulated time on our side. The real internal-performance signal.
 - **Bransjetid** — accumulated time waiting on the client. Not our team's performance.
 
-Both are live, independently-accumulating totals already on the fact table, so there's no
-need to determine which clock is "currently" running — a case can carry both a Tidsbruk
-figure and a Bransjetid figure at once, bucketed independently. The completion-status
-column on the fact table isn't used here; these two accumulators already say everything
-this page needs.
+Both are true accumulators that only ever increase while a case is open (confirmed), and
+`Tidsbruk + Bransjetid` always equals total elapsed days since `startmilepaeldato` — at any
+moment, whichever clock isn't running, the other is. So there's no need to determine which
+clock is "currently" active — a case can carry both a Tidsbruk figure and a Bransjetid
+figure at once, bucketed independently. The completion-status column on the fact table
+isn't used here; these two accumulators already say everything this page needs.
 
 This page is still split in two, deliberately: **today's shape** is computed live in DAX
 straight from the fact table (no nightly wait), and **the trend over time** comes from
@@ -33,16 +34,18 @@ only remaining job is writing that daily snapshot down, once per clock.
 ### Antagelser (rename to match your model)
 - `Faser` — the fact table (`saksbehandling.faser`), containing `startmilepaeldato`,
   `sluttmilepaeldato`, `indikator`, `enhet`, `tidsbruk`, `bransjetid`
-- `tidsbruk`/`bransjetid` are assumed to already be day counts, live-updating while a case
-  is open (same assumption every other script in this repo makes about `tidsbruk`) —
-  verify against the Lakehouse schema if that turns out to be wrong
+- `tidsbruk`/`bransjetid` are day counts, live-updating while a case is open, monotonically
+  non-decreasing (confirmed) — `Bransjetid` alone can range up to roughly 1000 days
 - The `indikator NOT LIKE '%avtalt%'` / fagomraade filtering assumption from elsewhere in
   this repo's DAX docs applies here too
 
 ### Beregnede kolonner — aldersgruppe per klokke
 
-Same bucket boundaries, applied twice — once per clock. Neither depends on the other; a
-row can have a value in both.
+Same bucket boundaries, applied twice — once per clock, same widened set the script uses
+(`Bransjetid`'s ~1000-day range needs the extra tail buckets; `Tidsbruk` just reuses the
+same set rather than having its own). Neither clock depends on the other; a row can have a
+value in both. Negative values guarded to `BLANK()` — both are accumulators that should
+never go negative, but don't let a bad value produce a nonsensical bucket.
 
 ```DAX
 Faser[Aldersgruppe_Tidsbruk] =
@@ -56,7 +59,8 @@ IF(
         Faser[tidsbruk] <= 60,  "31-60",
         Faser[tidsbruk] <= 90,  "61-90",
         Faser[tidsbruk] <= 180, "91-180",
-        "180+"
+        Faser[tidsbruk] <= 365, "181-365",
+        "365+"
     )
 )
 ```
@@ -73,14 +77,19 @@ IF(
         Faser[bransjetid] <= 60,  "31-60",
         Faser[bransjetid] <= 90,  "61-90",
         Faser[bransjetid] <= 180, "91-180",
-        "180+"
+        Faser[bransjetid] <= 365, "181-365",
+        "365+"
     )
 )
 ```
 
 ```DAX
 Faser[AldersgruppeRang] =
-SWITCH(Faser[Aldersgruppe_Tidsbruk], "0-30", 1, "31-60", 2, "61-90", 3, "91-180", 4, "180+", 5, 0)
+SWITCH(
+    Faser[Aldersgruppe_Tidsbruk],
+    "0-30", 1, "31-60", 2, "61-90", 3, "91-180", 4, "181-365", 5, "365+", 6,
+    0
+)
 ```
 (Sort-by column — reuse the same rank logic for `Aldersgruppe_Bransjetid`'s visual, or
 duplicate the column if both need independent sorting in the same view.)
@@ -109,15 +118,15 @@ CALCULATE(
 ```
 
 ```DAX
-Andel 180 pluss (Tidsbruk, nå) =
+Andel 365 pluss (Tidsbruk, nå) =
 VAR Total = [Åpne saker (Tidsbruk)]
-VAR Eldst = CALCULATE([Åpne saker (Tidsbruk)], Faser[Aldersgruppe_Tidsbruk] = "180+")
+VAR Eldst = CALCULATE([Åpne saker (Tidsbruk)], Faser[Aldersgruppe_Tidsbruk] = "365+")
 RETURN
     DIVIDE(Eldst, Total)
 ```
 
 Repeat all four for `Bransjetid` (`Åpne saker (Bransjetid)`, `Median Bransjetid dager
-(åpne)`, `P90 Bransjetid dager (åpne)`, `Andel 180 pluss (Bransjetid, nå)`) — identical
+(åpne)`, `P90 Bransjetid dager (åpne)`, `Andel 365 pluss (Bransjetid, nå)`) — identical
 shape, swap the column.
 
 ### Visual — dagens bilde, asymmetrisk med vilje
@@ -130,11 +139,11 @@ leder handler direkte på, så det får mindre plass.
 - **Hovedpanel, tittel "Tidsbruk":** X-akse `enhet` (eller `indikator`), stabler
   `Faser[Aldersgruppe_Tidsbruk]`, verdi `[Åpne saker (Tidsbruk)]`, med `[P90 Tidsbruk
   dager (åpne)]` som KPI-kort ved siden av. Dette er handlingspanelet — høy P90 eller
-  voksende `180+`-andel her betyr vi må bemanne/prioritere disse sakene, og det er
+  voksende `365+`-andel her betyr vi må bemanne/prioritere disse sakene, og det er
   genuint vårt å fikse.
 - **Referansetall, tittel "Bransjetid":** ett KPI-kort —
-  `[Åpne saker (Bransjetid)]` filtrert til `Faser[Aldersgruppe_Bransjetid] = "180+"` —
-  "X saker har ventet over 180 dager på bransjen." Ikke en full søylefordeling; det er
+  `[Åpne saker (Bransjetid)]` filtrert til `Faser[Aldersgruppe_Bransjetid] = "365+"` —
+  "X saker har ventet over 365 dager på bransjen." Ikke en full søylefordeling; det er
   nok til at en leder vet det er verdt å følge opp, uten å måtte tolke en hel
   bøttefordeling for noe som ikke er internt vårt ansvar. Den fulle
   `Aldersgruppe_Bransjetid`-fordelingen (median/P90/alle bøtter) finnes fortsatt som mål
@@ -152,7 +161,7 @@ multiple dimension to show both at once.
 - Default filter: `klokke = "Tidsbruk"` — leder-siden viser vår egen trend som standard;
   bytt til `"Bransjetid"` via slicer for å se bransje-siden, samme asymmetri som Del 1
 - Slicer: `indikator`, `enhet`, `klokke`
-- Shows: vokser den eldste bøtten (`180+`) over tid, på vår klokke?
+- Shows: vokser den eldste bøtten (`365+`) over tid, på vår klokke?
 
 ### DAX-forslag
 
@@ -165,12 +174,12 @@ CALCULATE(
 ```
 
 ```DAX
-Andel 180 pluss (siste snapshot) =
+Andel 365 pluss (siste snapshot) =
 VAR Total = CALCULATE(SUM(sak_alder_fordeling[antall_saker]), sak_alder_fordeling[snapshot_dato] = [Siste alder-snapshot])
 VAR Eldst = CALCULATE(
     SUM(sak_alder_fordeling[antall_saker]),
     sak_alder_fordeling[snapshot_dato] = [Siste alder-snapshot],
-    sak_alder_fordeling[aldersgruppe] = "180+"
+    sak_alder_fordeling[aldersgruppe] = "365+"
 )
 RETURN DIVIDE(Eldst, Total)
 ```
@@ -180,7 +189,7 @@ RETURN DIVIDE(Eldst, Total)
 Aldersgruppe rang (snapshot-tabell) =
 SWITCH(
     MAX(sak_alder_fordeling[aldersgruppe]),
-    "0-30", 1, "31-60", 2, "61-90", 3, "91-180", 4, "180+", 5,
+    "0-30", 1, "31-60", 2, "61-90", 3, "91-180", 4, "181-365", 5, "365+", 6,
     0
 )
 ```
@@ -195,11 +204,11 @@ column.)
 - `snapshot_dato` (Del 2 only — Del 1 is always "now")
 
 ## Tolkning
-- A growing `180+` share on **Tidsbruk** while the throughput pressure monitor's net-flow
+- A growing `365+` share on **Tidsbruk** while the throughput pressure monitor's net-flow
   score (see `Throughput_Pressure_Monitor_POWERBI_DAX.md`) looks flat means old cases are
   stuck on our side specifically — case triage, not capacity, and it's genuinely ours to
   fix.
-- A growing `180+` share on **Bransjetid** is a client-responsiveness pattern, not an
+- A growing `365+` share on **Bransjetid** is a client-responsiveness pattern, not an
   internal one — the action is chasing the client or the industry party, not reassigning
   caseworkers.
 - Del 1 and Del 2 should roughly agree on "today" (Del 2's latest snapshot vs. Del 1 live,
@@ -215,16 +224,10 @@ column.)
   cases whose clock just resumed before treating it as an anomaly. The old calendar-age
   version never had this, since raw age always incremented by exactly one day for every
   case, every day.
-- **Same bucket boundaries (`0-30`/`31-60`/`61-90`/`91-180`/`180+`) are applied to both
-  clocks — unvalidated.** If `Bransjetid` typically runs longer than `Tidsbruk` (plausible,
-  if clients are routinely slower than internal processing), the same boundaries won't
-  discriminate meaningfully for `Bransjetid` — most cases could sit in the higher buckets
-  as a normal baseline, not a signal, making `Andel 180 pluss (Bransjetid)` structurally
-  alarming even when nothing is wrong. Check the real distribution before trusting it; if
-  the two clocks differ structurally in typical magnitude, `Bransjetid` needs its own
-  bucket boundaries, not a shared `AGE_BUCKETS`.
-- **Assumes both columns are monotonically non-decreasing while a case is open** — true
-  accumulators that only go up. If the upstream system ever recalculates or corrects
-  `Tidsbruk`/`Bransjetid` downward, a case would appear to "get younger" in the daily
-  trend, which would read as a data-quality problem to anyone watching the chart. Worth
-  confirming that can't happen before trusting a year of accumulated history.
+- **Both clocks share the same bucket boundaries by design** — confirmed, not an open
+  question: `0-30`/`31-60`/`61-90`/`91-180`/`181-365`/`365+`. The tail was widened from the
+  original `180+` catch-all specifically because `Bransjetid` can run up to ~1000 days —
+  without the `181-365`/`365+` split, a case waiting 200 days would have looked identical
+  to one waiting 950 days.
+- **Confirmed monotonic** — both columns only increase while a case is open, so a case
+  "getting younger" in the daily trend isn't a scenario this page needs to guard against.

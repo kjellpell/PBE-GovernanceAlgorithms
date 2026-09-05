@@ -38,7 +38,7 @@ self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
 - `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
-- `Backlog_Aging_Distribution` — "X% of cases are 180+ days old on `Tidsbruk`," plus a
+- `Backlog_Aging_Distribution` — "X% of cases are 365+ days old on `Tidsbruk`," plus a
   simple reference count for `Bransjetid` — standard domain terms here, same category as
   `Fristprosent`/`Behandlingstid`, not something that needs paraphrasing
 - `Inflight_SLA_Risk_Monitor` — `Bruddet`/`Kritisk`/`Risiko`/`Innenfor`, plus the due-in-14-days list
@@ -164,16 +164,21 @@ the script as the tested spec `risikoklasse_case_sql()` generates its SQL `CASE`
 
 Two clocks, not one blended age: **`Tidsbruk`** (accumulated time on our side — the real
 internal-performance signal) and **`Bransjetid`** (accumulated time waiting on the client
-— not our team's performance). A pure calendar-age version blends the two, making a case
-stuck on the client look identical to one stuck on us. Both are live, independently
-accumulating totals, so no "which clock is running now" detection is needed — a case can
-carry both figures at once, bucketed separately (`bucket_age()`, buckets
-`0-30`/`31-60`/`61-90`/`91-180`/`180+`, applied to each). The completion-status column on
-the fact table isn't used — the two accumulators already say everything this page needs.
+— not our team's performance, and can run up to roughly 1000 days). A pure calendar-age
+version blends the two, making a case stuck on the client look identical to one stuck on
+us. Both are confirmed monotonic accumulators (`Tidsbruk + Bransjetid` always equals total
+elapsed days since `startmilepaeldato`), so no "which clock is running now" detection is
+needed — a case can carry both figures at once, bucketed separately (`bucket_age()`,
+buckets `0-30`/`31-60`/`61-90`/`91-180`/`181-365`/`365+`, applied identically to each —
+widened from an original `180+` catch-all once it became clear `Bransjetid`'s range needed
+the extra tail resolution). The completion-status column on the fact table isn't used — the
+two accumulators already say everything this page needs. A negative value on either column
+is guarded to `NULL` rather than allowed to produce a nonsensical bucket, even though
+neither should ever go negative given they're accumulators.
 
 On the leder-rapport page itself, the two clocks aren't given equal visual weight —
 `Tidsbruk` gets the full bucket-distribution-plus-P90 treatment as the headline (it's ours
-to act on), `Bransjetid` is a single reference count ("X cases waiting 180+ days on
+to act on), `Bransjetid` is a single reference count ("X cases waiting 365+ days on
 Bransjetid"). That's an actionability distinction, not a comprehension one — `Tidsbruk`
 and `Bransjetid` are standard terms here and stay as the actual panel titles. The full
 `Bransjetid` breakdown still exists as a measure for the analytiker-rapport if someone

@@ -51,13 +51,15 @@ BATCH_ID = datetime.now().strftime("%Y%m%dT%H%M%S")
 
 # Ordered (min_days, max_days, label) age buckets. max_days=None means
 # unbounded (open-ended top bucket). Must stay contiguous — no gaps. Same
-# buckets apply to both clocks.
+# buckets apply to both clocks — Bransjetid can run up to ~1000 days, so the
+# tail is wider than a pure Tidsbruk-calibrated set would need.
 AGE_BUCKETS = [
     (0,   30,   "0-30"),
     (31,  60,   "31-60"),
     (61,  90,   "61-90"),
     (91,  180,  "91-180"),
-    (181, None, "180+"),
+    (181, 365,  "181-365"),
+    (366, None, "365+"),
 ]
 
 # Which fact-table column feeds which klokke label.
@@ -120,7 +122,7 @@ def clock_snapshot_sql(klokke_label, column, snapshot_dato, batch_id):
         current_timestamp() AS kjoert_tidspunkt,
         '{batch_id}' AS kjoere_id
     FROM open_cases
-    WHERE {column} IS NOT NULL AND {column} >= 0
+    WHERE {column} IS NOT NULL
     GROUP BY indikator, enhet, {aldersgruppe_case_sql(column)}
     """
 
@@ -165,8 +167,11 @@ open_cases_cte = """
         SELECT
             pr.indikator,
             COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
-            CAST(pr.tidsbruk AS DOUBLE) AS tidsbruk,
-            CAST(pr.bransjetid AS DOUBLE) AS bransjetid
+            -- Guard: a negative Tidsbruk/Bransjetid should never happen (both
+            -- are monotonically increasing accumulators), but null it out
+            -- rather than let a bad value produce a nonsensical bucket.
+            CASE WHEN pr.tidsbruk   >= 0 THEN CAST(pr.tidsbruk   AS DOUBLE) END AS tidsbruk,
+            CASE WHEN pr.bransjetid >= 0 THEN CAST(pr.bransjetid AS DOUBLE) END AS bransjetid
         FROM saksbehandling.faser pr
         INNER JOIN felles.indikator indikator
             ON indikator.pk_indikator = pr.indikator
@@ -202,14 +207,14 @@ spark.sql(f"""
     ORDER BY indikator, enhet, klokke,
         CASE aldersgruppe
             WHEN '0-30' THEN 1 WHEN '31-60' THEN 2 WHEN '61-90' THEN 3
-            WHEN '91-180' THEN 4 ELSE 5
+            WHEN '91-180' THEN 4 WHEN '181-365' THEN 5 ELSE 6
         END
 """).show(200, truncate=False)
 
 print("\n=== ELDSTE ALDERSGRUPPE PER INDIKATOR/ENHET/KLOKKE, SISTE 2 SNAPSHOT ===")
 spark.sql("""
     SELECT indikator, enhet, klokke, snapshot_dato,
-           SUM(CASE WHEN aldersgruppe = '180+' THEN antall_saker ELSE 0 END) AS antall_180_pluss
+           SUM(CASE WHEN aldersgruppe = '365+' THEN antall_saker ELSE 0 END) AS antall_365_pluss
     FROM analyser.sak_alder_fordeling
     GROUP BY indikator, enhet, klokke, snapshot_dato
     ORDER BY indikator, enhet, klokke, snapshot_dato DESC
