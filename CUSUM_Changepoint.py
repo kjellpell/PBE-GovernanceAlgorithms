@@ -27,13 +27,12 @@
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
 #
 # Schedule: nightly, after main data pipeline.
-# Requires: ruptures (PELT only — CUSUM runs without it). Do NOT install it with
-# an inline `%pip install` cell — this tenant has inline library installation
-# disabled, and that magic command fails the whole notebook run with
-# MagicUsageError before any Python cell executes. Instead add "ruptures" as a
-# public library in a Fabric Environment item and attach that environment to
-# this notebook (or set it as the workspace default). See
-# https://learn.microsoft.com/en-us/fabric/data-engineering/library-management#inline-installation
+# Requires: nothing to install. PELT prefers `ruptures` (RBF cost) when it's
+# already importable in the notebook's environment, and otherwise falls back
+# to a built-in pure-NumPy PELT with an L2 (mean-shift) cost — see
+# _pelt_l2() below. Do not add a `%pip install ruptures` cell: on tenants
+# with inline library installation disabled, that magic command fails the
+# whole notebook run with MagicUsageError before any Python cell executes.
 # Minimum history: 24 monthly / 52 weekly observations per indicator.
 # =============================================================================
 
@@ -337,30 +336,93 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY)
 # CELL 4 — Changepoint detection (PELT)
 # =============================================================================
 
+def _pelt_l2(values, min_size, penalty):
+    """
+    Pure-NumPy PELT changepoint detection with an L2 (mean-shift) cost —
+    used only as a fallback when `ruptures` isn't importable (see the
+    "Requires" note at the top of this file). Same exact-search PELT
+    algorithm (Killick, Fearnhead & Eckley, 2012) and penalty convention
+    as ruptures.Pelt(...).predict(pen=penalty), but restricted to a
+    mean-shift cost instead of RBF, so it won't flag a variance-only
+    shift with an unchanged mean. Returns changepoint indices, excluding
+    the trailing len(values) endpoint — same shape run_changepoint
+    already returns for the ruptures path.
+    """
+    n = len(values)
+    if n < 2 * min_size:
+        return []
+
+    cumsum = np.concatenate(([0.0], np.cumsum(values)))
+    cumsum_sq = np.concatenate(([0.0], np.cumsum(values ** 2)))
+
+    def segment_cost(s, t):
+        length = t - s
+        total = cumsum[t] - cumsum[s]
+        total_sq = cumsum_sq[t] - cumsum_sq[s]
+        return total_sq - total * total / length
+
+    best_cost = {0: -penalty}
+    last_change = {}
+    candidates = [0]
+
+    for t in range(min_size, n + 1):
+        best_f, best_s = None, None
+        for s in candidates:
+            if t - s < min_size:
+                continue
+            f = best_cost[s] + segment_cost(s, t) + penalty
+            if best_f is None or f < best_f:
+                best_f, best_s = f, s
+        if best_f is None:
+            continue
+        best_cost[t] = best_f
+        last_change[t] = best_s
+        candidates = [s for s in candidates if best_cost[s] + segment_cost(s, t) <= best_f]
+        candidates.append(t)
+
+    if n not in last_change:
+        return []
+
+    breakpoints = []
+    t = n
+    while t in last_change:
+        s = last_change[t]
+        if s > 0:
+            breakpoints.append(s)
+        t = s
+    return sorted(breakpoints)
+
+
 def run_changepoint(series, granularitet):
     """
-    PELT changepoint detection using ruptures library.
+    PELT changepoint detection. Prefers the `ruptures` library (RBF cost)
+    when it's importable; otherwise falls back to a built-in pure-NumPy
+    PELT with an L2 cost (_pelt_l2) — no install step required either way.
     Returns list of changepoint indices, or empty list if none detected
     or insufficient data.
     """
-    try:
-        import ruptures as rpt
-    except ImportError:
-        print("ruptures not installed — skipping changepoint detection")
-        return []
-
     values = to_float_series(series).dropna().values
     min_obs = MIN_MONTHLY if granularitet == "Månedlig" else MIN_WEEKLY
 
     if len(values) < min_obs:
         return []
 
+    try:
+        import ruptures as rpt
+    except ImportError:
+        # BIC-style penalty for a mean-shift (L2) cost — 2*sigma^2*log(n) is
+        # the standard calibration (Yao, 1988) for this cost; the RBF cost
+        # below uses a different, unscaled penalty since it's on another scale.
+        penalty = 2 * np.log(len(values)) * np.std(values) ** 2
+        return _pelt_l2(values, min_size=6, penalty=penalty)
+
+    # penalty scales with series length — prevents over-segmentation
+    penalty = np.log(len(values)) * np.std(values) ** 2
+
     # PELT with RBF cost — detects mean and variance shifts
     algo = rpt.Pelt(model="rbf", min_size=6, jump=1).fit(values)
 
     try:
-        # penalty scales with series length — prevents over-segmentation
-        penalty = np.log(len(values)) * np.std(values) ** 2
         breakpoints = algo.predict(pen=penalty)
         # Last breakpoint is always len(values) — remove it
         return [bp for bp in breakpoints if bp < len(values)]

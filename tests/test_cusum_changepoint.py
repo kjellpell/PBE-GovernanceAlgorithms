@@ -9,7 +9,7 @@ import pandas as pd
 SOURCE = Path(__file__).parents[1] / "CUSUM_Changepoint.py"
 TREE = ast.parse(SOURCE.read_text())
 
-FUNCTION_NAMES = {"to_float_series", "run_cusum", "extract_changepoint_stats", "_periode_to_date"}
+FUNCTION_NAMES = {"to_float_series", "run_cusum", "extract_changepoint_stats", "_periode_to_date", "_pelt_l2"}
 CONSTANT_NAMES = {
     "CUSUM_K", "CUSUM_H",
     "CUSUM_BASELINE_MONTHLY", "CUSUM_BASELINE_WEEKLY", "CUSUM_MIN_POST_BASELINE_OBS",
@@ -32,6 +32,7 @@ exec(compile(ast.Module(body=EXTRACTED, type_ignores=[]), str(SOURCE), "exec"), 
 
 run_cusum                   = NAMESPACE["run_cusum"]
 extract_changepoint_stats   = NAMESPACE["extract_changepoint_stats"]
+_pelt_l2                    = NAMESPACE["_pelt_l2"]
 CUSUM_BASELINE_MONTHLY      = NAMESPACE["CUSUM_BASELINE_MONTHLY"]
 CUSUM_MIN_POST_BASELINE_OBS = NAMESPACE["CUSUM_MIN_POST_BASELINE_OBS"]
 
@@ -103,6 +104,35 @@ class CusumBaselineTests(unittest.TestCase):
         result = run_cusum(series, k=0.5, h=5.0, baseline_obs=baseline_obs)
 
         self.assertIsNone(result)
+
+
+class PeltL2FallbackTests(unittest.TestCase):
+    """_pelt_l2 is the ruptures-free PELT path run_changepoint uses when
+    `ruptures` isn't importable — no pip install / Fabric Environment needed."""
+
+    def test_detects_a_mean_shift(self):
+        rng = np.random.default_rng(0)
+        values = np.concatenate([rng.normal(10, 1, 30), rng.normal(20, 1, 30)])
+        penalty = 2 * np.log(len(values)) * np.std(values) ** 2
+
+        breakpoints = _pelt_l2(values, min_size=6, penalty=penalty)
+
+        self.assertTrue(any(25 <= bp <= 35 for bp in breakpoints))
+
+    def test_flat_series_rarely_flags_a_changepoint(self):
+        false_positives = 0
+        for seed in range(100):
+            values = np.random.default_rng(seed).normal(10, 1, 60)
+            penalty = 2 * np.log(len(values)) * np.std(values) ** 2
+            if _pelt_l2(values, min_size=6, penalty=penalty):
+                false_positives += 1
+
+        self.assertLess(false_positives, 10)
+
+    def test_too_short_returns_no_breakpoints(self):
+        values = np.arange(5.0)
+
+        self.assertEqual(_pelt_l2(values, min_size=6, penalty=1.0), [])
 
 
 if __name__ == "__main__":
