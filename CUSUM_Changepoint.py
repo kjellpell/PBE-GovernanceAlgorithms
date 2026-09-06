@@ -27,7 +27,13 @@
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
 #
 # Schedule: nightly, after main data pipeline.
-# Requires: pip install ruptures --break-system-packages
+# Requires: ruptures (PELT only — CUSUM runs without it). Do NOT install it with
+# an inline `%pip install` cell — this tenant has inline library installation
+# disabled, and that magic command fails the whole notebook run with
+# MagicUsageError before any Python cell executes. Instead add "ruptures" as a
+# public library in a Fabric Environment item and attach that environment to
+# this notebook (or set it as the workspace default). See
+# https://learn.microsoft.com/en-us/fabric/data-engineering/library-management#inline-installation
 # Minimum history: 24 monthly / 52 weekly observations per indicator.
 # =============================================================================
 

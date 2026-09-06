@@ -89,7 +89,10 @@ Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per in
 on both monthly and weekly series.
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
-- **External dependency:** `pip install ruptures` (PELT only — CUSUM runs without it)
+- **External dependency:** `ruptures` (PELT only — CUSUM runs without it). Install it via a
+  Fabric Environment item's public libraries, attached to the notebook or set as the
+  workspace default — not an inline `%pip install` cell, which fails with
+  `MagicUsageError` on tenants where inline installation is disabled
 - **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` (anchored baseline window for mu/sigma), `CUSUM_MIN_POST_BASELINE_OBS`
 - `signal` is boolean; `signalretning`/`endringsretning` are `Økning`/`Nedgang`
 - mu/sigma come from a fixed, anchored baseline window (the series' first N observations), not the whole history — a slow persistent drift would otherwise get partially absorbed into "normal" and dampen detection
