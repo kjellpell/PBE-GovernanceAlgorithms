@@ -27,12 +27,11 @@
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
 #
 # Schedule: nightly, after main data pipeline.
-# Requires: nothing to install. PELT prefers `ruptures` (RBF cost) when it's
-# already importable in the notebook's environment, and otherwise falls back
-# to a built-in pure-NumPy PELT with an L2 (mean-shift) cost — see
-# _pelt_l2() below. Do not add a `%pip install ruptures` cell: on tenants
-# with inline library installation disabled, that magic command fails the
-# whole notebook run with MagicUsageError before any Python cell executes.
+# Requires: nothing to install. PELT runs on a built-in pure-NumPy
+# implementation with an L2 (mean-shift) cost — see _pelt_l2() below. No
+# external library, so no `%pip install` cell: on tenants with inline
+# library installation disabled, that magic command fails the whole
+# notebook run with MagicUsageError before any Python cell executes.
 # Minimum history: 24 monthly / 52 weekly observations per indicator.
 # =============================================================================
 
@@ -339,14 +338,12 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY)
 def _pelt_l2(values, min_size, penalty):
     """
     Pure-NumPy PELT changepoint detection with an L2 (mean-shift) cost —
-    used only as a fallback when `ruptures` isn't importable (see the
-    "Requires" note at the top of this file). Same exact-search PELT
-    algorithm (Killick, Fearnhead & Eckley, 2012) and penalty convention
-    as ruptures.Pelt(...).predict(pen=penalty), but restricted to a
-    mean-shift cost instead of RBF, so it won't flag a variance-only
-    shift with an unchanged mean. Returns changepoint indices, excluding
-    the trailing len(values) endpoint — same shape run_changepoint
-    already returns for the ruptures path.
+    exact-search PELT (Killick, Fearnhead & Eckley, 2012), no external
+    library. Detects a shift in the series' average; a change in
+    volatility with the average unchanged is out of scope, which matches
+    what this table is for (see the "Requires" note at the top of this
+    file). Returns changepoint indices, excluding the trailing
+    len(values) endpoint.
     """
     n = len(values)
     if n < 2 * min_size:
@@ -395,11 +392,8 @@ def _pelt_l2(values, min_size, penalty):
 
 def run_changepoint(series, granularitet):
     """
-    PELT changepoint detection. Prefers the `ruptures` library (RBF cost)
-    when it's importable; otherwise falls back to a built-in pure-NumPy
-    PELT with an L2 cost (_pelt_l2) — no install step required either way.
-    Returns list of changepoint indices, or empty list if none detected
-    or insufficient data.
+    PELT changepoint detection (_pelt_l2). Returns list of changepoint
+    indices, or empty list if none detected or insufficient data.
     """
     values = to_float_series(series).dropna().values
     min_obs = MIN_MONTHLY if granularitet == "Månedlig" else MIN_WEEKLY
@@ -407,27 +401,10 @@ def run_changepoint(series, granularitet):
     if len(values) < min_obs:
         return []
 
-    try:
-        import ruptures as rpt
-    except ImportError:
-        # BIC-style penalty for a mean-shift (L2) cost — 2*sigma^2*log(n) is
-        # the standard calibration (Yao, 1988) for this cost; the RBF cost
-        # below uses a different, unscaled penalty since it's on another scale.
-        penalty = 2 * np.log(len(values)) * np.std(values) ** 2
-        return _pelt_l2(values, min_size=6, penalty=penalty)
-
-    # penalty scales with series length — prevents over-segmentation
-    penalty = np.log(len(values)) * np.std(values) ** 2
-
-    # PELT with RBF cost — detects mean and variance shifts
-    algo = rpt.Pelt(model="rbf", min_size=6, jump=1).fit(values)
-
-    try:
-        breakpoints = algo.predict(pen=penalty)
-        # Last breakpoint is always len(values) — remove it
-        return [bp for bp in breakpoints if bp < len(values)]
-    except Exception:
-        return []
+    # BIC-style penalty for a mean-shift (L2) cost — 2*sigma^2*log(n) is the
+    # standard calibration (Yao, 1988) for this cost.
+    penalty = 2 * np.log(len(values)) * np.std(values) ** 2
+    return _pelt_l2(values, min_size=6, penalty=penalty)
 
 
 # Per-måltall value expression and date column, reused by the drilldown

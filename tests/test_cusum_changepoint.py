@@ -107,8 +107,8 @@ class CusumBaselineTests(unittest.TestCase):
 
 
 class PeltL2FallbackTests(unittest.TestCase):
-    """_pelt_l2 is the ruptures-free PELT path run_changepoint uses when
-    `ruptures` isn't importable — no pip install / Fabric Environment needed."""
+    """_pelt_l2 is the only PELT path run_changepoint uses — no external
+    library, no pip install / Fabric Environment needed."""
 
     def test_detects_a_mean_shift(self):
         rng = np.random.default_rng(0)
