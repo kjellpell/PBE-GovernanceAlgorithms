@@ -12,9 +12,7 @@ Datakilder:
   each step is the same class of sequential logic that made the throughput monitor's
   streak measure fragile — not something to fake in a measure). The raw underlying value
   (Fristprosent/Behandlingstid/Produksjonsdifferanse) is deliberately **not** stored here
-  — it's the same live DAX measure used everywhere else in this repo (`Trendretning_POWERBI_DAX.md`'s
-  monthly measures for `granularitet = "Månedlig"`; build the analogous weekly version —
-  same pattern, a weekly `Kalender` grain instead of monthly — if you need a weekly raw line).
+  — it's a live DAX measure against `Faser`, defined elsewhere in the model.
 - `analyser.pelt_analyse`
 - `analyser.pelt_analyse_detaljer`
 
@@ -43,23 +41,40 @@ Datakilder:
 ## DAX-forslag
 
 ```DAX
-Har aktiv CUSUM signal =
-VAR SisteDato =
-    CALCULATE(
-        MAX(cusum_analyse[analyse_dato]),
-        ALLEXCEPT(
-            cusum_analyse,
-            cusum_analyse[indikator],
-            cusum_analyse[maaltall],
-            cusum_analyse[granularitet]
-        )
+Siste CUSUM-dato =
+CALCULATE(
+    MAX(cusum_analyse[analyse_dato]),
+    ALLEXCEPT(
+        cusum_analyse,
+        cusum_analyse[indikator],
+        cusum_analyse[maaltall],
+        cusum_analyse[granularitet]
     )
-RETURN
-    CALCULATE(
-        MAX(cusum_analyse[signal]),
-        cusum_analyse[analyse_dato] = SisteDato
-    ) = TRUE()
+)
 ```
+
+```DAX
+Har aktiv CUSUM signal =
+CALCULATE(
+    MAX(cusum_analyse[signal]),
+    cusum_analyse[analyse_dato] = [Siste CUSUM-dato]
+) = TRUE()
+```
+
+`signalretning` is written as `Stigende`/`Synkende`/`Stabil` — plain board vocabulary,
+precisely so a board-level trend card can read it with no translation layer:
+
+```DAX
+Trendretning (CUSUM) =
+CALCULATE(
+    SELECTEDVALUE(cusum_analyse[signalretning]),
+    cusum_analyse[analyse_dato] = [Siste CUSUM-dato]
+)
+```
+
+This is the one to put on a board card instead of the CUSUM line chart: the real,
+statistically-tested signal (anchored-baseline CUSUM, not a rolling self-referential
+threshold), as one plain word — no chart, no `cusum_positiv`/`cusum_negativ` numbers.
 
 ```DAX
 Antall aktive signaler =
