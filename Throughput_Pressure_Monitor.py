@@ -7,7 +7,7 @@
 #   processing time deteriorates versus recent baseline.
 #
 # Output tables:
-#   gjennomstoremming_press_enhet  — pressignal per enhet x indikator x month
+#   gjennomstroemming_press_enhet  — pressignal per enhet x indikator x month
 #   gjennomstroemming_press_fase  — stottetabell per fasetittel
 # Power BI/DAX guidance:
 #   see Throughput_Pressure_Monitor_POWERBI_DAX.md
@@ -44,7 +44,7 @@ POSITIVE_FLOW_STREAK = 3
 # =============================================================================
 
 spark.sql("""
-CREATE TABLE IF NOT EXISTS analyser.gjennomstoremming_press_enhet (
+CREATE TABLE IF NOT EXISTS analyser.gjennomstroemming_press_enhet (
     indikator                STRING      NOT NULL,
     enhet                    STRING      NOT NULL,
     analyse_dato             DATE        NOT NULL,
@@ -86,7 +86,7 @@ USING DELTA
 COMMENT 'Fasenivå-støttetabell for team med throughput-press. Viser hvilke faser som bidrar mest til presset.'
 """)
 
-print("gjennomstoremming_press_enhet og gjennomstroemming_press_fase tabeller er klare")
+print("gjennomstroemming_press_enhet og gjennomstroemming_press_fase tabeller er klare")
 
 
 # =============================================================================
@@ -398,8 +398,8 @@ if not team_out.empty:
     team_spark = spark.createDataFrame(
         to_records(team_out.to_dict("records"), TEAM_SCHEMA), schema=TEAM_SCHEMA
     )
-    team_spark.write.mode("overwrite").saveAsTable("analyser.gjennomstoremming_press_enhet")
-    print(f"gjennomstoremming_press_enhet skrevet: {len(team_out):,} rader")
+    team_spark.write.mode("overwrite").saveAsTable("analyser.gjennomstroemming_press_enhet")
+    print(f"gjennomstroemming_press_enhet skrevet: {len(team_out):,} rader")
 else:
     print("Ingen team-resultater å skrive")
 
@@ -427,11 +427,11 @@ if not team_out.empty:
             ROUND(tidsbruk_avvik_pct * 100, 1) AS tidsbruk_avvik_pct,
             pressure_nivaa,
             ROUND(pressure_score, 2) AS pressure_score
-                FROM analyser.gjennomstoremming_press_enhet
+                FROM analyser.gjennomstroemming_press_enhet
         WHERE kjoere_id = '{BATCH_ID}'
           AND analyse_dato = (
               SELECT MAX(analyse_dato)
-                            FROM analyser.gjennomstoremming_press_enhet
+                            FROM analyser.gjennomstroemming_press_enhet
               WHERE kjoere_id = '{BATCH_ID}'
           )
         ORDER BY pressure_score DESC, netto_flyt DESC

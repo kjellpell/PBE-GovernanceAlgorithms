@@ -58,7 +58,7 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 |---|---|---|
 | `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | CUSUM drift score + PELT changepoints — recursive/segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
-| `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
+| `Throughput_Pressure_Monitor.py` | `gjennomstroemming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
@@ -146,7 +146,7 @@ Team-level (`enhet`) flow imbalance (received vs. completed) and processing-time
 deviation vs. a rolling baseline, combined into a `pressure_nivaa`
 (`Lav`/`Moderat`/`Hoy`/`Kritisk`).
 
-- **Output:** `gjennomstoremming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
+- **Output:** `gjennomstroemming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
 - **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`
 - `netto_flyt_streak` (consecutive positive-flow months) is exactly the kind of
   order-dependent running count DAX has no clean primitive for — a script, not a fancy

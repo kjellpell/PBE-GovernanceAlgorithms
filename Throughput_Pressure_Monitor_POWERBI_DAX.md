@@ -12,7 +12,7 @@ Denne siden skal svare på:
 - Hvilken fase bidrar mest i pressede enheter?
 
 Datakilder:
-- `analyser.gjennomstoremming_press_enhet`
+- `analyser.gjennomstroemming_press_enhet`
 - `analyser.gjennomstroemming_press_fase`
 
 ## Anbefalte visualer
@@ -54,8 +54,8 @@ Fra `analyser.gjennomstroemming_press_fase`:
 ```DAX
 Siste analysedato =
 CALCULATE(
-    MAX(gjennomstoremming_press_enhet[analyse_dato]),
-    ALL(gjennomstoremming_press_enhet[analyse_dato])
+    MAX(gjennomstroemming_press_enhet[analyse_dato]),
+    ALL(gjennomstroemming_press_enhet[analyse_dato])
 )
 ```
 
@@ -63,18 +63,18 @@ CALCULATE(
 ```DAX
 Er siste rad =
 VAR SisteDato = [Siste analysedato]
-RETURN IF(MAX(gjennomstoremming_press_enhet[analyse_dato]) = SisteDato, 1, 0)
+RETURN IF(MAX(gjennomstroemming_press_enhet[analyse_dato]) = SisteDato, 1, 0)
 ```
 
 ### Antall kritiske enheter (siste måned)
 ```DAX
 Antall kritiske enheter siste =
 CALCULATE(
-    DISTINCTCOUNT(gjennomstoremming_press_enhet[enhet]),
+    DISTINCTCOUNT(gjennomstroemming_press_enhet[enhet]),
     FILTER(
-        gjennomstoremming_press_enhet,
-        gjennomstoremming_press_enhet[analyse_dato] = [Siste analysedato]
-            && gjennomstoremming_press_enhet[pressure_nivaa] = "Kritisk"
+        gjennomstroemming_press_enhet,
+        gjennomstroemming_press_enhet[analyse_dato] = [Siste analysedato]
+            && gjennomstroemming_press_enhet[pressure_nivaa] = "Kritisk"
     )
 )
 ```
@@ -83,11 +83,11 @@ CALCULATE(
 ```DAX
 Antall høyt press siste =
 CALCULATE(
-    DISTINCTCOUNT(gjennomstoremming_press_enhet[enhet]),
+    DISTINCTCOUNT(gjennomstroemming_press_enhet[enhet]),
     FILTER(
-        gjennomstoremming_press_enhet,
-        gjennomstoremming_press_enhet[analyse_dato] = [Siste analysedato]
-            && gjennomstoremming_press_enhet[pressure_nivaa] IN {"Hoy", "Kritisk"}
+        gjennomstroemming_press_enhet,
+        gjennomstroemming_press_enhet[analyse_dato] = [Siste analysedato]
+            && gjennomstroemming_press_enhet[pressure_nivaa] IN {"Hoy", "Kritisk"}
     )
 )
 ```
@@ -96,10 +96,10 @@ CALCULATE(
 ```DAX
 Netto flyt siste =
 CALCULATE(
-    SUM(gjennomstoremming_press_enhet[netto_flyt]),
+    SUM(gjennomstroemming_press_enhet[netto_flyt]),
     FILTER(
-        gjennomstoremming_press_enhet,
-        gjennomstoremming_press_enhet[analyse_dato] = [Siste analysedato]
+        gjennomstroemming_press_enhet,
+        gjennomstroemming_press_enhet[analyse_dato] = [Siste analysedato]
     )
 )
 ```
@@ -108,10 +108,10 @@ CALCULATE(
 ```DAX
 Tidsbruksavvik pp siste =
 CALCULATE(
-    AVERAGE(gjennomstoremming_press_enhet[tidsbruk_avvik_pct]) * 100,
+    AVERAGE(gjennomstroemming_press_enhet[tidsbruk_avvik_pct]) * 100,
     FILTER(
-        gjennomstoremming_press_enhet,
-        gjennomstoremming_press_enhet[analyse_dato] = [Siste analysedato]
+        gjennomstroemming_press_enhet,
+        gjennomstroemming_press_enhet[analyse_dato] = [Siste analysedato]
     )
 )
 ```
@@ -120,7 +120,7 @@ CALCULATE(
 ```DAX
 Pressnivå fargekode =
 SWITCH(
-    MAX(gjennomstoremming_press_enhet[pressure_nivaa]),
+    MAX(gjennomstroemming_press_enhet[pressure_nivaa]),
     "Kritisk", "#B00020",
     "Hoy", "#E65100",
     "Moderat", "#F9A825",
