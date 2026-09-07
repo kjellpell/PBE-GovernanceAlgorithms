@@ -215,27 +215,6 @@ def trimmed_stats(values, min_years, trim_n):
     }
 
 
-def monthly_rates(df, indikator, year):
-    """
-    frist% for each month of a year on its own — not cumulative.
-
-    This is the shape the report plots. `Faser innen frist %` is
-    DIVIDE([Faser innen frist], [Produserte faser]) evaluated in whatever
-    period the axis puts it in, with no year-to-date filter over it, so it is a
-    period rate: each month independent of the ones before it. Despite the
-    name, it is not a YTD measure — which is why a cumulative projection could
-    never line up with it.
-
-    Returns dict {month: rate} for months with produced faser.
-    """
-    ind = df[(df["indikator"] == indikator) & (df["aar"] == year)].sort_values("mnd")
-    return {
-        int(row["mnd"]): row["innenfor"] / row["total"]
-        for _, row in ind.iterrows()
-        if row["total"] > 0
-    }
-
-
 def monthly_counts(df, indikator, year):
     """
     Raw (innenfor, total) faser counts for each month of a year — the counts
@@ -256,6 +235,25 @@ def monthly_counts(df, indikator, year):
         int(row["mnd"]): (row["innenfor"], row["total"])
         for _, row in ind.iterrows()
         if row["total"] > 0
+    }
+
+
+def monthly_rates(df, indikator, year):
+    """
+    frist% for each month of a year on its own — not cumulative.
+
+    This is the shape the report plots. `Faser innen frist %` is
+    DIVIDE([Faser innen frist], [Produserte faser]) evaluated in whatever
+    period the axis puts it in, with no year-to-date filter over it, so it is a
+    period rate: each month independent of the ones before it. Despite the
+    name, it is not a YTD measure — which is why a cumulative projection could
+    never line up with it.
+
+    Returns dict {month: rate} for months with produced faser.
+    """
+    return {
+        month: innenfor / total
+        for month, (innenfor, total) in monthly_counts(df, indikator, year).items()
     }
 
 
@@ -733,7 +731,6 @@ for indikator in indicators:
 
     # Current year actuals
     current_ytd    = compute_ytd(monthly, indikator, CURRENT_YEAR)
-    current_rates  = monthly_rates(monthly, indikator, CURRENT_YEAR)
     current_counts = monthly_counts(monthly, indikator, CURRENT_YEAR)
 
     if not current_ytd:
