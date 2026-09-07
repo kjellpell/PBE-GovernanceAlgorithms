@@ -593,50 +593,33 @@ for metrikk, df, granularitet, min_obs in series_configs:
         cusum = run_cusum(ind_data, baseline_obs=baseline_obs)
         if cusum is not None:
             for idx, row in cusum.iterrows():
-                        cusum_rows.append({
-                            "indikator":       indikator,
-                            "maaltall":        metrikk,
-                            "granularitet":    granularitet,
-                            "analyse_dato":    _periode_to_date(idx, granularitet),
-                            "cusum_positiv":   round(float(row["cusum_pos"]), 4),
-                            "cusum_negativ":   round(float(row["cusum_neg"]), 4),
-                            "signal":          bool(row["signal"]),
-                            "signalretning":   row["signal_direction"],
-                            "kjoert_tidspunkt": datetime.now(),
-                            "kjoere_id":       BATCH_ID,
-                        })
-
-        # ── Changepoint (monthly only for stability) ───────────────
-        if granularitet == "Månedlig":
-            breakpoints = run_changepoint(ind_data, granularitet)
-            for cp in extract_changepoint_stats(ind_data, breakpoints, granularitet):
-                        changepoint_rows.append({
-                            "indikator":    indikator,
-                            "maaltall":     metrikk,
-                            "granularitet": granularitet,
-                            "endringspunkt_id": make_endringspunkt_id(
-                                indikator, metrikk, granularitet, cp["analyse_dato"]
-                            ),
-                            **cp,
-                            "kjoert_tidspunkt": datetime.now(),
-                            "kjoere_id":    BATCH_ID,
-                        })
-
-        # Weekly changepoints — separate pass
-        if granularitet == "Ukentlig":
-            breakpoints = run_changepoint(ind_data, granularitet)
-            for cp in extract_changepoint_stats(ind_data, breakpoints, granularitet):
-                changepoint_rows.append({
-                    "indikator":    indikator,
-                    "maaltall":     metrikk,
-                    "granularitet": granularitet,
-                    "endringspunkt_id": make_endringspunkt_id(
-                        indikator, metrikk, granularitet, cp["analyse_dato"]
-                    ),
-                    **cp,
+                cusum_rows.append({
+                    "indikator":       indikator,
+                    "maaltall":        metrikk,
+                    "granularitet":    granularitet,
+                    "analyse_dato":    _periode_to_date(idx, granularitet),
+                    "cusum_positiv":   round(float(row["cusum_pos"]), 4),
+                    "cusum_negativ":   round(float(row["cusum_neg"]), 4),
+                    "signal":          bool(row["signal"]),
+                    "signalretning":   row["signal_direction"],
                     "kjoert_tidspunkt": datetime.now(),
-                    "kjoere_id":    BATCH_ID,
+                    "kjoere_id":       BATCH_ID,
                 })
+
+        # ── Changepoint (monthly and weekly — see PELT header note) ─
+        breakpoints = run_changepoint(ind_data, granularitet)
+        for cp in extract_changepoint_stats(ind_data, breakpoints, granularitet):
+            changepoint_rows.append({
+                "indikator":    indikator,
+                "maaltall":     metrikk,
+                "granularitet": granularitet,
+                "endringspunkt_id": make_endringspunkt_id(
+                    indikator, metrikk, granularitet, cp["analyse_dato"]
+                ),
+                **cp,
+                "kjoert_tidspunkt": datetime.now(),
+                "kjoere_id":    BATCH_ID,
+            })
 
 print(f"CUSUM rows computed:       {len(cusum_rows)}")
 print(f"Changepoint rows computed: {len(changepoint_rows)}")
