@@ -7,7 +7,11 @@
 #   is active caseload piling up on a few caseworkers within a team, even
 #   while the team's aggregate numbers (throughput pressure monitor,
 #   Fristprosent) look fine? Concentration is measured with the Gini
-#   coefficient of open-caseload counts per saksbehandler within each enhet.
+#   coefficient of open-caseload counts per saksbehandler, computed
+#   separately per enhet x indikator — blending indicators together would
+#   let a few people's pile of low-effort indicators mask (or be masked by)
+#   concentration on a heavier indicator, since indicator effort isn't
+#   comparable and isn't in the data.
 #
 # Per-saksbehandler counts/shares are live DAX (Saker[saksansvarlig] joined
 # to Faser is already in the model) — see Caseworker_Load_Concentration_POWERBI_DAX.md,
@@ -26,7 +30,7 @@
 # via saker.pk_saker = faser.fk_saker.
 #
 # Output table:
-#   saksbehandler_konsentrasjon   — Gini trend per enhet
+#   saksbehandler_konsentrasjon   — Gini trend per enhet x indikator
 # Power BI/DAX guidance:
 #   see Caseworker_Load_Concentration_POWERBI_DAX.md
 #
@@ -58,9 +62,16 @@ MIN_SAKSBEHANDLERE = 3   # Gini on 1-2 people is meaningless — gate the enhet-
 # CELL 1 — Create output tables
 # =============================================================================
 
+if spark.catalog.tableExists("analyser.saksbehandler_konsentrasjon"):
+    eksisterende = {f.name for f in spark.table("analyser.saksbehandler_konsentrasjon").schema.fields}
+    if "indikator" not in eksisterende:
+        spark.sql("DROP TABLE analyser.saksbehandler_konsentrasjon")
+        print("Gammel saksbehandler_konsentrasjon uten indikator-kolonne slettet — bygges på nytt")
+
 spark.sql("""
 CREATE TABLE IF NOT EXISTS analyser.saksbehandler_konsentrasjon (
     enhet                    STRING      NOT NULL,
+    indikator                STRING      NOT NULL,
     snapshot_dato            DATE        NOT NULL,
     antall_saksbehandlere    INT         NOT NULL,
     total_aktive_saker       INT         NOT NULL,
@@ -70,7 +81,7 @@ CREATE TABLE IF NOT EXISTS analyser.saksbehandler_konsentrasjon (
     kjoere_id                STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Gini-koeffisient for arbeidsmengdekonsentrasjon per enhet. Ingen individdata — kun aggregert per enhet. Append-modus, idempotent per snapshot_dato.'
+COMMENT 'Gini-koeffisient for arbeidsmengdekonsentrasjon per enhet x indikator. Ingen individdata — kun aggregert per enhet x indikator. Append-modus, idempotent per snapshot_dato.'
 """)
 
 print("saksbehandler_konsentrasjon-tabellen er klar")
@@ -87,6 +98,7 @@ print("saksbehandler_konsentrasjon-tabellen er klar")
 caseload = spark.sql(f"""
     SELECT
         COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
+        pr.indikator AS indikator,
         TRIM(sk.{SAKSBEHANDLER_COL}) AS saksbehandler,
         COUNT(*) AS aktiv_saksmengde
     FROM saksbehandling.faser pr
@@ -100,12 +112,12 @@ caseload = spark.sql(f"""
       AND TRIM(sk.{SAKSBEHANDLER_COL}) != ''
       AND pr.indikator NOT LIKE '%avtalt%'
       AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-    GROUP BY COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'), TRIM(sk.{SAKSBEHANDLER_COL})
+    GROUP BY COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'), pr.indikator, TRIM(sk.{SAKSBEHANDLER_COL})
 """).toPandas()
 
 caseload["aktiv_saksmengde"] = pd.to_numeric(caseload["aktiv_saksmengde"], errors="coerce").astype("int64")
 
-print(f"Enhet x saksbehandler-rader: {len(caseload):,}")
+print(f"Enhet x indikator x saksbehandler-rader: {len(caseload):,}")
 
 
 # =============================================================================
@@ -147,12 +159,12 @@ def gini_coefficient(values):
 # above stays in this script only as the input the Gini computation below
 # needs — that's the one thing here that genuinely can't be a DAX measure.
 
-# ── Trend: Gini per enhet ────────────────────────────────────────────────────
+# ── Trend: Gini per enhet x indikator ────────────────────────────────────────
 snapshot_dato = date.today()
 
 trend_rows = []
 if not caseload.empty:
-    for enhet, grp in caseload.groupby("enhet"):
+    for (enhet, indikator), grp in caseload.groupby(["enhet", "indikator"]):
         caseloads = grp["aktiv_saksmengde"].tolist()
         n_saksbehandlere = len(caseloads)
         total_saker      = int(sum(caseloads))
@@ -161,6 +173,7 @@ if not caseload.empty:
 
         trend_rows.append({
             "enhet":                 enhet,
+            "indikator":             indikator,
             "snapshot_dato":         snapshot_dato,
             "antall_saksbehandlere": n_saksbehandlere,
             "total_aktive_saker":    total_saker,
@@ -179,6 +192,7 @@ print(f"Konsentrasjon-rader beregnet: {len(trend_rows):,}")
 
 TREND_SCHEMA = StructType([
     StructField("enhet",                 StringType(),    False),
+    StructField("indikator",             StringType(),    False),
     StructField("snapshot_dato",         DateType(),      False),
     StructField("antall_saksbehandlere", IntegerType(),   False),
     StructField("total_aktive_saker",    IntegerType(),   False),
@@ -224,11 +238,11 @@ if trend_rows:
 # note above CELL 3) — verify against the in-memory caseload frame instead.
 if not caseload.empty:
     verify = caseload.copy()
-    verify["andel"] = verify.groupby("enhet")["aktiv_saksmengde"].transform(
+    verify["andel"] = verify.groupby(["enhet", "indikator"])["aktiv_saksmengde"].transform(
         lambda s: s / s.sum() if s.sum() else 0.0
     )
     summary = (
-        verify.groupby("enhet")
+        verify.groupby(["enhet", "indikator"])
         .agg(antall_saksbehandlere=("saksbehandler", "count"),
              total_saker=("aktiv_saksmengde", "sum"),
              storste_andel_pct=("andel", "max"))
@@ -237,7 +251,7 @@ if not caseload.empty:
     print(summary.sort_values("storste_andel_pct", ascending=False).to_string())
 
 spark.sql(f"""
-    SELECT enhet, antall_saksbehandlere, total_aktive_saker, gini_koeffisient
+    SELECT enhet, indikator, antall_saksbehandlere, total_aktive_saker, gini_koeffisient
     FROM analyser.saksbehandler_konsentrasjon
     WHERE snapshot_dato = DATE('{snapshot_dato.isoformat()}')
       AND tilstrekkelig_volum = TRUE

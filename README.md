@@ -201,7 +201,7 @@ team's aggregate numbers look fine? Today's per-person counts/shares are live DA
 Gini-coefficient snapshot (Del 2), since rank-based Lorenz-curve math genuinely can't be a
 DAX measure.
 
-- `saksbehandler_konsentrasjon` stores enhet-level aggregates only, never a per-person breakdown — individual-level flagging is out of scope for this layer, same reasoning as `CUSUM_Changepoint.py`'s drilldown exclusion
+- `saksbehandler_konsentrasjon` stores enhet x indikator aggregates only, never a per-person breakdown — individual-level flagging is out of scope for this layer, same reasoning as `CUSUM_Changepoint.py`'s drilldown exclusion. Gini is computed per indikator rather than blended across an enhet's indicators, since indicator effort/complexity isn't comparable and isn't in the data — a blended enhet-level Gini could mask concentration on a heavier indicator behind a pile of lighter ones.
 - **Key constants:** `MIN_SAKSBEHANDLERE` (3) — Gini on 1-2 people is meaningless, gates `tilstrekkelig_volum`
 - `SAKSBEHANDLER_COL` is unverified against the Lakehouse schema — verify before relying on this script
 

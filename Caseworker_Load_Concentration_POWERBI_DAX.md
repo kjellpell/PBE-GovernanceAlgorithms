@@ -62,19 +62,22 @@ DIVIDE(
 ## Del 2 — Konsentrasjonstrend (persistert Gini)
 
 Datakilde: `analyser.saksbehandler_konsentrasjon` (written nightly by
-`Caseworker_Load_Concentration.py` — enhet-level only, no individual data, see that
-script's header for why the Gini computation can't be live DAX).
+`Caseworker_Load_Concentration.py` — enhet x indikator grain, no individual data, see that
+script's header for why the Gini computation can't be live DAX, and for why indikator
+isn't blended away: indicator effort isn't comparable and isn't in the data, so a blended
+enhet-level Gini could hide concentration on a heavier indicator behind a pile of lighter
+ones).
 
 ### Visualforslag
 
-#### 1) Gini-trend per enhet
+#### 1) Gini-trend per enhet x indikator
 - X-akse: `snapshot_dato`
 - Y-akse: `gini_koeffisient`
 - Filter: `tilstrekkelig_volum = TRUE`
-- Slicer: `enhet`
+- Slicer: `enhet`, `indikator`
 
 #### 2) KPI-kort
-- `gini_koeffisient` siste snapshot, per enhet
+- `gini_koeffisient` siste snapshot, per enhet x indikator
 - `antall_saksbehandlere` og `total_aktive_saker` siste snapshot
 
 ### DAX-forslag
@@ -111,12 +114,15 @@ SWITCH(
 
 ## Slicer-oppsett
 - `enhet`
+- `indikator` (Del 2 only — Del 1's `Saker[saksansvarlig]` visual isn't split by indikator today)
 - `snapshot_dato` (Del 2 only — Del 1 is always "now")
 
 ## Tolkning
-- `tilstrekkelig_volum = FALSE` means fewer than `MIN_SAKSBEHANDLERE` (3) active caseworkers in that enhet — the Gini value is NULL and should not be charted or acted on.
+- `tilstrekkelig_volum = FALSE` means fewer than `MIN_SAKSBEHANDLERE` (3) active caseworkers for that enhet x indikator — the Gini value is NULL and should not be charted or acted on.
 - A rising Gini trend at stable total caseload means the same work is concentrating on fewer people, not that the team is busier overall — a workload-balancing conversation, not a hiring one.
+- Gini is computed per indikator rather than blended across all of an enhet's indicators, because indicator effort isn't comparable and isn't in the data — blending would let concentration on a heavier indicator hide behind (or be hidden by) a pile of lighter ones.
 - Del 1 and Del 2 should roughly agree on "today" (Del 2's latest snapshot's
-  `total_aktive_saker`/`antall_saksbehandlere` vs. Del 1's live totals) — if they diverge,
-  the nightly run is stale or the two sides' filters have drifted apart. Keep both filter
-  sets in sync by hand; there's no single source of truth to enforce it automatically.
+  `total_aktive_saker`/`antall_saksbehandlere` per enhet x indikator vs. Del 1's live totals)
+  — if they diverge, the nightly run is stale or the two sides' filters have drifted apart.
+  Keep both filter sets in sync by hand; there's no single source of truth to enforce it
+  automatically.
