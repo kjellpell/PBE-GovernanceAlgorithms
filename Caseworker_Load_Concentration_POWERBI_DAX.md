@@ -1,4 +1,4 @@
-# Caseworker_Load_Concentration.py — Power BI and DAX
+# Caseworker load concentration — Power BI and DAX
 
 **Målgruppe:** Analytiker-rapport — en Gini-koeffisient lærer en leder ingenting ved
 første øyekast slik en prosentandel eller et antall dager gjør. Vis kun fargekode/nivå i
@@ -11,18 +11,22 @@ Denne siden skal svare på:
 
 **Merk:** dette er individdata og er ment for intern kapasitetsplanlegging hos ledere —
 ikke for automatisk individvarsling. Vurder å begrense tilgang til denne siden i Power
-BI-rapportsikkerheten, uansett om tallene kommer fra `Faser` direkte (Del 1) eller fra
-`saksbehandler_konsentrasjon` (Del 2) — tilgangsbegrensning må håndheves i rapportlaget,
-ikke ved å gjemme en tabell.
+BI-rapportsikkerheten, uansett om tallene kommer fra `Faser[saksansvarlig]`-detaljene
+(Del 1) eller fra Gini-målet (Del 2) — tilgangsbegrensning må håndheves i rapportlaget,
+ikke ved å gjemme et mål.
 
-This page is split in two: **today's per-caseworker counts and shares** are live DAX
-straight from `Saker` (`Saker[saksansvarlig]` is already in the semantic model, so a
-nightly copy of a plain `COUNTROWS`/`DIVIDE` would just be duplicated data), and **the
-Gini concentration trend** comes from `saksbehandler_konsentrasjon` — the one thing here
-that genuinely can't be a DAX measure (rank-based Lorenz-curve math) and, being a snapshot
-of today's open caseload, is also a trend question a live measure can't answer on its own.
+This is entirely live DAX — no script, no nightly table. Rank-based Lorenz-curve math
+(the Gini coefficient) is usually assumed to need a script, but it's a standard
+`RANKX`/`SUMX` iterator pattern over the current filter context (enhet x indikator), the
+same shape as any concentration/Pareto measure — not the disconnected-date or
+window-scan trickery this repo's own rule (see `README.md`) flags as too iterative for
+DAX. There is a real tradeoff: this gives you today's concentration only, not a trend
+line of how Gini moved over time. That was judged not worth a standing pipeline
+(script + a table growing one row per enhet x indikator every night, forever) to
+maintain for a single management signal — see git history for the prior
+snapshot-table version if a trend view is ever needed again.
 
-## Del 1 — Dagens arbeidsmengde (live DAX)
+## Del 1 — Dagens arbeidsmengde (per saksbehandler)
 
 ### Antagelser (rename to match your model)
 - `Faser` — `saksbehandling.faser`, with `enhet`, `fk_saker`, `startmilepaeldato`,
@@ -59,49 +63,59 @@ DIVIDE(
   per `enhet`
 - Referanselinje: gjennomsnittlig saksmengde for enheten
 
-## Del 2 — Konsentrasjonstrend (persistert Gini)
+## Del 2 — Konsentrasjon nå (live Gini)
 
-Datakilde: `analyser.saksbehandler_konsentrasjon` (written nightly by
-`Caseworker_Load_Concentration.py` — enhet x indikator grain, no individual data, see that
-script's header for why the Gini computation can't be live DAX, and for why indikator
-isn't blended away: indicator effort isn't comparable and isn't in the data, so a blended
-enhet-level Gini could hide concentration on a heavier indicator behind a pile of lighter
-ones).
+Same reasoning as `Caseworker_Load_Concentration.py`'s old gate: Gini on 1-2 people is
+meaningless, and indicator effort isn't comparable, so this is computed per enhet x
+indikator, never blended across indikatorer within an enhet (a blended Gini could hide
+concentration on a heavier indikator behind a pile of lighter ones), and never
+per-person (individual-level flagging stays out of scope, same as `CUSUM_Changepoint.py`'s
+saksbehandler exclusion in its drilldown).
 
-### Visualforslag
-
-#### 1) Gini-trend per enhet x indikator
-- X-akse: `snapshot_dato`
-- Y-akse: `gini_koeffisient`
-- Filter: `tilstrekkelig_volum = TRUE`
-- Slicer: `enhet`, `indikator`
-
-#### 2) KPI-kort
-- `gini_koeffisient` siste snapshot, per enhet x indikator
-- `antall_saksbehandlere` og `total_aktive_saker` siste snapshot
-
-### DAX-forslag
+### Mål (measures)
 
 ```DAX
-Siste konsentrasjon-snapshot =
-CALCULATE(
-    MAX(saksbehandler_konsentrasjon[snapshot_dato]),
-    ALL(saksbehandler_konsentrasjon[snapshot_dato])
+Saksmengde per saksbehandler (tabell) =
+FILTER(
+    ADDCOLUMNS(
+        VALUES(Saker[saksansvarlig]),
+        "@Saksmengde", [Aktiv saksmengde (saksbehandler)]
+    ),
+    NOT ISBLANK(Saker[saksansvarlig]) && [@Saksmengde] > 0
 )
 ```
 
 ```DAX
-Gini siste, kun tilstrekkelig volum =
-CALCULATE(
-    AVERAGE(saksbehandler_konsentrasjon[gini_koeffisient]),
-    saksbehandler_konsentrasjon[snapshot_dato] = [Siste konsentrasjon-snapshot],
-    saksbehandler_konsentrasjon[tilstrekkelig_volum] = TRUE()
-)
+Antall saksbehandlere (aktiv saksmengde) =
+COUNTROWS([Saksmengde per saksbehandler (tabell)])
+```
+
+```DAX
+Tilstrekkelig volum (konsentrasjon) =
+[Antall saksbehandlere (aktiv saksmengde)] >= 3
+```
+
+```DAX
+Gini-koeffisient (nå) =
+VAR Saksmengder = [Saksmengde per saksbehandler (tabell)]
+VAR N = COUNTROWS(Saksmengder)
+VAR Total = SUMX(Saksmengder, [@Saksmengde])
+VAR Rangert =
+    ADDCOLUMNS(
+        Saksmengder,
+        "@Rang", RANKX(Saksmengder, [@Saksmengde], , ASC, DENSE)
+    )
+VAR VektetSum = SUMX(Rangert, [@Rang] * [@Saksmengde])
+RETURN
+    IF(
+        [Tilstrekkelig volum (konsentrasjon)],
+        DIVIDE(2 * VektetSum, N * Total) - DIVIDE(N + 1, N)
+    )
 ```
 
 ```DAX
 Konsentrasjon fargekode =
-VAR G = [Gini siste, kun tilstrekkelig volum]
+VAR G = [Gini-koeffisient (nå)]
 RETURN
 SWITCH(
     TRUE(),
@@ -112,17 +126,25 @@ SWITCH(
 )
 ```
 
+### Visualforslag
+- KPI-kort med `[Konsentrasjon fargekode]`, per enhet x indikator — aldri rå
+  `[Gini-koeffisient (nå)]` i et leder-vindu
+- `[Antall saksbehandlere (aktiv saksmengde)]` og `Total_aktive_saker` (sum av
+  `[@Saksmengde]`) som støttetall ved siden av fargekoden
+
 ## Slicer-oppsett
 - `enhet`
-- `indikator` (Del 2 only — Del 1's `Saker[saksansvarlig]` visual isn't split by indikator today)
-- `snapshot_dato` (Del 2 only — Del 1 is always "now")
+- `indikator`
 
 ## Tolkning
-- `tilstrekkelig_volum = FALSE` means fewer than `MIN_SAKSBEHANDLERE` (3) active caseworkers for that enhet x indikator — the Gini value is NULL and should not be charted or acted on.
-- A rising Gini trend at stable total caseload means the same work is concentrating on fewer people, not that the team is busier overall — a workload-balancing conversation, not a hiring one.
-- Gini is computed per indikator rather than blended across all of an enhet's indicators, because indicator effort isn't comparable and isn't in the data — blending would let concentration on a heavier indicator hide behind (or be hidden by) a pile of lighter ones.
-- Del 1 and Del 2 should roughly agree on "today" (Del 2's latest snapshot's
-  `total_aktive_saker`/`antall_saksbehandlere` per enhet x indikator vs. Del 1's live totals)
-  — if they diverge, the nightly run is stale or the two sides' filters have drifted apart.
-  Keep both filter sets in sync by hand; there's no single source of truth to enforce it
-  automatically.
+- `[Tilstrekkelig volum (konsentrasjon)] = FALSE` betyr færre enn 3 aktive
+  saksbehandlere for den enhet x indikator-kombinasjonen — Gini-målet returnerer BLANK og
+  skal verken vises eller handles på.
+- Gini beregnes per indikator, ikke blandet på tvers av en enhets indikatorer, fordi
+  indikator-innsats ikke er sammenlignbar og ikke finnes i dataene — å blande ville la
+  konsentrasjon på en tyngre indikator gjemme seg bak (eller bli skjult av) en haug
+  lettere indikatorer.
+- Dette er et øyeblikksbilde, ikke en trend — en stigende/synkende konsentrasjon over tid
+  kan ikke leses av dette målet alene. Hvis en trendvisning blir nødvendig igjen, se
+  git-historikken for `Caseworker_Load_Concentration.py` og
+  `saksbehandler_konsentrasjon`-tabellen den skrev.
