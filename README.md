@@ -91,7 +91,11 @@ on both monthly and weekly series.
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
 - **External dependency:** `pip install ruptures` (PELT only — CUSUM runs without it)
 - **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` (anchored baseline window for mu/sigma), `CUSUM_MIN_POST_BASELINE_OBS`
-- `signal` is boolean; `signalretning`/`endringsretning` are `Økning`/`Nedgang`
+- `signal` is boolean; `signalretning`/`endringsretning` use `Stigende`/`Synkende`/`Stabil` —
+  the same vocabulary `Trendretning_POWERBI_DAX.md`'s DAX measures output, so a board-level
+  measure can read `cusum_analyse[signalretning]` directly with no translation SWITCH
+  (`endringsretning` in `pelt_analyse` is never `Stabil` — a changepoint row only exists
+  when a shift was actually detected)
 - mu/sigma come from a fixed, anchored baseline window (the series' first N observations), not the whole history — a slow persistent drift would otherwise get partially absorbed into "normal" and dampen detection
 - `cusum_analyse` stores only `cusum_positiv`/`cusum_negativ`/`signal` — the raw value is a live DAX measure (see `CUSUM_Changepoint_POWERBI_DAX.md`)
 

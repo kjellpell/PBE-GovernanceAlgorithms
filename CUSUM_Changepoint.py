@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS analyser.cusum_analyse (
     kjoere_id        STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Økning eller Nedgang. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato.'
+COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Stigende/Synkende/Stabil — samme ord som Trendretning_POWERBI_DAX.md, slik at et bord-nivå mål kan lese denne kolonnen direkte uten oversettelse. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato.'
 """)
 
 spark.sql("""
@@ -287,7 +287,10 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY)
         (including the baseline window itself) is standardised against this
         fixed mu/sigma before running the CUSUM recursion.
 
-    Returns DataFrame with cusum_pos, cusum_neg, signal, signal_retning.
+    Returns DataFrame with cusum_pos, cusum_neg, signal, signal_direction.
+    signal_direction is always one of Stigende/Synkende/Stabil — same vocabulary
+    as Trendretning_POWERBI_DAX.md's SWITCH output, so a board-level DAX measure
+    can read this column directly instead of translating it.
     """
     if len(series) < 8:
         return None
@@ -316,8 +319,8 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY)
         cusum_neg[i] = max(0, cusum_neg[i-1] - standardised[i] - k)
 
     signal     = (cusum_pos > h) | (cusum_neg > h)
-    retning    = np.where(cusum_pos > h, "Økning",
-                 np.where(cusum_neg > h, "Nedgang", None))
+    retning    = np.where(cusum_pos > h, "Stigende",
+                 np.where(cusum_neg > h, "Synkende", "Stabil"))
 
     return pd.DataFrame({
         "cusum_pos":       cusum_pos,
@@ -497,7 +500,7 @@ def extract_changepoint_stats(series, breakpoints, granularitet):
             "gjennomsnitt_foer":           round(mean_before, 4),
             "gjennomsnitt_etter":          round(mean_after, 4),
             "endringsstoerrelse":          round(shift, 4),
-            "endringsretning":             "Økning" if shift > 0 else "Nedgang",
+            "endringsretning":             "Stigende" if shift > 0 else "Synkende",
             "antall_observasjoner_foer":   len(before),
             "antall_observasjoner_etter":  len(after),
         })

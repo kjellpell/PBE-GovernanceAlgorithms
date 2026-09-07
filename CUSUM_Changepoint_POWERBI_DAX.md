@@ -43,23 +43,43 @@ Datakilder:
 ## DAX-forslag
 
 ```DAX
-Har aktiv CUSUM signal =
-VAR SisteDato =
-    CALCULATE(
-        MAX(cusum_analyse[analyse_dato]),
-        ALLEXCEPT(
-            cusum_analyse,
-            cusum_analyse[indikator],
-            cusum_analyse[maaltall],
-            cusum_analyse[granularitet]
-        )
+Siste CUSUM-dato =
+CALCULATE(
+    MAX(cusum_analyse[analyse_dato]),
+    ALLEXCEPT(
+        cusum_analyse,
+        cusum_analyse[indikator],
+        cusum_analyse[maaltall],
+        cusum_analyse[granularitet]
     )
-RETURN
-    CALCULATE(
-        MAX(cusum_analyse[signal]),
-        cusum_analyse[analyse_dato] = SisteDato
-    ) = TRUE()
+)
 ```
+
+```DAX
+Har aktiv CUSUM signal =
+CALCULATE(
+    MAX(cusum_analyse[signal]),
+    cusum_analyse[analyse_dato] = [Siste CUSUM-dato]
+) = TRUE()
+```
+
+`signalretning` is written as `Stigende`/`Synkende`/`Stabil` — the same vocabulary
+`Trendretning_POWERBI_DAX.md`'s DAX measures produce — precisely so a board-level trend
+card can read it with no translation layer:
+
+```DAX
+Trendretning (CUSUM) =
+CALCULATE(
+    SELECTEDVALUE(cusum_analyse[signalretning]),
+    cusum_analyse[analyse_dato] = [Siste CUSUM-dato]
+)
+```
+
+This is the one to put on a board card instead of the CUSUM line chart: it's the real,
+statistically-tested signal (anchored-baseline CUSUM, not a rolling self-referential
+threshold), but it reads exactly like the plain-DAX `Trendretning` measures the board
+already sees for indicators without a CUSUM baseline yet — no chart, no `cusum_positiv`/
+`cusum_negativ` numbers, one word.
 
 ```DAX
 Antall aktive signaler =
