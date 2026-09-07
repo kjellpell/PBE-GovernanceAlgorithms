@@ -1,14 +1,28 @@
-# Trendretning — native DAX (replaces EWMA.py)
+# Trendretning — native DAX (raw values; trend signal now comes from CUSUM)
 
 **Målgruppe:** Leder-rapport — leser kaldt, ingen forklaring nødvendig.
 
 ## Formål
-Trend direction (`Stigende` / `Synkende` / `Stabil`) for `Fristprosent`, `Behandlingstid`
-and `Produksjonsdifferanse`, from the slope of a rolling average — simpler to read than an
-exponentially weighted average, and native DAX.
 
-**No Delta table, no nightly run.** These are measures against the fact table
-(`saksbehandling.faser` in the Lakehouse — referred to below by whatever
+This file used to also compute trend direction (`Stigende`/`Synkende`/`Stabil`) natively,
+from the month-on-month slope of a rolling average — a simpler-to-explain replacement for
+`EWMA.py`. That's been superseded: every indicator here has 20+ years of history, more
+than enough to build a proper CUSUM baseline, and `CUSUM_Changepoint.py` already runs
+nightly for the analyst-facing drift signal — so the board's trend arrow now comes from
+that anchored-baseline CUSUM test (`Trendretning (CUSUM)` in
+`CUSUM_Changepoint_POWERBI_DAX.md`) instead of a hand-tuned slope threshold. A real
+statistical test beats a threshold picked to "look right," and since the nightly pipeline
+was already running for other reasons, reading its `signalretning` column directly cost
+nothing extra — `signalretning`/`endringsretning` use the same `Stigende`/`Synkende`/
+`Stabil` vocabulary as this file, so no translation layer was needed either.
+
+What's left here is the plain per-period measures: the raw value line the board's CUSUM
+arrow is drawn against, and the same live DAX measure
+`CUSUM_Changepoint_POWERBI_DAX.md` points to instead of duplicating the raw value inside
+`cusum_analyse`.
+
+**No Delta table, no nightly run** for what remains below. These are measures against the
+fact table (`saksbehandling.faser` in the Lakehouse — referred to below by whatever
 name it's imported into the semantic model as).
 
 ## Antagelser (rename to match your model)
@@ -42,286 +56,19 @@ CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[startmilepaeldato]))
     - CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[sluttmilepaeldato]))
 ```
 
-## Siste dato med data (hjelpemål)
-
-Every measure below anchors its window on "the last relevant date." A bare
-`MAX(Kalender[Dato])` is not safe for that: it returns the last date **in the current
-filter context**, and `Kalender` is a full calendar table that typically extends past the
-fact data (through year-end, or further). Filter to a year with no month selected, or drop
-the measure on a card with no date filter at all, and `MAX(Kalender[Dato])` returns a date
-months into the future with zero `Faser` rows behind it — every measure downstream
-(`DATESINPERIOD`, the glidende snitt, `helning`) silently evaluates to blank in that
-window, and `Trendretning` reports "Stabil" forever, not because nothing is moving but
-because there's nothing there to look at.
-
-```DAX
-Siste dato med data =
-VAR SisteFaktaDato =
-    CALCULATE(
-        MAX(Faser[sluttmilepaeldato]),
-        ALL(Kalender)
-    )
-RETURN
-    CALCULATE(
-        MAX(Kalender[Dato]),
-        Kalender[Dato] <= SisteFaktaDato
-    )
-```
-
-`SisteFaktaDato` ignores whatever filter is active and finds the true last date with a
-closed fase. The outer `CALCULATE` then intersects that cap with the *existing* filter
-context rather than replacing it — so a visual that already pins a narrower date (a line
-chart axis, a single month) is unaffected, since its own max date is already at or before
-the cap; only a wide-open context (a year filter, a filter-less card) gets reined in from
-running off the end of the calendar. Every `SisteDato` below uses this measure instead of
-`MAX(Kalender[Dato])` directly.
-
-## Glidende snitt (moving average measure pattern)
-
-Standard DAX idiom: average the monthly measure over each of the last N months
-individually (row-context transition via `SUMMARIZE` + `AVERAGEX`), rather than summing
-raw rows over the window — this keeps ratio/average/count-diff measures all correct without
-a separate formula per shape.
-
-```DAX
-Fristprosent glidende snitt rask (3 mnd) =
-VAR SisteDato = [Siste dato med data]
-VAR Maaneder = DATESINPERIOD(Kalender[Dato], SisteDato, -3, MONTH)
-RETURN
-    AVERAGEX(
-        SUMMARIZE(Maaneder, Kalender[År], Kalender[Månedsnummer]),
-        [Fristprosent (måned)]
-    )
-```
-
-```DAX
-Fristprosent glidende snitt sakte (6 mnd) =
-VAR SisteDato = [Siste dato med data]
-VAR Maaneder = DATESINPERIOD(Kalender[Dato], SisteDato, -6, MONTH)
-RETURN
-    AVERAGEX(
-        SUMMARIZE(Maaneder, Kalender[År], Kalender[Månedsnummer]),
-        [Fristprosent (måned)]
-    )
-```
-
-Repeat both for `Behandlingstid (måned)` and `Produksjonsdifferanse (måned)`
-(`Behandlingstid glidende snitt rask/sakte`, `Produksjonsdifferanse glidende snitt
-rask/sakte`) — same two measures, swap the inner `[...]` reference. Keep
-`VAR SisteDato = [Siste dato med data]` in all of them; only the innermost `[...]`
-reference changes per metric.
-
-## Helning og trendretning
-
-Trend direction is based on the **slow (6-month)** rolling average's month-on-month slope —
-same choice the old script made ("stable signal for board").
-
-```DAX
-Fristprosent helning sakte =
-VAR SisteDato = [Siste dato med data]
-VAR ForrigeMaaned = EOMONTH(SisteDato, -1)
-VAR SnittNaa = [Fristprosent glidende snitt sakte (6 mnd)]
-VAR SnittForrige =
-    CALCULATE(
-        [Fristprosent glidende snitt sakte (6 mnd)],
-        FILTER(ALL(Kalender), Kalender[Dato] = ForrigeMaaned)
-    )
-RETURN
-    IF(
-        ISBLANK(SnittNaa) || ISBLANK(SnittForrige),
-        BLANK(),
-        SnittNaa - SnittForrige
-    )
-```
-
-`SnittNaa`/`SnittForrige` are guarded explicitly rather than trusting `Helning`'s own
-blankness: DAX's `-` operator coerces a lone blank operand to 0, so without this guard a
-genuinely missing side (e.g. no 6-month history yet at the start of the dataset) reads as
-a large fake swing instead of "no signal."
-
-```DAX
-Trendretning Fristprosent =
-VAR Helning = [Fristprosent helning sakte]
-VAR Terskel = 0.002  -- 0.2 prosentpoeng/måned, samme terskel som EWMA.py brukte
-RETURN
-    SWITCH(
-        TRUE(),
-        ISBLANK(Helning), "Stabil",
-        Helning > Terskel, "Stigende",
-        Helning < -Terskel, "Synkende",
-        "Stabil"
-    )
-```
-
-### Alternativ: helning rask (3 mnd, ikke-overlappende sammenligning)
-
-`helning sakte` sammenligner et 6-måneders snitt mot seg selv **én måned** tilbake — et
-lite steg mot et bredt vindu. Det kan gi et fortegn som virker "feil" mot det du ser i
-den rå linjen: siden bare 1 av de 6 månedene i vinduet byttes ut per steg, er det
-måneden som *forsvinner ut* av vinduet som avgjør fortegnet like mye som måneden som
-kommer inn — et glidende snitt kan derfor vise et lite fall en måned der de siste par
-månedene faktisk har vært bedre, rett og slett fordi en spesielt sterk måned nettopp falt
-ut av vinduet.
-
-Et alternativ som unngår dette: bruk **samme lengde på vindu og sammenligningssteg** — et
-3-måneders snitt sammenlignet mot seg selv 3 måneder tilbake, ikke-overlappende kvartal
-mot kvartal:
-
-```DAX
-Fristprosent helning rask (3 mnd) =
-VAR SisteDato = [Siste dato med data]
-VAR TreMaanederTilbake = EOMONTH(SisteDato, -3)
-VAR SnittNaa = [Fristprosent glidende snitt rask (3 mnd)]
-VAR SnittForrige =
-    CALCULATE(
-        [Fristprosent glidende snitt rask (3 mnd)],
-        FILTER(ALL(Kalender), Kalender[Dato] = TreMaanederTilbake)
-    )
-RETURN
-    IF(
-        ISBLANK(SnittNaa) || ISBLANK(SnittForrige),
-        BLANK(),
-        SnittNaa - SnittForrige
-    )
-```
-
-Terskelen bør da også reflektere en meningsfull endring over et helt kvartal, ikke en
-måned-til-måned-endring — `0.02` (2 prosentpoeng over 3 måneder) er en rimelig
-utgangsverdi, ikke `0.002`. Samme mønster gjelder for `Behandlingstid`/
-`Produksjonsdifferanse`, med hver sin skala.
-
-### Selvkalibrert terskel (unngå å gjette et tall)
-
-En fast terskel har ett problem uansett hvilket tall man velger: hvor "mye" en indikator
-normalt svinger fra kvartal til kvartal er ikke det samme fra indikator til indikator.
-`0.02` kan være riktig for en stabil indikator og ren støy for en urolig en — det er ikke
-et tegn på at man bare ikke har funnet det riktige tallet ennå, det er et tegn på at ett
-fast tall ikke er riktig verktøy.
-
-Løsningen: la terskelen være **standardavviket til indikatorens egne historiske
-kvartal-mot-kvartal-endringer**, i stedet for en konstant. Et utslag telles da som
-"Stigende"/"Synkende" bare når det er stort *for akkurat denne indikatoren*, ikke mot et
-tall noen skrev inn en gang.
-
-```DAX
-Fristprosent helning terskel (selvkalibrert) =
-VAR SisteDatoMedData = [Siste dato med data]
-VAR MaanedsluttDatoer =
-    FILTER(
-        ALL(Kalender[Dato]),
-        Kalender[Dato] = EOMONTH(Kalender[Dato], 0)
-            && Kalender[Dato] <= SisteDatoMedData
-    )
-VAR HistoriskeHelninger =
-    ADDCOLUMNS(
-        MaanedsluttDatoer,
-        "@Helning",
-        VAR GjeldendeDato = Kalender[Dato]
-        RETURN
-            CALCULATE(
-                [Fristprosent helning rask (3 mnd)],
-                FILTER(ALL(Kalender), Kalender[Dato] = GjeldendeDato)
-            )
-    )
-VAR AntallMultiplikator = 1  -- hev til 1,5-2 hvis signalet slår ut for ofte
-RETURN
-    AntallMultiplikator *
-    STDEVX.P(
-        FILTER(HistoriskeHelninger, NOT ISBLANK([@Helning])),
-        [@Helning]
-    )
-```
-
-```DAX
-Fristprosent trendretning (selvkalibrert) =
-VAR Helning = [Fristprosent helning rask (3 mnd)]
-VAR Terskel = [Fristprosent helning terskel (selvkalibrert)]
-RETURN
-    SWITCH(
-        TRUE(),
-        ISBLANK(Helning) || ISBLANK(Terskel), "Stabil",
-        Helning > Terskel, "Stigende",
-        Helning < -Terskel, "Synkende",
-        "Stabil"
-    )
-```
-
-`MaanedsluttDatoer` samples every month-end with real data (not just true quarter
-boundaries), so the standard deviation is computed over a rolling sample of 3-month
-swings, not a handful of non-overlapping quarters — more data points, same underlying
-`helning rask (3 mnd)` measure evaluated "as if" each historical month-end were the
-latest date. `AntallMultiplikator` is the one knob left to tune, and it means something
-concrete (how many standard deviations of this indicator's own normal quarterly wobble
-count as a real signal), unlike a bare percentage-point constant that means nothing
-outside the one indicator it was picked for.
-
-Samme helningsmønster for de to andre måltallene (bytt ut `[Fristprosent glidende snitt
-sakte (6 mnd)]`-referansen med den tilsvarende måltall-versjonen):
-
-```DAX
-Behandlingstid helning sakte =
-VAR SisteDato = [Siste dato med data]
-VAR ForrigeMaaned = EOMONTH(SisteDato, -1)
-VAR SnittNaa = [Behandlingstid glidende snitt sakte (6 mnd)]
-VAR SnittForrige =
-    CALCULATE(
-        [Behandlingstid glidende snitt sakte (6 mnd)],
-        FILTER(ALL(Kalender), Kalender[Dato] = ForrigeMaaned)
-    )
-RETURN
-    IF(
-        ISBLANK(SnittNaa) || ISBLANK(SnittForrige),
-        BLANK(),
-        SnittNaa - SnittForrige
-    )
-```
-
-```DAX
-Produksjonsdifferanse helning sakte =
-VAR SisteDato = [Siste dato med data]
-VAR ForrigeMaaned = EOMONTH(SisteDato, -1)
-VAR SnittNaa = [Produksjonsdifferanse glidende snitt sakte (6 mnd)]
-VAR SnittForrige =
-    CALCULATE(
-        [Produksjonsdifferanse glidende snitt sakte (6 mnd)],
-        FILTER(ALL(Kalender), Kalender[Dato] = ForrigeMaaned)
-    )
-RETURN
-    IF(
-        ISBLANK(SnittNaa) || ISBLANK(SnittForrige),
-        BLANK(),
-        SnittNaa - SnittForrige
-    )
-```
-
-Med samme terskler som `EWMA.py` brukte:
-
-```DAX
-Trendretning Behandlingstid =
-VAR Helning = [Behandlingstid helning sakte]
-VAR Terskel = 0.5  -- en halv dag/måned
-RETURN
-    SWITCH(TRUE(), ISBLANK(Helning), "Stabil", Helning > Terskel, "Stigende",
-        Helning < -Terskel, "Synkende", "Stabil")
-```
-
-```DAX
-Trendretning Produksjonsdifferanse =
-VAR Helning = [Produksjonsdifferanse helning sakte]
-VAR Terskel = 5.0  -- 5 saker/måned
-RETURN
-    SWITCH(TRUE(), ISBLANK(Helning), "Stabil", Helning > Terskel, "Stigende",
-        Helning < -Terskel, "Synkende", "Stabil")
-```
-
 ## Visualforslag
-- **Linjediagram:** `Fristprosent (måned)` (rå verdi) + `Fristprosent glidende snitt sakte`
-  on the same chart, per `indikator` — replaces the old raw + EWMA chart 1:1
-- **Trendkort:** `Trendretning Fristprosent` for the latest month, same
-  Stigende=grønn / Synkende=rød / Stabil=nøytral color rule as before
+- **Linjediagram:** `Fristprosent (måned)` (rå verdi) per `indikator` — the line CUSUM's
+  signal is judged against; add `cusum_analyse[cusum_positiv]`/`cusum_negativ` from
+  `CUSUM_Changepoint_POWERBI_DAX.md` if you want the accumulator visible too, on an
+  analyst-facing page.
+- **Trendkort:** use `Trendretning (CUSUM)` (see `CUSUM_Changepoint_POWERBI_DAX.md`), not a
+  measure from this file — same Stigende=grønn / Synkende=rød / Stabil=nøytral color rule
+  as before.
 
 ## Tolkning
-- Styrevisning: bruk `glidende snitt sakte` (6 mnd) — stabil retning, lite støy.
-- Virksomhetsoppfølging: bruk `glidende snitt rask` (3 mnd) — reagerer raskere.
-- En "6-måneders glidende snitt" er lettere å forklare i et møte enn en eksponentielt
-  vektet utjevning — samme funksjon (vis underliggende trend, ikke rå støy), enklere språk.
+- Trend direction lives in `CUSUM_Changepoint_POWERBI_DAX.md` now — this file only supplies
+  the raw per-period numbers everything else (the board arrow, the CUSUM line, the raw
+  line on a chart) is built from.
+- `Fristprosent (måned)` is still a **period rate, not year-to-date** — see
+  `Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md` for why that matters and how it
+  relates to the forecast page.
