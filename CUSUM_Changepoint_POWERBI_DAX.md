@@ -12,42 +12,9 @@ Datakilder:
   each step is the same class of sequential logic that made the throughput monitor's
   streak measure fragile — not something to fake in a measure). The raw underlying value
   (Fristprosent/Behandlingstid/Produksjonsdifferanse) is deliberately **not** stored here
-  — it's a live DAX measure against `Faser` for `granularitet = "Månedlig"` (see
-  "Grunnmål" below; build the analogous weekly version — same pattern, a weekly `Kalender`
-  grain instead of monthly — if you need a weekly raw line).
+  — it's a live DAX measure against `Faser`, defined elsewhere in the model.
 - `analyser.pelt_analyse`
 - `analyser.pelt_analyse_detaljer`
-
-## Grunnmål (rå verdi, per måned, live DAX — ikke lagret i `cusum_analyse`)
-
-Antagelser: `Faser` — the fact table (`saksbehandling.faser`), containing `indikator`,
-`sluttmilepaeldato`, `startmilepaeldato`, `frist_dager`, `innenfor_frist`, `tidsbruk`;
-`Kalender` — a standard date table marked as the model's Date Table, `Kalender[Dato]`
-related to `Faser[sluttmilepaeldato]` (use `startmilepaeldato` as well for
-`Produksjonsdifferanse`, per the original script's `COALESCE`-based period).
-
-```DAX
-Fristprosent (måned) =
-DIVIDE(
-    CALCULATE(COUNTROWS(Faser), Faser[innenfor_frist] = TRUE()),
-    CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[frist_dager]))
-)
-```
-
-```DAX
-Behandlingstid (måned) =
-AVERAGE(Faser[tidsbruk])
-```
-
-```DAX
-Produksjonsdifferanse (måned) =
-CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[startmilepaeldato]))
-    - CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[sluttmilepaeldato]))
-```
-
-These are the raw values the board line chart plots and `cusum_analyse`'s signal is
-judged against — `run_cusum` reads the same underlying `Faser` history, just via Spark
-instead of DAX.
 
 ## Visualforslag
 

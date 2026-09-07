@@ -91,8 +91,7 @@ on both monthly and weekly series.
   `Stabil` — a changepoint row only exists when a shift was actually detected)
 - mu/sigma come from a fixed, anchored baseline window (the series' first N observations), not the whole history — a slow persistent drift would otherwise get partially absorbed into "normal" and dampen detection
 - `cusum_analyse` stores only `cusum_positiv`/`cusum_negativ`/`signal` — the raw value is a
-  live DAX measure (`Fristprosent`/`Behandlingstid`/`Produksjonsdifferanse (måned)`; see
-  `CUSUM_Changepoint_POWERBI_DAX.md`)
+  live DAX measure against `Faser`, defined elsewhere in the model
 - Board/governance trend direction (`Stigende`/`Synkende`/`Stabil`) is `Trendretning (CUSUM)`
   in `CUSUM_Changepoint_POWERBI_DAX.md` — the anchored-baseline CUSUM signal read directly,
   not a separately-computed DAX slope; every indicator has 20+ years of history, more than
