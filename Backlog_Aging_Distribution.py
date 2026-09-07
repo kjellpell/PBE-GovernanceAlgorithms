@@ -35,10 +35,9 @@
 # Python only as the tested spec aldersgruppe_case_sql() generates its SQL
 # CASE expression from, so the two can't drift apart.
 #
-# Unit assumption: tidsbruk/bransjetid are assumed to already be day counts
+# Unit assumption: tidsbruk/bransjetid are confirmed to already be day counts
 # (same assumption every other script in this repo makes about tidsbruk,
-# e.g. CUSUM_Changepoint.py's Behandlingstid). Verify against the Lakehouse
-# schema before relying on this if that turns out to be wrong.
+# e.g. CUSUM_Changepoint.py's Behandlingstid).
 #
 # Schedule: nightly after main data pipeline.
 # =============================================================================
