@@ -1,8 +1,7 @@
 # PBE-GovernanceAlgorithms
 
 One system for monitoring case-processing indicators (`Fristprosent`, `Behandlingstid`,
-`Produksjonsdifferanse`) from several angles: trend, drift, forecast, flow, backlog,
-in-flight risk, workload. All views read the same fact table
+`Produksjonsdifferanse`) from several angles: trend, drift, forecast, flow, workload. All views read the same fact table
 (`saksbehandling.faser`, `pk_indikator` from `felles.indikator`), all output values in
 Norwegian, DAX measure names in Norwegian.
 
@@ -38,9 +37,6 @@ self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
 - `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
-- `Backlog_Aging_Distribution` — "X% of cases are 365+ days old on `Tidsbruk`," plus a
-  simple reference count for `Bransjetid` — standard domain terms here, same category as
-  `Fristprosent`/`Behandlingstid`, not something that needs paraphrasing
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
@@ -64,16 +60,22 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
 | `Throughput_Pressure_Monitor.py` | `gjennomstoremming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
-| `Backlog_Aging_Distribution.py` | `sak_alder_fordeling` | Daily snapshot of open-case age buckets, per clock (Tidsbruk/Bransjetid) — `TODAY()`-dependent trend |
-| `Caseworker_Load_Concentration.py` | `saksbehandler_konsentrasjon` | Gini coefficient of workload concentration — rank-based math, `TODAY()`-dependent trend |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
 `START_YEAR = 2015` is a top-of-file constant, not a shared config — it's duplicated as a
 literal in four scripts: `CUSUM_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
 `Throughput_Pressure_Monitor.py`, `Phase_Bottleneck_Detector.py`. If the earliest reliable
 year in your Lakehouse changes, update it in all four — there's no single place that fixes
-it for every script. (`Backlog_Aging_Distribution.py` and `Caseworker_Load_Concentration.py`
-snapshot currently-open cases and don't filter by year; `Kostra.py` pulls whatever SSB has.)
+it for every script. (`Kostra.py` pulls whatever SSB has.)
+
+Two things that used to be scripts here — daily-open-case age buckets and a persisted
+Gini-concentration trend — were retired: a nightly pipeline plus an ever-growing table was
+too much standing infrastructure for a future maintainer without a coding background to
+keep running, for signals that don't need day-by-day history. See git history for
+`Backlog_Aging_Distribution.py`/`sak_alder_fordeling` if that view is ever needed again;
+`Caseworker_Load_Concentration` survived as a live DAX measure instead (see
+`Caseworker_Load_Concentration_POWERBI_DAX.md`) since it's still worth having as a current
+signal, just not a trend.
 
 All (except `Kostra.py`) run nightly after the main data pipeline.
 
@@ -159,57 +161,24 @@ explaining the flag.
 - **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)
 - **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`
 
-## In-flight (currently-open) state
-
-This scores cases that are **still open**, before a problem shows up in the closed-case
-ratio — today's state is live DAX, only the day-by-day trend needs a script, since
-`TODAY()`-dependent values have no memory of what they looked like yesterday.
-
-### Backlog_Aging_Distribution.py
-
-Two clocks, not one blended age: **`Tidsbruk`** (accumulated time on our side — the real
-internal-performance signal) and **`Bransjetid`** (accumulated time waiting on the client
-— not our team's performance, and can run up to roughly 1000 days). A pure calendar-age
-version blends the two, making a case stuck on the client look identical to one stuck on
-us. Both are confirmed monotonic accumulators (`Tidsbruk + Bransjetid` always equals total
-elapsed days since `startmilepaeldato`), so no "which clock is running now" detection is
-needed — a case can carry both figures at once, bucketed separately (`bucket_age()`,
-buckets `0-30`/`31-60`/`61-90`/`91-180`/`181-365`/`365+`, applied identically to each —
-widened from an original `180+` catch-all once it became clear `Bransjetid`'s range needed
-the extra tail resolution). The completion-status column on the fact table isn't used — the
-two accumulators already say everything this page needs. A negative value on either column
-is guarded to `NULL` rather than allowed to produce a nonsensical bucket, even though
-neither should ever go negative given they're accumulators.
-
-On the leder-rapport page itself, the two clocks aren't given equal visual weight —
-`Tidsbruk` gets the full bucket-distribution-plus-P90 treatment as the headline (it's ours
-to act on), `Bransjetid` is a single reference count ("X cases waiting 365+ days on
-Bransjetid"). That's an actionability distinction, not a comprehension one — `Tidsbruk`
-and `Bransjetid` are standard terms here and stay as the actual panel titles. The full
-`Bransjetid` breakdown still exists as a measure for the analytiker-rapport if someone
-wants to dig in.
-
-Today's shape (both clocks) is live DAX (see `Backlog_Aging_Distribution_POWERBI_DAX.md`,
-Del 1); the script writes only the daily `sak_alder_fordeling` age-bucket snapshot per
-clock (Del 2) — one `INSERT INTO ... SELECT`, pure Spark SQL (`percentile_approx` + a
-`CASE` expression), now with a `klokke` column distinguishing `Tidsbruk` from
-`Bransjetid`. `bucket_age()` stays in the script as the tested spec
-`aldersgruppe_case_sql()` generates its SQL `CASE` from.
-
 ## Workload
 
-### Caseworker_Load_Concentration.py
+### Caseworker load concentration
 
 Is active caseload concentrating on a few caseworkers within a team, even while the
-team's aggregate numbers look fine? Today's per-person counts/shares are live DAX
-(`Faser[saksbehandler]` is already in the model — see
-`Caseworker_Load_Concentration_POWERBI_DAX.md`, Del 1); the script writes only the daily
-Gini-coefficient snapshot (Del 2), since rank-based Lorenz-curve math genuinely can't be a
-DAX measure.
+team's aggregate numbers look fine? Entirely live DAX, no script — per-person
+counts/shares (`Faser[saksansvarlig]` is already in the model) and the
+Gini coefficient itself, via a `RANKX`/`SUMX` iterator over the current enhet x indikator
+context, not a persisted trend table. See `Caseworker_Load_Concentration_POWERBI_DAX.md`
+for the full measure set and the tradeoff (current signal only, no day-by-day history).
 
-- `saksbehandler_konsentrasjon` stores enhet x indikator aggregates only, never a per-person breakdown — individual-level flagging is out of scope for this layer, same reasoning as `CUSUM_Changepoint.py`'s drilldown exclusion. Gini is computed per indikator rather than blended across an enhet's indicators, since indicator effort/complexity isn't comparable and isn't in the data — a blended enhet-level Gini could mask concentration on a heavier indicator behind a pile of lighter ones.
-- **Key constants:** `MIN_SAKSBEHANDLERE` (3) — Gini on 1-2 people is meaningless, gates `tilstrekkelig_volum`
-- `SAKSBEHANDLER_COL` (`saksansvarlig`) is confirmed against the Lakehouse schema
+- Gini is scoped to enhet x indikator, never blended across an enhet's indicators (indicator
+  effort/complexity isn't comparable and isn't in the data — blending could mask
+  concentration on a heavier indicator behind a pile of lighter ones) and never broken down
+  per person — individual-level flagging is out of scope for this layer, same reasoning as
+  `CUSUM_Changepoint.py`'s drilldown exclusion.
+- Gini on 1-2 people is meaningless — gated to enhet x indikator combinations with 3+ active
+  caseworkers.
 
 ## External ingestion (not a governance algorithm)
 
