@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS analyser.cusum_analyse (
     kjoere_id        STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Stigende/Synkende/Stabil — samme ord som Trendretning_POWERBI_DAX.md, slik at et bord-nivå mål kan lese denne kolonnen direkte uten oversettelse. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato.'
+COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Stigende/Synkende/Stabil, slik at et bord-nivå mål kan lese denne kolonnen direkte uten oversettelse. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato (se CUSUM_Changepoint_POWERBI_DAX.md).'
 """)
 
 spark.sql("""
@@ -288,9 +288,9 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY)
         fixed mu/sigma before running the CUSUM recursion.
 
     Returns DataFrame with cusum_pos, cusum_neg, signal, signal_direction.
-    signal_direction is always one of Stigende/Synkende/Stabil — same vocabulary
-    as Trendretning_POWERBI_DAX.md's SWITCH output, so a board-level DAX measure
-    can read this column directly instead of translating it.
+    signal_direction is always one of Stigende/Synkende/Stabil, so a board-level
+    DAX measure can read this column directly instead of translating it (see
+    CUSUM_Changepoint_POWERBI_DAX.md).
     """
     if len(series) < 8:
         return None

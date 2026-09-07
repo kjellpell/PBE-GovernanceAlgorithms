@@ -12,11 +12,42 @@ Datakilder:
   each step is the same class of sequential logic that made the throughput monitor's
   streak measure fragile — not something to fake in a measure). The raw underlying value
   (Fristprosent/Behandlingstid/Produksjonsdifferanse) is deliberately **not** stored here
-  — it's the same live DAX measure used everywhere else in this repo (`Trendretning_POWERBI_DAX.md`'s
-  monthly measures for `granularitet = "Månedlig"`; build the analogous weekly version —
-  same pattern, a weekly `Kalender` grain instead of monthly — if you need a weekly raw line).
+  — it's a live DAX measure against `Faser` for `granularitet = "Månedlig"` (see
+  "Grunnmål" below; build the analogous weekly version — same pattern, a weekly `Kalender`
+  grain instead of monthly — if you need a weekly raw line).
 - `analyser.pelt_analyse`
 - `analyser.pelt_analyse_detaljer`
+
+## Grunnmål (rå verdi, per måned, live DAX — ikke lagret i `cusum_analyse`)
+
+Antagelser: `Faser` — the fact table (`saksbehandling.faser`), containing `indikator`,
+`sluttmilepaeldato`, `startmilepaeldato`, `frist_dager`, `innenfor_frist`, `tidsbruk`;
+`Kalender` — a standard date table marked as the model's Date Table, `Kalender[Dato]`
+related to `Faser[sluttmilepaeldato]` (use `startmilepaeldato` as well for
+`Produksjonsdifferanse`, per the original script's `COALESCE`-based period).
+
+```DAX
+Fristprosent (måned) =
+DIVIDE(
+    CALCULATE(COUNTROWS(Faser), Faser[innenfor_frist] = TRUE()),
+    CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[frist_dager]))
+)
+```
+
+```DAX
+Behandlingstid (måned) =
+AVERAGE(Faser[tidsbruk])
+```
+
+```DAX
+Produksjonsdifferanse (måned) =
+CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[startmilepaeldato]))
+    - CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[sluttmilepaeldato]))
+```
+
+These are the raw values the board line chart plots and `cusum_analyse`'s signal is
+judged against — `run_cusum` reads the same underlying `Faser` history, just via Spark
+instead of DAX.
 
 ## Visualforslag
 
@@ -63,9 +94,8 @@ CALCULATE(
 ) = TRUE()
 ```
 
-`signalretning` is written as `Stigende`/`Synkende`/`Stabil` — the same vocabulary
-`Trendretning_POWERBI_DAX.md`'s DAX measures produce — precisely so a board-level trend
-card can read it with no translation layer:
+`signalretning` is written as `Stigende`/`Synkende`/`Stabil` — plain board vocabulary,
+precisely so a board-level trend card can read it with no translation layer:
 
 ```DAX
 Trendretning (CUSUM) =
@@ -75,11 +105,9 @@ CALCULATE(
 )
 ```
 
-This is the one to put on a board card instead of the CUSUM line chart: it's the real,
+This is the one to put on a board card instead of the CUSUM line chart: the real,
 statistically-tested signal (anchored-baseline CUSUM, not a rolling self-referential
-threshold), but it reads exactly like the plain-DAX `Trendretning` measures the board
-already sees for indicators without a CUSUM baseline yet — no chart, no `cusum_positiv`/
-`cusum_negativ` numbers, one word.
+threshold), as one plain word — no chart, no `cusum_positiv`/`cusum_negativ` numbers.
 
 ```DAX
 Antall aktive signaler =

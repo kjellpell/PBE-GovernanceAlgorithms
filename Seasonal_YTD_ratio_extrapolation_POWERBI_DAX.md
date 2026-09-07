@@ -40,7 +40,7 @@ deadline over produced faser, that month. That is why the line swings — a weak
 up in full, not diluted by the months before it. A cumulative YTD line barely moves by
 autumn and can't drop several points in one step.
 
-This is the same quantity as `Fristprosent (måned)` in `Trendretning_POWERBI_DAX.md`,
+This is the same quantity as `Fristprosent (måned)` in `CUSUM_Changepoint_POWERBI_DAX.md`,
 written differently — they give the same headline numbers, but do not assume from that
 alone that their filters are identical underneath. They aren't automatically: `[Produserte
 faser]` is its own measure,

@@ -75,12 +75,6 @@ Throughput_Pressure_Monitor and Phase_Bottleneck_Detector were briefly native DA
 — the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
 role DAX has no clean primitive for, exactly the "possible but not simple" case above.
 
-## Live DAX pages — no script, computed directly against Faser
-
-| Page (see `*_POWERBI_DAX.md`) | Replaces the removed script |
-|---|---|
-| `Trendretning` | Rolling-average trend direction (was `EWMA.py`) |
-
 ## Closed-case trend, drift, and forecast
 
 ### CUSUM_Changepoint.py
@@ -92,23 +86,23 @@ on both monthly and weekly series.
 - **External dependency:** `pip install ruptures` (PELT only — CUSUM runs without it)
 - **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` (anchored baseline window for mu/sigma), `CUSUM_MIN_POST_BASELINE_OBS`
 - `signal` is boolean; `signalretning`/`endringsretning` use `Stigende`/`Synkende`/`Stabil` —
-  the same vocabulary `Trendretning_POWERBI_DAX.md`'s DAX measures output, so a board-level
-  measure can read `cusum_analyse[signalretning]` directly with no translation SWITCH
-  (`endringsretning` in `pelt_analyse` is never `Stabil` — a changepoint row only exists
-  when a shift was actually detected)
+  plain board vocabulary, so a board-level measure can read `cusum_analyse[signalretning]`
+  directly with no translation SWITCH (`endringsretning` in `pelt_analyse` is never
+  `Stabil` — a changepoint row only exists when a shift was actually detected)
 - mu/sigma come from a fixed, anchored baseline window (the series' first N observations), not the whole history — a slow persistent drift would otherwise get partially absorbed into "normal" and dampen detection
-- `cusum_analyse` stores only `cusum_positiv`/`cusum_negativ`/`signal` — the raw value is a live DAX measure (see `CUSUM_Changepoint_POWERBI_DAX.md`)
+- `cusum_analyse` stores only `cusum_positiv`/`cusum_negativ`/`signal` — the raw value is a
+  live DAX measure (`Fristprosent`/`Behandlingstid`/`Produksjonsdifferanse (måned)`; see
+  `CUSUM_Changepoint_POWERBI_DAX.md`)
+- Board/governance trend direction (`Stigende`/`Synkende`/`Stabil`) is `Trendretning (CUSUM)`
+  in `CUSUM_Changepoint_POWERBI_DAX.md` — the anchored-baseline CUSUM signal read directly,
+  not a separately-computed DAX slope; every indicator has 20+ years of history, more than
+  enough to build a CUSUM baseline from
 
 **`pelt_analyse_detaljer`** breaks the most recent changepoint down by `enhet`/`fasetittel`, reusing PELT's before/after window instead of re-running detection.
 - Only drills into changepoints within `RECENT_CHANGEPOINT_DAYS` (90) days old
 - Saksbehandler is excluded — too thin per-segment volume, and individual-level flagging is out of scope
 - `bidrag_til_endring` is each segment's volume-weighted share of the aggregate shift
 - `tilstrekkelig_volum = FALSE` marks segments below `MIN_SEGMENT_OBS` (10) — don't trust these
-
-### Trendretning (live DAX — see `Trendretning_POWERBI_DAX.md`)
-
-Board/governance trend direction (`Stigende`/`Synkende`/`Stabil`) from the slope of a
-rolling average — 6-month window for board reporting, 3-month for operational.
 
 ### Seasonal_YTD_ratio_extrapolation.py
 
