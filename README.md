@@ -68,8 +68,14 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 | `Caseworker_Load_Concentration.py` | `saksbehandler_konsentrasjon` | Gini coefficient of workload concentration — rank-based math, `TODAY()`-dependent trend |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
-All scripts share `START_YEAR = 2015` at the top — adjust to match the earliest reliable
-data in your Lakehouse. All (except `Kostra.py`) run nightly after the main data pipeline.
+`START_YEAR = 2015` is a top-of-file constant, not a shared config — it's duplicated as a
+literal in four scripts: `CUSUM_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
+`Throughput_Pressure_Monitor.py`, `Phase_Bottleneck_Detector.py`. If the earliest reliable
+year in your Lakehouse changes, update it in all four — there's no single place that fixes
+it for every script. (`Backlog_Aging_Distribution.py` and `Caseworker_Load_Concentration.py`
+snapshot currently-open cases and don't filter by year; `Kostra.py` pulls whatever SSB has.)
+
+All (except `Kostra.py`) run nightly after the main data pipeline.
 
 Throughput_Pressure_Monitor and Phase_Bottleneck_Detector were briefly native DAX; reverted
 — the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
@@ -203,7 +209,7 @@ DAX measure.
 
 - `saksbehandler_konsentrasjon` stores enhet x indikator aggregates only, never a per-person breakdown — individual-level flagging is out of scope for this layer, same reasoning as `CUSUM_Changepoint.py`'s drilldown exclusion. Gini is computed per indikator rather than blended across an enhet's indicators, since indicator effort/complexity isn't comparable and isn't in the data — a blended enhet-level Gini could mask concentration on a heavier indicator behind a pile of lighter ones.
 - **Key constants:** `MIN_SAKSBEHANDLERE` (3) — Gini on 1-2 people is meaningless, gates `tilstrekkelig_volum`
-- `SAKSBEHANDLER_COL` is unverified against the Lakehouse schema — verify before relying on this script
+- `SAKSBEHANDLER_COL` (`saksansvarlig`) is confirmed against the Lakehouse schema
 
 ## External ingestion (not a governance algorithm)
 

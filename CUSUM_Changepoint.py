@@ -61,7 +61,7 @@ CUSUM_BASELINE_MONTHLY      = 12
 CUSUM_BASELINE_WEEKLY       = 26
 CUSUM_MIN_POST_BASELINE_OBS = 4   # need at least this many points after the baseline to test anything
 
-DRILLDOWN_DIMENSIONS     = ["enhet", "fasetittel"]  # verify these column names against the Lakehouse schema
+DRILLDOWN_DIMENSIONS     = ["enhet", "fasetittel"]  # confirmed against the Lakehouse schema
 MIN_SEGMENT_OBS          = 10   # segments below this are marked utilstrekkelig_volum, not tested
 RECENT_CHANGEPOINT_DAYS  = 90   # only drill into changepoints still recent enough to be actionable
 
