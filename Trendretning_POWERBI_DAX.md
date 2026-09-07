@@ -190,6 +190,71 @@ måned-til-måned-endring — `0.02` (2 prosentpoeng over 3 måneder) er en rime
 utgangsverdi, ikke `0.002`. Samme mønster gjelder for `Behandlingstid`/
 `Produksjonsdifferanse`, med hver sin skala.
 
+### Selvkalibrert terskel (unngå å gjette et tall)
+
+En fast terskel har ett problem uansett hvilket tall man velger: hvor "mye" en indikator
+normalt svinger fra kvartal til kvartal er ikke det samme fra indikator til indikator.
+`0.02` kan være riktig for en stabil indikator og ren støy for en urolig en — det er ikke
+et tegn på at man bare ikke har funnet det riktige tallet ennå, det er et tegn på at ett
+fast tall ikke er riktig verktøy.
+
+Løsningen: la terskelen være **standardavviket til indikatorens egne historiske
+kvartal-mot-kvartal-endringer**, i stedet for en konstant. Et utslag telles da som
+"Stigende"/"Synkende" bare når det er stort *for akkurat denne indikatoren*, ikke mot et
+tall noen skrev inn en gang.
+
+```DAX
+Fristprosent helning terskel (selvkalibrert) =
+VAR SisteDatoMedData = [Siste dato med data]
+VAR MaanedsluttDatoer =
+    FILTER(
+        ALL(Kalender[Dato]),
+        Kalender[Dato] = EOMONTH(Kalender[Dato], 0)
+            && Kalender[Dato] <= SisteDatoMedData
+    )
+VAR HistoriskeHelninger =
+    ADDCOLUMNS(
+        MaanedsluttDatoer,
+        "@Helning",
+        VAR GjeldendeDato = Kalender[Dato]
+        RETURN
+            CALCULATE(
+                [Fristprosent helning rask (3 mnd)],
+                FILTER(ALL(Kalender), Kalender[Dato] = GjeldendeDato)
+            )
+    )
+VAR AntallMultiplikator = 1  -- hev til 1,5-2 hvis signalet slår ut for ofte
+RETURN
+    AntallMultiplikator *
+    STDEVX.P(
+        FILTER(HistoriskeHelninger, NOT ISBLANK([@Helning])),
+        [@Helning]
+    )
+```
+
+```DAX
+Fristprosent trendretning (selvkalibrert) =
+VAR Helning = [Fristprosent helning rask (3 mnd)]
+VAR Terskel = [Fristprosent helning terskel (selvkalibrert)]
+RETURN
+    SWITCH(
+        TRUE(),
+        ISBLANK(Helning) || ISBLANK(Terskel), "Stabil",
+        Helning > Terskel, "Stigende",
+        Helning < -Terskel, "Synkende",
+        "Stabil"
+    )
+```
+
+`MaanedsluttDatoer` samples every month-end with real data (not just true quarter
+boundaries), so the standard deviation is computed over a rolling sample of 3-month
+swings, not a handful of non-overlapping quarters — more data points, same underlying
+`helning rask (3 mnd)` measure evaluated "as if" each historical month-end were the
+latest date. `AntallMultiplikator` is the one knob left to tune, and it means something
+concrete (how many standard deviations of this indicator's own normal quarterly wobble
+count as a real signal), unlike a bare percentage-point constant that means nothing
+outside the one indicator it was picked for.
+
 Samme helningsmønster for de to andre måltallene (bytt ut `[Fristprosent glidende snitt
 sakte (6 mnd)]`-referansen med den tilsvarende måltall-versjonen):
 
