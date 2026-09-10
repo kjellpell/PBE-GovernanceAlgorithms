@@ -291,6 +291,12 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY)
         (including the baseline window itself) is standardised against this
         fixed mu/sigma before running the CUSUM recursion.
 
+    The accumulator that crosses h is reset to 0 the same period it fires
+    (standard CUSUM/SPC practice) — otherwise it saturates permanently
+    after the first sustained shift and can never register a later
+    recovery or a second, separate shift; a board-level "how are we doing
+    now" signal must be able to move in both directions in this way.
+
     Returns DataFrame with cusum_pos, cusum_neg, signal, signal_direction.
     signal_direction is always one of Stigende/Synkende/Stabil, so a board-level
     DAX measure can read this column directly instead of translating it (see
@@ -317,14 +323,21 @@ def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY)
 
     cusum_pos = np.zeros(len(standardised))
     cusum_neg = np.zeros(len(standardised))
+    signal    = np.zeros(len(standardised), dtype=bool)
+    retning   = np.full(len(standardised), "Stabil", dtype=object)
 
     for i in range(1, len(standardised)):
         cusum_pos[i] = max(0, cusum_pos[i-1] + standardised[i] - k)
         cusum_neg[i] = max(0, cusum_neg[i-1] - standardised[i] - k)
 
-    signal     = (cusum_pos > h) | (cusum_neg > h)
-    retning    = np.where(cusum_pos > h, "Stigende",
-                 np.where(cusum_neg > h, "Synkende", "Stabil"))
+        if cusum_pos[i] > h:
+            signal[i]    = True
+            retning[i]   = "Stigende"
+            cusum_pos[i] = 0.0
+        elif cusum_neg[i] > h:
+            signal[i]    = True
+            retning[i]   = "Synkende"
+            cusum_neg[i] = 0.0
 
     return pd.DataFrame({
         "cusum_pos":       cusum_pos,
