@@ -170,9 +170,21 @@ band on a monthly rate would mean the model is hiding variation it has actually 
 - Undertekst: `[Prognose intervalltekst]` — "90 % KI: 79–89 %"
 - Farge: `[Prognose RAG]` mot `alert_config`
 
+**Sett tallformatet på `[Prognose årslutt]` til Percentage (0 %) i visualet, ellers viser
+kortet en rå desimalbrøk.** The measure returns the same 0–1 fraction as the
+`prognose_aarsslutt` column — it is not pre-multiplied by 100 — so left at Power BI's
+default "General" number format, the banner's big number renders as `0.84` while
+`[Prognose intervalltekst]` right underneath it, which builds its own string with
+`FORMAT(..., "0 %")`, correctly reads `79–89 %`. That mismatch — the headline number as a
+bare decimal next to a correctly formatted percentage subtitle — is a display setting the
+measure itself can't carry; it has to be set on the card visual (or on the measure's Format
+property in the model), not fixed by editing the DAX.
+
 #### 3) Oppsummeringstabell
 - `indikator`, `[Prognose årslutt]`, `[Prognose CI lower]`, `[Prognose CI upper]`
 - Sortering: `[Prognose årslutt]` asc
+- Same fix applies here: all three columns are fractions and need Percentage format set in
+  the table visual, or the table shows numbers next to the KPI page's percentages.
 
 ### DAX-forslag
 
