@@ -76,7 +76,12 @@ CUSUM_RECOVERY_PERIODS      = 3
 
 DRILLDOWN_DIMENSIONS     = ["enhet", "fasetittel"]  # confirmed against the Lakehouse schema
 MIN_SEGMENT_OBS          = 10   # segments below this are marked utilstrekkelig_volum, not tested
-RECENT_CHANGEPOINT_DAYS  = 90   # only drill into changepoints still recent enough to be actionable
+# Only drill into changepoints still recent enough to be actionable. Per
+# granularity: PELT needs min_size=6 periods after a breakpoint, so the most
+# recent possible monthly changepoint is already ~6 months old — a 90-day
+# window could never admit one.
+RECENT_CHANGEPOINT_DAYS  = {"Månedlig": 240, "Ukentlig": 90}
+PELT_MIN_SIZE            = 6
 
 
 # =============================================================================
@@ -134,6 +139,8 @@ CREATE TABLE IF NOT EXISTS analyser.pelt_analyse_detaljer (
     gjennomsnitt_etter          DOUBLE,
     endringsstoerrelse          DOUBLE,
     bidrag_til_endring          DOUBLE,
+    bidrag_rate                 DOUBLE,
+    bidrag_miks                 DOUBLE,
     antall_observasjoner_foer   INT,
     antall_observasjoner_etter  INT,
     tilstrekkelig_volum         BOOLEAN     NOT NULL,
@@ -141,7 +148,7 @@ CREATE TABLE IF NOT EXISTS analyser.pelt_analyse_detaljer (
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Nedbryting av siste pelt_analyse-endringspunkt per indikator/maaltall, fordelt på enhet og fasetittel. endringspunkt_id er samme verdi som i pelt_analyse for raden dette bryter ned — bruk den som relasjonsnøkkel i den semantiske modellen (én-til-mange fra pelt_analyse). bidrag_til_endring er segmentets andel av det totale skiftet (summerer omtrent til pelt_analyse.endringsstoerrelse). tilstrekkelig_volum=false betyr for få observasjoner til å stole på tallene.'
+COMMENT 'Nedbryting av siste pelt_analyse-endringspunkt per indikator/maaltall, fordelt på enhet og fasetittel. endringspunkt_id er samme verdi som i pelt_analyse for raden dette bryter ned — bruk den som relasjonsnøkkel i den semantiske modellen (én-til-mange fra pelt_analyse). Før/etter-vinduet er det samme som PELT brukte (forrige til neste endringspunkt), delt ved første dag i endringsperioden. bidrag_til_endring er segmentets andel av det totale skiftet = bidrag_rate (segmentet ble bedre/verre: vekt etter × endring) + bidrag_miks (segmentet ble større/mindre: vektendring × verdi før). For Produksjonsdifferanse er verdiene per periode og bidrag_miks er 0. tilstrekkelig_volum=false betyr for få observasjoner til å stole på tallene.'
 """)
 
 print("Output tables ready")
@@ -359,6 +366,15 @@ def _periode_to_date(period_int, granularitet):
             ) from exc
 
 
+def _periode_to_start_date(period_int, granularitet):
+    """First day of a YYYYMM month or the Monday of an ISO YYYYWW week."""
+    year = int(period_int) // 100
+    unit = int(period_int) % 100
+    if granularitet == "Månedlig":
+        return date(year, unit, 1)
+    return pd.Timestamp.fromisocalendar(year, unit, 1).date()
+
+
 def make_endringspunkt_id(indikator, maaltall, granularitet, analyse_dato):
     """Shared join key between pelt_analyse and pelt_analyse_detaljer —
     Power BI relationships need a single column, not the underlying
@@ -555,6 +571,27 @@ def _pelt_l2(values, min_size, penalty):
     return sorted(breakpoints)
 
 
+def _pelt_penalty(values):
+    """BIC-style penalty for a mean-shift (L2) cost: 2 * sigma^2 * log(n),
+    the standard calibration (Yao, 1988). sigma is the NOISE level, estimated
+    robustly from first differences: 1.4826 * MAD(diff) / sqrt(2). The plain
+    np.std(values) of the whole series also counts the shifts themselves as
+    noise, which inflates the penalty and hides exactly the changes PELT is
+    looking for. Returns None for a constant series (nothing to detect)."""
+    values = np.asarray(values, dtype="float64")
+    diffs  = np.diff(values)
+    if len(diffs) == 0:
+        return None
+    sigma = 1.4826 * np.median(np.abs(diffs - np.median(diffs))) / np.sqrt(2)
+    if not np.isfinite(sigma) or sigma == 0:
+        # MAD is 0 when most differences are identical (e.g. small integer
+        # counts); fall back to the plain std of the differences.
+        sigma = np.std(diffs) / np.sqrt(2)
+    if not np.isfinite(sigma) or sigma == 0:
+        return None
+    return 2 * np.log(len(values)) * sigma ** 2
+
+
 def run_changepoint(series, granularitet):
     """
     PELT changepoint detection (_pelt_l2). Returns list of changepoint
@@ -566,10 +603,10 @@ def run_changepoint(series, granularitet):
     if len(values) < min_obs:
         return []
 
-    # BIC-style penalty for a mean-shift (L2) cost — 2*sigma^2*log(n) is the
-    # standard calibration (Yao, 1988) for this cost.
-    penalty = 2 * np.log(len(values)) * np.std(values) ** 2
-    return _pelt_l2(values, min_size=6, penalty=penalty)
+    penalty = _pelt_penalty(values)
+    if penalty is None:
+        return []
+    return _pelt_l2(values, min_size=PELT_MIN_SIZE, penalty=penalty)
 
 
 # Per-måltall value expression and date column, reused by the drilldown
@@ -593,14 +630,15 @@ METRIC_SQL = {
 # branch in run_drilldown (_production_drilldown_sql), not a METRIC_SQL entry.
 
 
-def _production_drilldown_sql(indikator_escaped, dimensjon, breakpoint_str):
+def _production_drilldown_sql(indikator_escaped, dimensjon, window):
     """Starts (by start date) and ends (by end date) per segment on each side
-    of the breakpoint. verdi = started - ended, antall = started + ended."""
+    of the breakpoint, inside PELT's before/after window.
+    verdi = started - ended (a total for the side), antall = started + ended."""
     def side(date_col, startet, avsluttet):
         return f"""
             SELECT
                 pr.{dimensjon} AS segment,
-                CASE WHEN {date_col} < DATE'{breakpoint_str}' THEN 'foer' ELSE 'etter' END AS periode,
+                CASE WHEN {date_col} < DATE'{window["split"]}' THEN 'foer' ELSE 'etter' END AS periode,
                 {startet} AS startet,
                 {avsluttet} AS avsluttet
             FROM saksbehandling.faser pr
@@ -608,8 +646,8 @@ def _production_drilldown_sql(indikator_escaped, dimensjon, breakpoint_str):
             WHERE pr.indikator = '{indikator_escaped}'
                 AND pr.indikator NOT LIKE '%avtalt%'
                 AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-                AND {date_col} IS NOT NULL
-                AND YEAR({date_col}) >= {START_YEAR}
+                AND {date_col} >= DATE'{window["start"]}'
+                AND {date_col} <= DATE'{window["end"]}'
                 AND pr.{dimensjon} IS NOT NULL"""
 
     return f"""
@@ -627,14 +665,15 @@ def _production_drilldown_sql(indikator_escaped, dimensjon, breakpoint_str):
     """
 
 
-def _metric_drilldown(indikator_escaped, maaltall, dimensjon, breakpoint_str):
-    """Fristprosent/Behandlingstid per segment on each side of the breakpoint
-    — both are placed by a single date column (METRIC_SQL)."""
+def _metric_drilldown(indikator_escaped, maaltall, dimensjon, window):
+    """Fristprosent/Behandlingstid per segment on each side of the breakpoint,
+    inside PELT's before/after window — both are placed by a single date
+    column (METRIC_SQL)."""
     cfg = METRIC_SQL[maaltall]
     return spark.sql(f"""
         SELECT
             pr.{dimensjon} AS segment,
-            CASE WHEN {cfg['date_col']} < DATE'{breakpoint_str}' THEN 'foer' ELSE 'etter' END AS periode,
+            CASE WHEN {cfg['date_col']} < DATE'{window["split"]}' THEN 'foer' ELSE 'etter' END AS periode,
             {cfg['value_expr']} AS verdi,
             COUNT(*) AS antall
         FROM saksbehandling.faser pr
@@ -642,77 +681,131 @@ def _metric_drilldown(indikator_escaped, maaltall, dimensjon, breakpoint_str):
         WHERE pr.indikator = '{indikator_escaped}'
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-            AND YEAR({cfg['date_col']}) >= {START_YEAR}
+            AND {cfg['date_col']} >= DATE'{window["start"]}'
+            AND {cfg['date_col']} <= DATE'{window["end"]}'
             AND {cfg['extra_where']}
             AND pr.{dimensjon} IS NOT NULL
         GROUP BY pr.{dimensjon},
-            CASE WHEN {cfg['date_col']} < DATE'{breakpoint_str}' THEN 'foer' ELSE 'etter' END
+            CASE WHEN {cfg['date_col']} < DATE'{window["split"]}' THEN 'foer' ELSE 'etter' END
     """).toPandas()
 
 
-def run_drilldown(indikator, maaltall, granularitet, breakpoint_dato, dimensjon):
+def decompose_segments(segments, additive, perioder_foer=1, perioder_etter=1):
     """
-    Split the flagged indikator/maaltall shift by one dimension (enhet or
-    fasetittel), using the same før/etter boundary PELT already found.
-    Returns a list of row dicts, one per segment with enough data.
+    Per-segment before/after values and each segment's contribution to the
+    aggregate shift, from rows (segment, periode in {foer, etter}, verdi,
+    antall).
+
+    Mean/ratio måltall (Fristprosent, Behandlingstid): the aggregate is the
+    volume-weighted mean of the segments, w = segment antall / total antall.
+    Its shift splits exactly into, per segment,
+        bidrag_rate = w_etter * (v_etter - v_foer)   (the segment got better/worse)
+        bidrag_miks = (w_etter - w_foer) * v_foer    (the segment got bigger/smaller)
+    and bidrag_til_endring = bidrag_rate + bidrag_miks. Summed over segments
+    that equals the aggregate's after-minus-before.
+
+    Additive måltall (Produksjonsdifferanse): verdi is a total for the side, so
+    it is divided by that side's number of periods to give a per-period value
+    comparable with pelt_analyse; the aggregate is the plain sum of segments,
+    so there are no weights: bidrag_rate is the segment's own change and
+    bidrag_miks is 0. A segment missing on one side had 0 there.
+
+    Returns a DataFrame indexed by segment.
     """
-    breakpoint_str = breakpoint_dato.isoformat()
-    indikator_escaped = indikator.replace("'", "''")
-
-    if maaltall == "Produksjonsdifferanse":
-        segments = spark.sql(
-            _production_drilldown_sql(indikator_escaped, dimensjon, breakpoint_str)
-        ).toPandas()
-    else:
-        segments = _metric_drilldown(indikator_escaped, maaltall, dimensjon, breakpoint_str)
-
+    cols = ["verdi_foer", "verdi_etter", "antall_foer", "antall_etter",
+            "endring", "bidrag_rate", "bidrag_miks", "bidrag_til_endring",
+            "tilstrekkelig_volum"]
     if segments.empty:
-        return []
+        return pd.DataFrame(columns=cols)
 
-    segments["verdi"]  = pd.to_numeric(segments["verdi"], errors="coerce").astype("float64")
-    segments["antall"] = pd.to_numeric(segments["antall"], errors="coerce").fillna(0).astype("int64")
+    seg = segments.copy()
+    seg["verdi"]  = pd.to_numeric(seg["verdi"], errors="coerce").astype("float64")
+    seg["antall"] = pd.to_numeric(seg["antall"], errors="coerce").fillna(0).astype("int64")
 
-    pivot = segments.pivot(index="segment", columns="periode", values=["verdi", "antall"])
+    pivot = seg.pivot(index="segment", columns="periode", values=["verdi", "antall"])
     pivot.columns = [f"{a}_{b}" for a, b in pivot.columns]
     pivot = pivot.reindex(columns=["verdi_foer", "verdi_etter", "antall_foer", "antall_etter"])
+    pivot[["antall_foer", "antall_etter"]] = pivot[["antall_foer", "antall_etter"]].fillna(0)
 
-    total_antall_foer  = pivot["antall_foer"].sum()
-    total_antall_etter = pivot["antall_etter"].sum()
+    if additive:
+        pivot["verdi_foer"]  = pivot["verdi_foer"].fillna(0) / max(perioder_foer, 1)
+        pivot["verdi_etter"] = pivot["verdi_etter"].fillna(0) / max(perioder_etter, 1)
+        pivot["bidrag_rate"] = pivot["verdi_etter"] - pivot["verdi_foer"]
+        pivot["bidrag_miks"] = 0.0
+    else:
+        pivot = pivot.dropna(subset=["verdi_foer", "verdi_etter"])
+        total_foer  = pivot["antall_foer"].sum()
+        total_etter = pivot["antall_etter"].sum()
+        if total_foer and total_etter:
+            w_foer  = pivot["antall_foer"] / total_foer
+            w_etter = pivot["antall_etter"] / total_etter
+            pivot["bidrag_rate"] = w_etter * (pivot["verdi_etter"] - pivot["verdi_foer"])
+            pivot["bidrag_miks"] = (w_etter - w_foer) * pivot["verdi_foer"]
+        else:
+            pivot["bidrag_rate"] = np.nan
+            pivot["bidrag_miks"] = np.nan
+
+    pivot["endring"] = pivot["verdi_etter"] - pivot["verdi_foer"]
+    pivot["bidrag_til_endring"] = pivot["bidrag_rate"] + pivot["bidrag_miks"]
+    pivot["tilstrekkelig_volum"] = (
+        (pivot["antall_foer"] >= MIN_SEGMENT_OBS) & (pivot["antall_etter"] >= MIN_SEGMENT_OBS)
+    )
+    return pivot[cols]
+
+
+def run_drilldown(indikator, maaltall, granularitet, cp, dimensjon):
+    """
+    Split the flagged indikator/maaltall shift by one dimension (enhet or
+    fasetittel), on exactly PELT's before/after window: from the start of the
+    before-segment (cp["segment_start"]) to the end of the after-segment
+    (cp["segment_end"]), split at the first day of the breakpoint period
+    (cp["endringspunkt_start"]). Returns a list of row dicts, one per segment.
+    """
+    indikator_escaped = indikator.replace("'", "''")
+    window = {
+        "start": cp["segment_start"].isoformat(),
+        "split": cp["endringspunkt_start"].isoformat(),
+        "end":   cp["segment_end"].isoformat(),
+    }
+    additive = maaltall == "Produksjonsdifferanse"
+
+    if additive:
+        segments = spark.sql(
+            _production_drilldown_sql(indikator_escaped, dimensjon, window)
+        ).toPandas()
+    else:
+        segments = _metric_drilldown(indikator_escaped, maaltall, dimensjon, window)
+
+    parts = decompose_segments(
+        segments, additive,
+        perioder_foer=int(cp["antall_observasjoner_foer"]),
+        perioder_etter=int(cp["antall_observasjoner_etter"]),
+    )
+
+    def _r(v):
+        return round(float(v), 4) if pd.notna(v) else None
 
     rows = []
-    for segment, r in pivot.iterrows():
-        if pd.isna(r["verdi_foer"]) or pd.isna(r["verdi_etter"]):
-            continue
-
-        tilstrekkelig_volum = (r["antall_foer"] >= MIN_SEGMENT_OBS) and (r["antall_etter"] >= MIN_SEGMENT_OBS)
-
-        # weighted contribution — exact decomposition of the aggregate shift for
-        # mean/ratio måltall; for Produksjonsdifferanse (already additive) the
-        # volume weights cancel out to the raw segment delta.
-        bidrag = None
-        if total_antall_foer and total_antall_etter:
-            bidrag = (
-                (r["antall_etter"] / total_antall_etter) * r["verdi_etter"]
-                - (r["antall_foer"] / total_antall_foer) * r["verdi_foer"]
-            )
-
+    for segment, r in parts.iterrows():
         rows.append({
             "indikator":                  indikator,
             "maaltall":                   maaltall,
             "granularitet":               granularitet,
             "dimensjon":                  dimensjon,
             "dimensjonsverdi":            str(segment),
-            "analyse_dato":               breakpoint_dato,
+            "analyse_dato":               cp["analyse_dato"],
             "endringspunkt_id":           make_endringspunkt_id(
-                indikator, maaltall, granularitet, breakpoint_dato
+                indikator, maaltall, granularitet, cp["analyse_dato"]
             ),
-            "gjennomsnitt_foer":          round(float(r["verdi_foer"]), 4),
-            "gjennomsnitt_etter":         round(float(r["verdi_etter"]), 4),
-            "endringsstoerrelse":         round(float(r["verdi_etter"] - r["verdi_foer"]), 4),
-            "bidrag_til_endring":         round(float(bidrag), 4) if bidrag is not None else None,
+            "gjennomsnitt_foer":          _r(r["verdi_foer"]),
+            "gjennomsnitt_etter":         _r(r["verdi_etter"]),
+            "endringsstoerrelse":         _r(r["endring"]),
+            "bidrag_til_endring":         _r(r["bidrag_til_endring"]),
+            "bidrag_rate":                _r(r["bidrag_rate"]),
+            "bidrag_miks":                _r(r["bidrag_miks"]),
             "antall_observasjoner_foer":  int(r["antall_foer"]),
             "antall_observasjoner_etter": int(r["antall_etter"]),
-            "tilstrekkelig_volum":        bool(tilstrekkelig_volum),
+            "tilstrekkelig_volum":        bool(r["tilstrekkelig_volum"]),
             "kjoert_tidspunkt":           datetime.now(),
             "kjoere_id":                  BATCH_ID,
         })
@@ -746,6 +839,12 @@ def extract_changepoint_stats(series, breakpoints, granularitet):
 
         results.append({
             "analyse_dato":                _periode_to_date(periods[bp], granularitet) if bp < len(periods) else None,
+            # PELT's before/after window, reused by the drill-down: first day of
+            # the before-segment, first day of the breakpoint period (the split),
+            # last day of the after-segment.
+            "segment_start":               _periode_to_start_date(periods[prev], granularitet),
+            "endringspunkt_start":         _periode_to_start_date(periods[bp], granularitet),
+            "segment_end":                 _periode_to_date(periods[next_bp - 1], granularitet),
             "gjennomsnitt_foer":           round(mean_before, 4),
             "gjennomsnitt_etter":          round(mean_after, 4),
             "endringsstoerrelse":          round(shift, 4),
@@ -839,14 +938,17 @@ if changepoint_rows:
         .groupby(["indikator", "maaltall", "granularitet"])
         .tail(1)
     )
-    cutoff = pd.Timestamp.now().date() - pd.Timedelta(days=RECENT_CHANGEPOINT_DAYS)
-    latest_cp = latest_cp[latest_cp["analyse_dato"] >= cutoff]
+    today = pd.Timestamp.now().date()
+    is_recent = [
+        r["analyse_dato"] >= today - pd.Timedelta(days=RECENT_CHANGEPOINT_DAYS[r["granularitet"]])
+        for _, r in latest_cp.iterrows()
+    ]
+    latest_cp = latest_cp[is_recent]
 
     for _, cp in latest_cp.iterrows():
         for dimensjon in DRILLDOWN_DIMENSIONS:
             drilldown_rows += run_drilldown(
-                cp["indikator"], cp["maaltall"], cp["granularitet"],
-                cp["analyse_dato"], dimensjon,
+                cp["indikator"], cp["maaltall"], cp["granularitet"], cp, dimensjon,
             )
 
 print(f"Drilldown rows computed:   {len(drilldown_rows)}")
@@ -900,6 +1002,8 @@ DRILLDOWN_SCHEMA = StructType([
     StructField("gjennomsnitt_etter",         DoubleType(),    True),
     StructField("endringsstoerrelse",         DoubleType(),    True),
     StructField("bidrag_til_endring",         DoubleType(),    True),
+    StructField("bidrag_rate",                DoubleType(),    True),
+    StructField("bidrag_miks",                DoubleType(),    True),
     StructField("antall_observasjoner_foer",  IntegerType(),   True),
     StructField("antall_observasjoner_etter", IntegerType(),   True),
     StructField("tilstrekkelig_volum",        BooleanType(),   False),

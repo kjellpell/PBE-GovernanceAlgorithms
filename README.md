@@ -128,10 +128,20 @@ on both monthly and weekly series.
   separately-computed DAX slope. (It used to read `signalretning`, which is only non-`Stabil`
   in the firing period, so a board card said "stable" every other month during a real decline)
 
+- PELT's penalty uses a robust noise estimate, `1.4826 · MAD(diff(values)) / √2`, not
+  `np.std(values)` — real shifts inflate the plain std, and a large old shift could hide
+  a moderate recent one entirely
+
 **`pelt_analyse_detaljer`** breaks the most recent changepoint down by `enhet`/`fasetittel`, reusing PELT's before/after window instead of re-running detection.
-- Only drills into changepoints within `RECENT_CHANGEPOINT_DAYS` (90) days old
+- The window is PELT's own segment: from the previous breakpoint (or series start) to the
+  next one (or the last complete period), split at the first day of the breakpoint period
+- Only drills into changepoints recent enough to act on: `RECENT_CHANGEPOINT_DAYS` is 240
+  days for monthly, 90 for weekly (a monthly changepoint is always ≥ ~6 months old, since
+  PELT needs 6 periods after it)
 - Saksbehandler is excluded — too thin per-segment volume, and individual-level flagging is out of scope
-- `bidrag_til_endring` is each segment's volume-weighted share of the aggregate shift
+- `bidrag_til_endring` is each segment's volume-weighted share of the aggregate shift, split
+  into `bidrag_rate` (the segment got better/worse) + `bidrag_miks` (the segment got
+  bigger/smaller). For `Produksjonsdifferanse` values are per period and the mix part is 0
 - `tilstrekkelig_volum = FALSE` marks segments below `MIN_SEGMENT_OBS` (10) — don't trust these
 
 ### Seasonal_YTD_ratio_extrapolation.py

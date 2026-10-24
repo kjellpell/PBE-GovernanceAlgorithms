@@ -14,11 +14,12 @@ TREE = ast.parse(SOURCE.read_text())
 FUNCTION_NAMES = {
     "to_float_series", "run_cusum", "extract_changepoint_stats", "_periode_to_date", "_pelt_l2",
     "production_balance", "iso_week_key", "standardise_seasonal",
+    "_periode_to_start_date", "_pelt_penalty", "decompose_segments",
 }
 CONSTANT_NAMES = {
     "CUSUM_K", "CUSUM_H",
     "CUSUM_BASELINE_YEARS", "CUSUM_MIN_BASELINE_YEARS", "CUSUM_MIN_POST_BASELINE_OBS",
-    "CUSUM_RECOVERY_PERIODS",
+    "CUSUM_RECOVERY_PERIODS", "MIN_SEGMENT_OBS", "PELT_MIN_SIZE", "RECENT_CHANGEPOINT_DAYS",
 }
 
 EXTRACTED = []
@@ -33,7 +34,7 @@ for node in TREE.body:
     ):
         EXTRACTED.append(node)
 
-NAMESPACE = {"np": np, "pd": pd, "timedelta": timedelta}
+NAMESPACE = {"np": np, "pd": pd, "timedelta": timedelta, "date": date}
 exec(compile(ast.Module(body=EXTRACTED, type_ignores=[]), str(SOURCE), "exec"), NAMESPACE)
 
 run_cusum                   = NAMESPACE["run_cusum"]
@@ -45,6 +46,10 @@ _periode_to_date            = NAMESPACE["_periode_to_date"]
 standardise_seasonal        = NAMESPACE["standardise_seasonal"]
 CUSUM_MIN_POST_BASELINE_OBS = NAMESPACE["CUSUM_MIN_POST_BASELINE_OBS"]
 CUSUM_RECOVERY_PERIODS      = NAMESPACE["CUSUM_RECOVERY_PERIODS"]
+_pelt_penalty               = NAMESPACE["_pelt_penalty"]
+decompose_segments          = NAMESPACE["decompose_segments"]
+PELT_MIN_SIZE               = NAMESPACE["PELT_MIN_SIZE"]
+RECENT_CHANGEPOINT_DAYS     = NAMESPACE["RECENT_CHANGEPOINT_DAYS"]
 
 
 def monthly_series(values, first_year=2015):
@@ -253,6 +258,155 @@ class CusumStateTests(unittest.TestCase):
             for s in range(30)
         ])
         self.assertLess(share_not_stabil, 0.1)
+
+
+class ChangepointWindowDatesTests(unittest.TestCase):
+    def test_window_dates_bound_the_before_and_after_segments(self):
+        values = [0, 0, 0, 5, 5, 5, 10, 10, 10]
+        periods = [202401 + i for i in range(9)]
+        series = pd.Series(values, index=periods, dtype="float64")
+
+        first, second = extract_changepoint_stats(series, breakpoints=[3, 6], granularitet="Månedlig")
+
+        self.assertEqual(first["segment_start"], date(2024, 1, 1))
+        self.assertEqual(first["endringspunkt_start"], date(2024, 4, 1))
+        self.assertEqual(first["segment_end"], date(2024, 6, 30))
+        self.assertEqual(second["segment_start"], date(2024, 4, 1))
+        self.assertEqual(second["segment_end"], date(2024, 9, 30))
+        # analyse_dato stays the END of the breakpoint period (unchanged key)
+        self.assertEqual(first["analyse_dato"], date(2024, 4, 30))
+
+    def test_weekly_window_dates_are_monday_and_sunday(self):
+        periods = [202450, 202451, 202452, 202501, 202502, 202503]
+        series = pd.Series([0, 0, 0, 5, 5, 5], index=periods, dtype="float64")
+
+        (cp,) = extract_changepoint_stats(series, breakpoints=[3], granularitet="Ukentlig")
+
+        self.assertEqual(cp["segment_start"], date(2024, 12, 9))
+        self.assertEqual(cp["endringspunkt_start"], date(2024, 12, 30))
+        self.assertEqual(cp["segment_end"], date(2025, 1, 19))
+
+    def test_most_recent_possible_monthly_changepoint_is_inside_the_window(self):
+        # A breakpoint needs PELT_MIN_SIZE months after it. With the last
+        # complete month ending yesterday, its analyse_dato is ~5-6 months back.
+        oldest_possible_days = (PELT_MIN_SIZE + 1) * 31
+        self.assertGreaterEqual(RECENT_CHANGEPOINT_DAYS["Månedlig"], oldest_possible_days)
+        self.assertEqual(RECENT_CHANGEPOINT_DAYS["Ukentlig"], 90)
+
+
+class DecomposeSegmentsTests(unittest.TestCase):
+    @staticmethod
+    def rows(spec):
+        return pd.DataFrame(
+            [{"segment": seg, "periode": per, "verdi": v, "antall": n} for seg, per, v, n in spec]
+        )
+
+    def test_rate_plus_mix_sums_to_aggregate_shift(self):
+        # Team A: 80% -> 60% and grows; team B: 90% -> 90% and shrinks.
+        segs = self.rows([
+            ("A", "foer", 0.8, 50), ("A", "etter", 0.6, 80),
+            ("B", "foer", 0.9, 50), ("B", "etter", 0.9, 20),
+        ])
+
+        out = decompose_segments(segs, additive=False)
+
+        agg_foer = (0.8 * 50 + 0.9 * 50) / 100
+        agg_etter = (0.6 * 80 + 0.9 * 20) / 100
+        self.assertAlmostEqual(out["bidrag_til_endring"].sum(), agg_etter - agg_foer)
+        np.testing.assert_allclose(out["bidrag_rate"] + out["bidrag_miks"], out["bidrag_til_endring"])
+        # B's rate didn't change: all of its contribution is mix.
+        self.assertAlmostEqual(out.loc["B", "bidrag_rate"], 0.0)
+        self.assertAlmostEqual(out.loc["B", "bidrag_miks"], (0.2 - 0.5) * 0.9)
+        self.assertAlmostEqual(out.loc["A", "bidrag_rate"], 0.8 * (0.6 - 0.8))
+
+    def test_matches_old_single_contribution(self):
+        segs = self.rows([
+            ("A", "foer", 10.0, 30), ("A", "etter", 14.0, 40),
+            ("B", "foer", 20.0, 70), ("B", "etter", 18.0, 60),
+        ])
+
+        out = decompose_segments(segs, additive=False)
+
+        old = (40 / 100) * 14.0 - (30 / 100) * 10.0
+        self.assertAlmostEqual(out.loc["A", "bidrag_til_endring"], old)
+
+    def test_segment_missing_on_one_side_is_skipped_for_rates(self):
+        segs = self.rows([("A", "foer", 0.8, 50), ("A", "etter", 0.6, 50), ("C", "etter", 0.5, 20)])
+
+        out = decompose_segments(segs, additive=False)
+
+        self.assertEqual(out.index.tolist(), ["A"])
+
+    def test_additive_metric_is_per_period_with_no_mix(self):
+        # Produksjonsdifferanse: totals over 6 periods before, 3 after.
+        segs = self.rows([
+            ("A", "foer", 12.0, 100), ("A", "etter", 30.0, 60),
+            ("B", "etter", -3.0, 15),
+        ])
+
+        out = decompose_segments(segs, additive=True, perioder_foer=6, perioder_etter=3)
+
+        self.assertAlmostEqual(out.loc["A", "verdi_foer"], 2.0)
+        self.assertAlmostEqual(out.loc["A", "verdi_etter"], 10.0)
+        self.assertAlmostEqual(out.loc["A", "bidrag_rate"], 8.0)
+        self.assertAlmostEqual(out.loc["B", "verdi_foer"], 0.0)
+        self.assertTrue((out["bidrag_miks"] == 0).all())
+        self.assertFalse(out.loc["B", "tilstrekkelig_volum"])
+
+    def test_volume_flag(self):
+        segs = self.rows([
+            ("A", "foer", 0.8, 9), ("A", "etter", 0.6, 50),
+            ("B", "foer", 0.8, 10), ("B", "etter", 0.6, 10),
+        ])
+
+        out = decompose_segments(segs, additive=False)
+
+        self.assertFalse(out.loc["A", "tilstrekkelig_volum"])
+        self.assertTrue(out.loc["B", "tilstrekkelig_volum"])
+
+
+class PeltPenaltyTests(unittest.TestCase):
+    def test_two_shift_series_is_fully_detected(self):
+        # A large old shift (0 -> 6) followed by a moderate recent one
+        # (6 -> 7.5). The old np.std(values) penalty counts the big shift as
+        # noise and never finds the recent one; the robust noise estimate does.
+        hits_robust = hits_old = 0
+        for seed in range(50):
+            values = np.random.default_rng(seed).normal(0, 1, 120) + np.repeat([0.0, 6.0, 7.5], 40)
+            old_penalty = 2 * np.log(len(values)) * np.std(values) ** 2
+            for penalty, is_robust in ((_pelt_penalty(values), True), (old_penalty, False)):
+                bps = _pelt_l2(values, min_size=PELT_MIN_SIZE, penalty=penalty)
+                found = any(abs(b - 40) <= 4 for b in bps) and any(abs(b - 80) <= 5 for b in bps)
+                if found and is_robust:
+                    hits_robust += 1
+                elif found:
+                    hits_old += 1
+        self.assertGreaterEqual(hits_robust, 45)
+        self.assertLessEqual(hits_old, 5)
+
+    def test_robust_sigma_ignores_level_shifts(self):
+        rng = np.random.default_rng(1)
+        noise = rng.normal(0, 1, 90)
+        shifted = noise + np.repeat([0, 10, 0], 30)
+
+        ratio = _pelt_penalty(shifted) / _pelt_penalty(noise)
+
+        self.assertLess(ratio, 1.5)
+        self.assertGreater(np.std(shifted) ** 2 / np.std(noise) ** 2, 10)
+
+    def test_flat_series_rarely_flags_a_changepoint_with_robust_penalty(self):
+        # 130 points ~ a monthly series since 2015. (The MAD estimate is
+        # noisier than np.std on pure noise: ~10% false positives at 60
+        # points, ~5% at 130.)
+        false_positives = 0
+        for seed in range(100):
+            values = np.random.default_rng(seed).normal(10, 1, 130)
+            if _pelt_l2(values, min_size=PELT_MIN_SIZE, penalty=_pelt_penalty(values)):
+                false_positives += 1
+        self.assertLess(false_positives, 10)
+
+    def test_constant_series_has_no_penalty(self):
+        self.assertIsNone(_pelt_penalty(np.full(30, 4.0)))
 
 
 class ProductionBalanceTests(unittest.TestCase):

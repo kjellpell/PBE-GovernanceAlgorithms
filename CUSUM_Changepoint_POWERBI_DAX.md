@@ -75,7 +75,21 @@ er ikke med, så `[Siste CUSUM-dato]` er siste hele måned/uke.
 
 ### 4) Drill-down etter endringspunkt
 - Relasjon: `pelt_analyse.endringspunkt_id` -> `pelt_analyse_detaljer.endringspunkt_id`
-- Vis bidrag per `dimensjonsverdi` med volumfelt.
+- Vis bidrag per `dimensjonsverdi` med volumfelt — gjerne `bidrag_rate` og `bidrag_miks`
+  som to stablede stolper.
+- Drill-down lages bare for siste endringspunkt per serie, og bare når det er nytt nok:
+  240 dager for månedlige serier, 90 dager for ukentlige. (PELT trenger minst seks
+  perioder etter et endringspunkt, så et månedlig endringspunkt er alltid minst ~6
+  måneder gammelt; med 90 dager kom månedlige serier aldri med.)
+- Før/etter er **samme vindu som PELT brukte**: fra forrige endringspunkt (eller
+  seriestart) til neste endringspunkt (eller siste hele periode), delt ved første dag i
+  endringsperioden. Tidligere ble all historikk siden 2015 delt i to.
+- `bidrag_til_endring` = `bidrag_rate` + `bidrag_miks`:
+  - `bidrag_rate` — segmentet ble bedre/verre (vekt etter × endring i segmentets verdi)
+  - `bidrag_miks` — segmentet ble større/mindre (endring i vekt × verdi før)
+  - Summert over segmentene gir de totalt skiftet i det volumvektede snittet.
+  - For `Produksjonsdifferanse` er `gjennomsnitt_foer`/`etter` per periode (sum delt på
+    antall perioder i vinduet), og `bidrag_miks` er 0 — måltallet er en sum, ikke et snitt.
 
 ## DAX-forslag
 
@@ -168,5 +182,8 @@ CALCULATE(
 ## Tolkning
 - CUSUM = tidlig driftssignal. `tilstand` = gjeldende retning; `signal` = perioden den
   ble bekreftet.
-- PELT = bekreftet skift med tidspunkt og størrelse.
+- PELT = bekreftet skift med tidspunkt og størrelse. Straffeleddet bruker et robust
+  støyestimat (MAD av førstedifferanser), så et stort gammelt skift ikke skjuler et
+  moderat nytt. Ulempen er litt flere falske endringspunkter i helt flate serier (ca. 5 %
+  på en månedsserie siden 2015).
 - `pelt_analyse_detaljer` svarer på hvor skiftet kommer fra (enhet/fasetittel).
