@@ -24,6 +24,11 @@ seg ut og serien var bare «fortsatt åpne faser etter startperiode» — den ga
 samme definisjon: tell starter mot startdato og avslutninger mot sluttdato (to
 `USERELATIONSHIP`-roller mot datotabellen), ikke én datokolonne.
 
+Ukentlige rader har `analyse_dato` = søndagen i ISO-uken. Uke 1 kan derfor starte i
+desember (30.12.2024 tilhører uke 1 i 2025). En datotabell som skal matche ukeradene må
+bruke ISO-år og ISO-uke (`WEEKNUM(dato, 21)` og ISO-året fra torsdagen i uken), ikke
+`YEAR(dato)`.
+
 ## Visualforslag
 
 ### 1) CUSUM-linje (tidlig varsling)

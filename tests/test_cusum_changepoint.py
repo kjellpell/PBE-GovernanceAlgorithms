@@ -2,6 +2,8 @@ import ast
 import unittest
 from pathlib import Path
 
+from datetime import date, timedelta
+
 import numpy as np
 import pandas as pd
 
@@ -11,7 +13,7 @@ TREE = ast.parse(SOURCE.read_text())
 
 FUNCTION_NAMES = {
     "to_float_series", "run_cusum", "extract_changepoint_stats", "_periode_to_date", "_pelt_l2",
-    "production_balance",
+    "production_balance", "iso_week_key",
 }
 CONSTANT_NAMES = {
     "CUSUM_K", "CUSUM_H",
@@ -30,13 +32,15 @@ for node in TREE.body:
     ):
         EXTRACTED.append(node)
 
-NAMESPACE = {"np": np, "pd": pd}
+NAMESPACE = {"np": np, "pd": pd, "timedelta": timedelta}
 exec(compile(ast.Module(body=EXTRACTED, type_ignores=[]), str(SOURCE), "exec"), NAMESPACE)
 
 run_cusum                   = NAMESPACE["run_cusum"]
 extract_changepoint_stats   = NAMESPACE["extract_changepoint_stats"]
 _pelt_l2                    = NAMESPACE["_pelt_l2"]
 production_balance          = NAMESPACE["production_balance"]
+iso_week_key                = NAMESPACE["iso_week_key"]
+_periode_to_date            = NAMESPACE["_periode_to_date"]
 CUSUM_BASELINE_MONTHLY      = NAMESPACE["CUSUM_BASELINE_MONTHLY"]
 CUSUM_MIN_POST_BASELINE_OBS = NAMESPACE["CUSUM_MIN_POST_BASELINE_OBS"]
 
@@ -129,6 +133,42 @@ class ProductionBalanceTests(unittest.TestCase):
         balance = production_balance(started, ended)
 
         self.assertEqual(balance["verdi"].tolist(), [2.0])
+
+
+class IsoWeekKeyTests(unittest.TestCase):
+    def test_new_year_dates_use_the_iso_year(self):
+        # YEAR(d) * 100 + WEEKOFYEAR(d) gave 202401, 202252 and 202153 here.
+        self.assertEqual(iso_week_key(date(2024, 12, 30)), 202501)
+        self.assertEqual(iso_week_key(date(2022, 1, 1)), 202152)
+        self.assertEqual(iso_week_key(date(2021, 1, 1)), 202053)
+
+    def test_ordinary_dates_unchanged(self):
+        self.assertEqual(iso_week_key(date(2024, 6, 12)), 202424)
+
+    def test_matches_python_isocalendar_for_every_day_2015_to_2030(self):
+        d = date(2015, 1, 1)
+        while d < date(2031, 1, 1):
+            year, week, _ = d.isocalendar()
+            self.assertEqual(iso_week_key(d), year * 100 + week, d)
+            d += timedelta(days=1)
+
+    def test_every_key_converts_back_to_a_date_in_that_week(self):
+        for d in (date(2024, 12, 30), date(2022, 1, 1), date(2021, 1, 1)):
+            sunday = _periode_to_date(iso_week_key(d), "Ukentlig")
+            self.assertEqual(sunday.weekday(), 6)
+            self.assertTrue(0 <= (sunday - d).days <= 6)
+
+
+class PeriodeToDateTests(unittest.TestCase):
+    def test_week_53_of_a_53_week_year_is_valid(self):
+        self.assertEqual(_periode_to_date(202053, "Ukentlig"), date(2021, 1, 3))
+
+    def test_week_53_of_a_52_week_year_raises_a_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "ISO-uke 202153"):
+            _periode_to_date(202153, "Ukentlig")
+
+    def test_month_end(self):
+        self.assertEqual(_periode_to_date(202402, "Månedlig"), date(2024, 2, 29))
 
 
 class PeltL2FallbackTests(unittest.TestCase):

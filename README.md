@@ -93,6 +93,9 @@ on both monthly and weekly series.
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
   (`Produksjonsdifferanse` = faser started in the period by start date minus faser ended
   in the period by end date)
+- Weekly series are keyed `ISO year * 100 + ISO week` (`iso_week_sql`), so 30 Dec 2024
+  is week 202501, not 202401. Mixing calendar year with ISO week mis-placed New Year
+  days and would crash the nightly run on a date like 1 Jan 2021 (`202153` does not exist)
 - **No install step, no external dependency.** PELT runs on a built-in pure-NumPy
   implementation with an L2 (mean-shift) cost (`_pelt_l2` in `CUSUM_Changepoint.py`) —
   detects a shift in the average, not a volatility change with the average unchanged.

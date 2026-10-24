@@ -42,7 +42,7 @@ from pyspark.sql.types import (
 )
 import pandas as pd
 import numpy as np
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 spark = SparkSession.builder.getOrCreate()
 BATCH_ID      = datetime.now().strftime("%Y%m%dT%H%M%S")
@@ -132,6 +132,29 @@ COMMENT 'Nedbryting av siste pelt_analyse-endringspunkt per indikator/maaltall, 
 
 print("Output tables ready")
 
+# =============================================================================
+# CELL 1B — ISO week key
+# =============================================================================
+
+def iso_week_sql(date_col):
+    """Spark SQL for a YYYYWW weekly key that uses the ISO year, not the
+    calendar year. WEEKOFYEAR is the ISO week, so it must be paired with the
+    ISO year — the year of that week's Thursday (Spark WEEKDAY: 0 = Monday).
+    YEAR(d) * 100 + WEEKOFYEAR(d) put 2024-12-30 (ISO 2025-W01) in 202401 and
+    2021-01-01 (ISO 2020-W53) in 202153, which does not exist and crashed
+    _periode_to_date."""
+    return (
+        f"(YEAR(DATE_ADD({date_col}, 3 - WEEKDAY({date_col}))) * 100"
+        f" + WEEKOFYEAR({date_col}))"
+    )
+
+
+def iso_week_key(d):
+    """Python mirror of iso_week_sql, for tests: ISO year * 100 + ISO week."""
+    thursday = d + timedelta(days=3 - d.weekday())
+    return thursday.year * 100 + d.isocalendar()[1]
+
+
 
 # =============================================================================
 # CELL 2 — Load data
@@ -216,8 +239,7 @@ monthly_ended = spark.sql(f"""
 weekly_frist = spark.sql(f"""
     SELECT
         pr.indikator,
-        (YEAR(pr.sluttmilepaeldato) * 100
-         + WEEKOFYEAR(pr.sluttmilepaeldato))       AS period,
+        {iso_week_sql('pr.sluttmilepaeldato')} AS period,
         CASE
             WHEN COUNT(CASE WHEN pr.frist_dager IS NOT NULL
                             THEN 1 END) = 0 THEN NULL
@@ -234,16 +256,15 @@ weekly_frist = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
-        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
-        ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
+        GROUP BY pr.indikator, {iso_week_sql('pr.sluttmilepaeldato')}
+        ORDER BY pr.indikator, period
 """).toPandas()
 
 # Weekly production balance — same split as monthly_prod
 weekly_started = spark.sql(f"""
         SELECT
                 pr.indikator,
-                (YEAR(pr.startmilepaeldato) * 100
-                 + WEEKOFYEAR(pr.startmilepaeldato)) AS period,
+                {iso_week_sql('pr.startmilepaeldato')} AS period,
                 COUNT(1) AS antall_startet
         FROM saksbehandling.faser pr
         INNER JOIN felles.indikator indikator
@@ -252,14 +273,13 @@ weekly_started = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
-        GROUP BY pr.indikator, YEAR(pr.startmilepaeldato), WEEKOFYEAR(pr.startmilepaeldato)
+        GROUP BY pr.indikator, {iso_week_sql('pr.startmilepaeldato')}
 """).toPandas()
 
 weekly_ended = spark.sql(f"""
         SELECT
                 pr.indikator,
-                (YEAR(pr.sluttmilepaeldato) * 100
-                 + WEEKOFYEAR(pr.sluttmilepaeldato)) AS period,
+                {iso_week_sql('pr.sluttmilepaeldato')} AS period,
                 COUNT(1) AS antall_avsluttet
         FROM saksbehandling.faser pr
         INNER JOIN felles.indikator indikator
@@ -268,7 +288,7 @@ weekly_ended = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
-        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
+        GROUP BY pr.indikator, {iso_week_sql('pr.sluttmilepaeldato')}
 """).toPandas()
 
 
@@ -307,8 +327,15 @@ def _periode_to_date(period_int, granularitet):
     if granularitet == "Månedlig":
         return (pd.Timestamp(year, unit, 1) + pd.offsets.MonthEnd(0)).date()
     else:
-        # ISO week — return the Sunday (last day) of that week
-        return pd.Timestamp.fromisocalendar(year, unit, 7).date()
+        # ISO year + ISO week (see iso_week_sql) — return the Sunday (last
+        # day) of that week
+        try:
+            return pd.Timestamp.fromisocalendar(year, unit, 7).date()
+        except ValueError as exc:
+            raise ValueError(
+                f"Ugyldig ISO-uke {period_int}: {year} har ikke uke {unit}. "
+                "Ukenøkkelen må bygges med ISO-år (iso_week_sql), ikke kalenderår."
+            ) from exc
 
 
 def make_endringspunkt_id(indikator, maaltall, granularitet, analyse_dato):
