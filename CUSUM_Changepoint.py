@@ -181,22 +181,22 @@ def iso_week_key(d):
 # CELL 2 — Load data
 # =============================================================================
 
-# Monthly frist% per indicator
+# Monthly frist% per indicator — the official definition, identical to
+# Seasonal_YTD_ratio_extrapolation.py and the report's [Produserte faser]:
+# denominator = produced faser (both start and slutt set), numerator = those
+# with innenfor_frist = 1, %avtalt% indicators INCLUDED. (Until October 2026
+# this used frist_dager IS NOT NULL as the denominator and excluded %avtalt%,
+# so CUSUM and the forecast measured two different Fristprosent.)
 monthly_frist = spark.sql(f"""
     SELECT
         pr.indikator,
         (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
-        CASE
-            WHEN COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END) = 0 THEN NULL
-            ELSE COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0
-                 / COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END)
-        END AS verdi
+        COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0 / COUNT(*) AS verdi
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikator
         ON indikator.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
-            AND pr.frist_dager IS NOT NULL
-            AND pr.indikator NOT LIKE '%avtalt%'
+            AND pr.startmilepaeldato IS NOT NULL
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
             AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
@@ -260,25 +260,17 @@ monthly_ended = spark.sql(f"""
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
-# Weekly frist% per indicator
+# Weekly frist% per indicator — same official definition as monthly_frist
 weekly_frist = spark.sql(f"""
     SELECT
         pr.indikator,
         {iso_week_sql('pr.sluttmilepaeldato')} AS period,
-        CASE
-            WHEN COUNT(CASE WHEN pr.frist_dager IS NOT NULL
-                            THEN 1 END) = 0 THEN NULL
-            ELSE COUNT(CASE WHEN pr.innenfor_frist = 1
-                            THEN 1 END) * 1.0
-                 / COUNT(CASE WHEN pr.frist_dager IS NOT NULL
-                              THEN 1 END)
-        END                                                         AS verdi
+        COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0 / COUNT(*) AS verdi
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikator
         ON indikator.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
-            AND pr.frist_dager IS NOT NULL
-            AND pr.indikator NOT LIKE '%avtalt%'
+            AND pr.startmilepaeldato IS NOT NULL
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
             AND pr.sluttmilepaeldato < {WEEK_CUTOFF_SQL}
@@ -612,17 +604,17 @@ def run_changepoint(series, granularitet):
 # Per-måltall value expression and date column, reused by the drilldown
 # queries below — mirrors the aggregation logic in CELL 2.
 METRIC_SQL = {
+    # Official Fristprosent: produced faser, %avtalt% included (see monthly_frist)
     "Fristprosent": {
-        "value_expr": """CASE WHEN COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END) = 0 THEN NULL
-                          ELSE COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0
-                               / COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END) END""",
+        "value_expr":  "COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0 / COUNT(*)",
         "date_col":    "pr.sluttmilepaeldato",
-        "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.frist_dager IS NOT NULL",
+        "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.startmilepaeldato IS NOT NULL",
     },
     "Behandlingstid": {
         "value_expr":  "AVG(pr.tidsbruk)",
         "date_col":    "pr.sluttmilepaeldato",
-        "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.tidsbruk IS NOT NULL",
+        "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.tidsbruk IS NOT NULL"
+                       " AND pr.indikator NOT LIKE '%avtalt%'",
     },
 }
 # Produksjonsdifferanse has no single date column — starts are placed by
@@ -679,7 +671,6 @@ def _metric_drilldown(indikator_escaped, maaltall, dimensjon, window):
         FROM saksbehandling.faser pr
         INNER JOIN felles.indikator indikator ON indikator.pk_indikator = pr.indikator
         WHERE pr.indikator = '{indikator_escaped}'
-            AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND {cfg['date_col']} >= DATE'{window["start"]}'
             AND {cfg['date_col']} <= DATE'{window["end"]}'

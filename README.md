@@ -98,6 +98,10 @@ Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per in
 on both monthly and weekly series.
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
+- `Fristprosent` has one official definition across the repo: produced faser (start and
+  slutt both set) as denominator, `innenfor_frist = 1` as numerator, `%avtalt%`
+  indicators included — the same as `Seasonal_YTD_ratio_extrapolation.py` and the
+  report's `[Produserte faser]`. The other two måltall still exclude `%avtalt%`
   (`Produksjonsdifferanse` = faser started in the period by start date minus faser ended
   in the period by end date)
 - Weekly series are keyed `ISO year * 100 + ISO week` (`iso_week_sql`), so 30 Dec 2024

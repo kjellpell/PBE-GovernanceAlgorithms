@@ -16,6 +16,13 @@ Datakilder:
 - `analyser.pelt_analyse`
 - `analyser.pelt_analyse_detaljer`
 
+`Fristprosent` følger den **offisielle definisjonen** (samme som
+`Seasonal_YTD_ratio_extrapolation.py` og rapportens `[Produserte faser]`): nevner =
+produserte faser (både start- og sluttmilepæl satt), teller = de med `innenfor_frist = 1`,
+og `%avtalt%`-indikatorer er **med**. Fram til oktober 2026 brukte CUSUM
+`frist_dager IS NOT NULL` som nevner og holdt `%avtalt%` utenfor. `Behandlingstid` og
+`Produksjonsdifferanse` holder fortsatt `%avtalt%` utenfor.
+
 `Produksjonsdifferanse` = faser **startet** i perioden (etter `startmilepaeldato`) minus
 faser **avsluttet** i perioden (etter `sluttmilepaeldato`). Til og med september 2026 ble
 begge tellingene lagt i perioden for `COALESCE(slutt, start)`, så avsluttede faser nullet
