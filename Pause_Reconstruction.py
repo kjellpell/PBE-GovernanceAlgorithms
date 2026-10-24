@@ -10,14 +10,31 @@
 #   faser are with us and at risk right now" is plain live DAX
 #   (At_Risk_Open_Cases_POWERBI_DAX.md). What a live measure can't give is
 #   HISTORY: how many were with us, waiting, and at risk last week, last year.
-#   The "asked for / received completion" milestones let us rebuild that for
-#   every week back to START_YEAR, so no ever-growing snapshot table is needed.
+#   The "asked for / received completion" milestones let us rebuild it for
+#   every week the milestones cover.
+#
+# Milestone window:
+#   The milestones only go back ~13 months. History therefore starts at the
+#   earliest milestone date (HISTORIKK_FRA, found from the data unless set
+#   below) — before that there is no way to tell with-us from waiting, so no
+#   weeks are written for it. Faser already on hold when the window opens show
+#   up as a receipt without a request; for faser started before the window that
+#   is read as a pause from the window start (pair_pauses). Each run overwrites
+#   only the weeks inside the current window and keeps older weeks from earlier
+#   runs, so if the source window rolls forward the history still accumulates.
+#
+#   Intake, completions and the TOTAL open count need no milestones (start and
+#   end dates are enough), so flyt_ukentlig carries those back to START_YEAR.
+#   Only the split — with us / waiting / at risk / past deadline — is limited to
+#   the milestone window; outside it those columns are empty (NULL), not zero.
+#   This replaces the retired Throughput_Pressure_Monitor's team-level flow.
 #
 # Method:
 #   1. Pause/resume milestones per fase are paired into pause intervals
 #      (pair_pauses). A pause opens on the first request and closes on the
-#      next receipt; repeated requests while open, and receipts without an
-#      open request, are counted and ignored.
+#      next receipt; repeated requests while open are ignored (counted). A
+#      receipt without an open request is ignored (counted) — except as the
+#      first event of a fase that started before the window, see above.
 #   2. Per fase, the time between start and end (or today) is split into
 #      active segments (with us) and pause segments (waiting), and the clock =
 #      active days (phase_segments, klokke_dager).
@@ -26,20 +43,23 @@
 #      (crossing_day). Once crossed, a fase stays in that state while with us.
 #   4. Weekly stocks (with us / waiting / at risk / past deadline at each ISO
 #      week's Sunday) are counted from those intervals (count_covering), and
-#      weekly flows (received, completed, withdrawn, put on hold) are binned by
+#      weekly flows (received, completed, put on hold) are binned by
 #      ISO week.
 #
 # Validation, printed every run (read it after the first run):
 #   - reconstructed clock vs the system's own `tidsbruk`, and pause days vs
-#     `bransjetid`, for closed faser — share within VALIDERING_TOLERANSE_DAGER;
+#     `bransjetid`, for closed faser that lie wholly inside the window — share
+#     within VALIDERING_TOLERANSE_DAGER;
 #   - reconstructed current state vs `Status = "Under behandling"` for open faser.
 #   If agreement is low, the milestone names below are probably incomplete or
 #   the system uses a different clock rule — the history in flyt_ukentlig is
 #   then approximate. The at-risk page (live tidsbruk) is unaffected either way.
 #
-# Output tables (overwritten nightly — rebuilt from source, not appended):
-#   analyser.fase_klokke    — one row per fase: clock, pause days, state
-#   analyser.flyt_ukentlig  — one row per ISO week x enhet x indikator
+# Output tables:
+#   analyser.fase_klokke    — one row per fase alive inside the window: clock,
+#                             pause days, state (overwritten nightly)
+#   analyser.flyt_ukentlig  — one row per ISO week x enhet x indikator (weeks
+#                             inside the window overwritten; older weeks kept)
 # Power BI/DAX: see Pause_Reconstruction_POWERBI_DAX.md
 #
 # Requires: nothing to install (pandas/numpy/pyspark only).
@@ -56,7 +76,7 @@ from datetime import datetime, date
 
 spark = SparkSession.builder.getOrCreate()  # pyright: ignore[reportAttributeAccessIssue]
 BATCH_ID   = datetime.now().strftime("%Y%m%dT%H%M%S")
-START_YEAR = 2015
+START_YEAR = 2015   # intake/completion/open-total history starts here
 
 # -----------------------------------------------------------------------------
 # Milestone source — ADJUST HERE if the first run stops with a message.
@@ -78,9 +98,11 @@ GJENOPPTA_MILEPELER = [
     "Mottatt tilleggsdokumentasjon",
     "Komplett søknad",
 ]
-TRUKKET_MILEPELER = [
-    "00e Sak trukket/utgått/uaktuell",
-]
+
+# First day the milestones can be trusted. None = the earliest pause/resume
+# milestone date in MILEPEL_TABELL (recommended). Set a date (e.g.
+# date(2025, 10, 1)) only if the earliest milestones are known to be partial.
+HISTORIKK_FRA = None
 
 STATUS_HOS_OSS            = "Under behandling"
 FARESONE_TERSKEL          = 0.75   # same default as the at-risk page's what-if parameter
@@ -122,7 +144,7 @@ def iso_week_key(day):
     return iso[0] * 100 + iso[1]
 
 
-def pair_pauses(events):
+def pair_pauses(events, vindu_start=None, startet_foer_vindu=frozenset()):
     """
     Pair pause/resume events per fase into pause intervals.
 
@@ -134,10 +156,16 @@ def pair_pauses(events):
     resume is processed before a pause, so "received" + "new request" on one
     day closes one pause and opens the next.
 
+    Window start: the milestones only go back to vindu_start. A fase that
+    started before it and whose FIRST event is a receipt was already on hold
+    when the window opened (its request is older than the data), so that
+    receipt closes a pause from vindu_start (counted as antatt_pause_ved_vindusstart).
+
     Returns (intervals, stats): intervals has pk_faser, start, slutt (slutt =
-    UENDELIG if still open); stats counts the ignored events.
+    UENDELIG if still open); stats counts the ignored/assumed events.
     """
-    stats = {"gjentatt_anmodning": 0, "mottatt_uten_anmodning": 0}
+    stats = {"gjentatt_anmodning": 0, "mottatt_uten_anmodning": 0,
+             "antatt_pause_ved_vindusstart": 0}
     rows = []
     if events is None or len(events) == 0:
         return pd.DataFrame(columns=["pk_faser", "start", "slutt"]), stats
@@ -146,12 +174,12 @@ def pair_pauses(events):
         _o=events["hendelse"].map({"gjenoppta": 0, "pause": 1})
     ).sort_values(["pk_faser", "dag", "_o"])
 
-    current_fase, open_start = None, None
+    current_fase, open_start, first = None, None, True
     for fase, dag, hendelse in order[["pk_faser", "dag", "hendelse"]].itertuples(index=False):
         if fase != current_fase:
             if current_fase is not None and open_start is not None:
                 rows.append((current_fase, open_start, UENDELIG))
-            current_fase, open_start = fase, None
+            current_fase, open_start, first = fase, None, True
         if hendelse == "pause":
             if open_start is None:
                 open_start = int(dag)
@@ -159,10 +187,15 @@ def pair_pauses(events):
                 stats["gjentatt_anmodning"] += 1
         else:
             if open_start is None:
-                stats["mottatt_uten_anmodning"] += 1
+                if first and vindu_start is not None and fase in startet_foer_vindu and dag > vindu_start:
+                    rows.append((fase, int(vindu_start), int(dag)))
+                    stats["antatt_pause_ved_vindusstart"] += 1
+                else:
+                    stats["mottatt_uten_anmodning"] += 1
             else:
                 rows.append((fase, open_start, int(dag)))
                 open_start = None
+        first = False
     if current_fase is not None and open_start is not None:
         rows.append((current_fase, open_start, UENDELIG))
 
@@ -239,7 +272,7 @@ def count_covering(starts, ends, points):
             - np.searchsorted(ends, points, side="right"))
 
 
-def build_phase_rows(faser, pauses_by_fase, trukket_faser, today,
+def build_phase_rows(faser, pauses_by_fase, today,
                      terskel=FARESONE_TERSKEL):
     """
     Per fase: clock, pause days, state, and the labelled intervals the weekly
@@ -285,9 +318,10 @@ def build_phase_rows(faser, pauses_by_fase, trukket_faser, today,
             "antall_pauser": len(paused),
             "dager_til_foerste_anmodning": (first_pause - start) if first_pause is not None else None,
             "tidsbruk": r.tidsbruk, "bransjetid": r.bransjetid, "status": r.status,
-            "tilstand": tilstand, "trukket": r.pk_faser in trukket_faser,
+            "tilstand": tilstand,
             "faresone_dag": c_risk, "over_frist_dag": c_over,
         })
+        iv.append((r.enhet, r.indikator, "aapne", start, UENDELIG if end is None else end))
         for a, b in active:
             iv.append((r.enhet, r.indikator, "hos_oss", a, b))
         for a, b in paused:
@@ -301,8 +335,9 @@ def build_phase_rows(faser, pauses_by_fase, trukket_faser, today,
     return phase_rows, intervals
 
 
-STOCK_LABELS = ["hos_oss", "venter_paa_soeker", "i_faresonen", "over_frist"]
-FLOW_LABELS  = ["mottatt", "ferdigstilt", "trukket", "satt_paa_vent"]
+SPLIT_LABELS = ["hos_oss", "venter_paa_soeker", "i_faresonen", "over_frist"]  # need milestones
+STOCK_LABELS = ["aapne"] + SPLIT_LABELS
+FLOW_LABELS  = ["mottatt", "ferdigstilt", "satt_paa_vent"]
 
 
 def weekly_table(intervals, flow_events, week_days):
@@ -339,6 +374,32 @@ def weekly_table(intervals, flow_events, week_days):
     return wide[cols].astype({c: "int64" for c in STOCK_LABELS + FLOW_LABELS})
 
 
+def apply_window(uke, vindu_dag, tidligere=None):
+    """
+    Blank the milestone-dependent columns (SPLIT_LABELS) for weeks before the
+    milestone window, then fill them from an earlier run where one exists.
+
+    uke: weekly_table output. tidligere: DataFrame with uke_dag, enhet,
+    indikator and SPLIT_LABELS from the existing table (weeks before the
+    window that an earlier run, with an earlier window, could still see).
+    Returns a copy with SPLIT_LABELS as nullable Int64.
+    """
+    out = uke.copy()
+    for c in SPLIT_LABELS:
+        out[c] = out[c].astype("Int64")
+    foer = out["uke_dag"] < vindu_dag
+    out.loc[foer, SPLIT_LABELS] = pd.NA
+    if tidligere is not None and len(tidligere):
+        keys = ["uke_dag", "enhet", "indikator"]
+        t = tidligere[keys + SPLIT_LABELS].copy()
+        t = t[t["uke_dag"] < vindu_dag]
+        merged = out.merge(t, on=keys, how="left", suffixes=("", "_tidligere"))
+        for c in SPLIT_LABELS:
+            merged[c] = merged[c].fillna(merged[c + "_tidligere"].astype("Int64"))
+        out = merged[out.columns]
+    return out
+
+
 def agreement(reconstructed, system, tolerance=VALIDERING_TOLERANSE_DAGER):
     """(share within tolerance, median difference, n) over pairs where both are present."""
     r = pd.to_numeric(pd.Series(reconstructed), errors="coerce")
@@ -373,7 +434,7 @@ if mangler:
         f"Kolonner som finnes: {sorted(milepel_kolonner)}"
     )
 
-alle_navn = PAUSE_MILEPELER + GJENOPPTA_MILEPELER + TRUKKET_MILEPELER
+alle_navn = PAUSE_MILEPELER + GJENOPPTA_MILEPELER
 _navn_sql = ", ".join("'" + n.replace("'", "''") + "'" for n in alle_navn)
 funnet = {
     r[0]: r[1] for r in spark.sql(f"""
@@ -394,13 +455,22 @@ if not any(funnet.get(n) for n in PAUSE_MILEPELER) or not any(funnet.get(n) for 
         WHERE LOWER({MILEPEL_NAVN_KOLONNE}) LIKE '%tillegg%'
            OR LOWER({MILEPEL_NAVN_KOLONNE}) LIKE '%komplett%'
            OR LOWER({MILEPEL_NAVN_KOLONNE}) LIKE '%mangel%'
-           OR LOWER({MILEPEL_NAVN_KOLONNE}) LIKE '%trukket%'
     """).collect()]
     raise ValueError(
         "Ingen pause- eller gjenopptakelses-milepæler funnet med navnene i "
         "PAUSE_MILEPELER/GJENOPPTA_MILEPELER. Lignende navn i tabellen: "
         f"{sorted(lignende)}"
     )
+
+if HISTORIKK_FRA is None:
+    HISTORIKK_FRA = spark.sql(f"""
+        SELECT MIN(CAST({MILEPEL_DATO_KOLONNE} AS DATE))
+        FROM {MILEPEL_TABELL}
+        WHERE {MILEPEL_NAVN_KOLONNE} IN ({_navn_sql})
+    """).collect()[0][0]
+VINDU_DAG = to_day(HISTORIKK_FRA)
+print(f"Milepæler fra: {HISTORIKK_FRA} — fordelingen hos oss/venter/faresone bygges fra da; "
+      f"inngang, ferdigstilt og åpne totalt fra {START_YEAR}.")
 
 faser_kolonner = {c.lower() for c in spark.table(FASER_TABELL).columns}
 HAR_BRANSJETID = "bransjetid" in faser_kolonner
@@ -425,13 +495,13 @@ CREATE TABLE IF NOT EXISTS analyser.fase_klokke (
     antall_pauser                INT         NOT NULL,
     dager_til_foerste_anmodning  INT,
     tilstand                     STRING      NOT NULL,
-    trukket                      BOOLEAN     NOT NULL,
+    fullt_dekket                 BOOLEAN     NOT NULL,
     avvik_mot_tidsbruk           DOUBLE,
     kjoert_tidspunkt             TIMESTAMP   NOT NULL,
     kjoere_id                    STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Fristklokke rekonstruert fra milepæler per fase. klokke_dager = dager hos oss (kalenderdager fra start til slutt/i dag minus pause_dager). pause_dager = dager på vent etter anmodning om tilleggsdokumentasjon. tilstand = Hos oss / Venter på søker / Avsluttet. dager_til_foerste_anmodning = dager fra start til første anmodning. avvik_mot_tidsbruk = klokke_dager minus systemets tidsbruk (kontroll; nær 0 betyr at rekonstruksjonen stemmer). trukket = fasen har milepæl for trukket/utgått/uaktuell. For dagens tall: bruk saksbehandling.faser[tidsbruk] direkte.'
+COMMENT 'Fristklokke rekonstruert fra milepæler per fase. klokke_dager = dager hos oss (kalenderdager fra start til slutt/i dag minus pause_dager). pause_dager = dager på vent etter anmodning om tilleggsdokumentasjon. tilstand = Hos oss / Venter på søker / Avsluttet. dager_til_foerste_anmodning = dager fra start til første anmodning. fullt_dekket = fasen startet etter at milepælene begynner; for andre faser mangler pauser fra før vinduet, så klokke/pause er ufullstendige. avvik_mot_tidsbruk = klokke_dager minus systemets tidsbruk (kontroll; nær 0 betyr at rekonstruksjonen stemmer). Bare faser som var åpne en gang i milepælvinduet. For dagens tall: bruk saksbehandling.faser[tidsbruk] direkte.'
 """)
 
 spark.sql("""
@@ -440,19 +510,19 @@ CREATE TABLE IF NOT EXISTS analyser.flyt_ukentlig (
     iso_uke             INT         NOT NULL,
     enhet               STRING      NOT NULL,
     indikator           STRING      NOT NULL,
-    hos_oss             INT         NOT NULL,
-    venter_paa_soeker   INT         NOT NULL,
-    i_faresonen         INT         NOT NULL,
-    over_frist          INT         NOT NULL,
+    aapne               INT         NOT NULL,
+    hos_oss             INT,
+    venter_paa_soeker   INT,
+    i_faresonen         INT,
+    over_frist          INT,
     mottatt             INT         NOT NULL,
     ferdigstilt         INT         NOT NULL,
-    trukket             INT         NOT NULL,
     satt_paa_vent       INT         NOT NULL,
     kjoert_tidspunkt    TIMESTAMP   NOT NULL,
     kjoere_id           STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Ukentlig flythistorikk per enhet og indikator, rekonstruert fra milepæler (ingen snapshot). Beholdninger telles søndag i ISO-uken: hos_oss (åpen, ikke på vent), venter_paa_soeker, i_faresonen (hos oss og fristklokke >= 75 % av frist_dager), over_frist (hos oss og klokke > frist_dager). Strømmer i uken: mottatt (faser startet), ferdigstilt (avsluttet, ikke trukket), trukket, satt_paa_vent (anmodninger sendt). Bare hele uker.'
+COMMENT 'Ukentlig flythistorikk per enhet og indikator. aapne, mottatt og ferdigstilt fra 2015 (start-/sluttdatoer). Fordelingen hos_oss/venter_paa_soeker/i_faresonen/over_frist krever milepæler og er tom (NULL) for uker før milepælene begynner; uker et tidligere kjøreløp kunne se, beholdes. Beholdninger telles søndag i ISO-uken: aapne (åpne totalt), hos_oss (åpen, ikke på vent), venter_paa_soeker, i_faresonen (hos oss og fristklokke >= 75 % av frist_dager), over_frist (hos oss og klokke > frist_dager). Strømmer i uken: mottatt (faser startet), ferdigstilt (avsluttet — samme definisjon som Produserte faser), satt_paa_vent (anmodninger sendt). Bare hele uker.'
 """)
 
 print("fase_klokke og flyt_ukentlig er klare")
@@ -506,8 +576,9 @@ milepeler_pd = milepeler_pd[milepeler_pd["pk_faser"].isin(set(faser_pd["pk_faser
 milepeler_pd["dag"] = milepeler_pd["dato"].map(to_day)
 milepeler_pd["hendelse"] = np.select(
     [milepeler_pd["milepel"].isin(PAUSE_MILEPELER), milepeler_pd["milepel"].isin(GJENOPPTA_MILEPELER)],
-    ["pause", "gjenoppta"], default="trukket",
+    ["pause", "gjenoppta"], default="",
 )
+milepeler_pd = milepeler_pd[milepeler_pd["hendelse"] != ""]
 
 print(f"Faser lastet:     {len(faser_pd):,}")
 print(f"Milepæler lastet: {len(milepeler_pd):,}")
@@ -517,21 +588,25 @@ print(f"Milepæler lastet: {len(milepeler_pd):,}")
 # CELL 4 — Reconstruct pauses, clock and intervals
 # =============================================================================
 
-pauser, pause_stats = pair_pauses(milepeler_pd[milepeler_pd["hendelse"] != "trukket"])
+startet_foer_vindu = set(faser_pd.loc[faser_pd["start"] < VINDU_DAG, "pk_faser"])
+pauser, pause_stats = pair_pauses(milepeler_pd, VINDU_DAG, startet_foer_vindu)
 print(f"Pauseintervaller: {len(pauser):,}  "
       f"(åpne nå: {(pauser['slutt'] == UENDELIG).sum():,}; "
       f"ignorert — gjentatt anmodning: {pause_stats['gjentatt_anmodning']:,}, "
-      f"mottatt uten anmodning: {pause_stats['mottatt_uten_anmodning']:,})")
+      f"mottatt uten anmodning: {pause_stats['mottatt_uten_anmodning']:,}; "
+      f"antatt på vent ved vindusstart: {pause_stats['antatt_pause_ved_vindusstart']:,})")
 
 pauses_by_fase = {}
 for fase, s, e in pauser[["pk_faser", "start", "slutt"]].itertuples(index=False):
     pauses_by_fase.setdefault(fase, []).append((int(s), int(e)))
 
-trukket_faser = set(milepeler_pd.loc[milepeler_pd["hendelse"] == "trukket", "pk_faser"])
-
-phase_rows, intervals = build_phase_rows(faser_pd, pauses_by_fase, trukket_faser, TODAY)
+phase_rows, intervals = build_phase_rows(faser_pd, pauses_by_fase, TODAY)
 fase_df = pd.DataFrame(phase_rows)
-print(f"Faser rekonstruert: {len(fase_df):,}")
+# Once phase rows are a DataFrame, a missing end date is NaN, not None.
+fase_df["slutt"] = fase_df["slutt"].astype(object).where(fase_df["slutt"].notna(), None)
+fase_df["fullt_dekket"] = fase_df["start"] >= VINDU_DAG
+i_vinduet = fase_df["slutt"].map(lambda e: e is None or e >= VINDU_DAG)
+print(f"Faser rekonstruert: {len(fase_df):,} (åpne en gang i milepælvinduet: {int(i_vinduet.sum()):,})")
 
 
 # =============================================================================
@@ -540,9 +615,10 @@ print(f"Faser rekonstruert: {len(fase_df):,}")
 # Read this output after the first run. High agreement = the milestone names
 # and the pause rule match the case system; the weekly history is trustworthy.
 
-lukket = fase_df[fase_df["tilstand"] == "Avsluttet"]
+# Only faser wholly inside the window: older ones miss pauses from before it.
+lukket = fase_df[(fase_df["tilstand"] == "Avsluttet") & fase_df["fullt_dekket"]]
 andel, median, n = agreement(lukket["klokke_dager"], lukket["tidsbruk"])
-print("\nKONTROLL 1 — rekonstruert klokke mot systemets tidsbruk (avsluttede faser):")
+print("\nKONTROLL 1 — rekonstruert klokke mot systemets tidsbruk (avsluttede faser startet i vinduet):")
 if n:
     print(f"  {andel:.1%} innenfor ±{VALIDERING_TOLERANSE_DAGER} dager, median avvik {median:+.1f} dager, n={n:,}")
     per_ind = (
@@ -558,7 +634,7 @@ else:
 
 if HAR_BRANSJETID:
     andel_b, median_b, n_b = agreement(lukket["pause_dager"], lukket["bransjetid"])
-    print("KONTROLL 2 — rekonstruerte pausedager mot systemets bransjetid (avsluttede faser):")
+    print("KONTROLL 2 — rekonstruerte pausedager mot systemets bransjetid (avsluttede faser startet i vinduet):")
     if n_b:
         print(f"  {andel_b:.1%} innenfor ±{VALIDERING_TOLERANSE_DAGER} dager, median avvik {median_b:+.1f} dager, n={n_b:,}")
 
@@ -583,14 +659,11 @@ first_sunday = week_sunday(to_day(date(START_YEAR, 1, 1)))
 last_complete_sunday = week_sunday(TODAY) - 7
 week_days = list(range(first_sunday, last_complete_sunday + 1, 7))
 
-# Once phase rows are a DataFrame, a missing end date is NaN, not None.
-fase_df["slutt"] = fase_df["slutt"].astype(object).where(fase_df["slutt"].notna(), None)
-
 flow_rows = []
 for r in fase_df.itertuples(index=False):
     flow_rows.append((r.enhet, r.indikator, "mottatt", int(r.start)))
     if r.slutt is not None:
-        flow_rows.append((r.enhet, r.indikator, "trukket" if r.trukket else "ferdigstilt", int(r.slutt)))
+        flow_rows.append((r.enhet, r.indikator, "ferdigstilt", int(r.slutt)))
 flow_events = pd.DataFrame(flow_rows, columns=["enhet", "indikator", "etikett", "dag"])
 paa_vent = pauser.merge(fase_df[["pk_faser", "enhet", "indikator"]], on="pk_faser", how="inner")
 if len(paa_vent):
@@ -601,6 +674,20 @@ if len(paa_vent):
     ], ignore_index=True)
 
 uke_df = weekly_table(intervals, flow_events, week_days)
+
+# Split columns: blank before the window, but keep what earlier runs saw there
+# (if the source window rolls forward, those weeks would otherwise be lost).
+tidligere = None
+if "hos_oss" in {c.lower() for c in spark.table("analyser.flyt_ukentlig").columns}:
+    tidligere = spark.sql(f"""
+        SELECT uke_slutt, enhet, indikator, {", ".join(SPLIT_LABELS)}
+        FROM analyser.flyt_ukentlig
+        WHERE uke_slutt < DATE'{HISTORIKK_FRA}' AND hos_oss IS NOT NULL
+    """).toPandas()
+    tidligere["uke_dag"] = tidligere["uke_slutt"].map(to_day) if len(tidligere) else pd.Series(dtype="int64")
+uke_df = apply_window(uke_df, VINDU_DAG, tidligere)
+print(f"Uker med fordeling hos oss/venter: {int(uke_df.loc[uke_df['hos_oss'].notna(), 'uke_dag'].nunique()):,} "
+      f"(fra tidligere kjøringer: {0 if tidligere is None else int(tidligere['uke_dag'].nunique()):,})")
 print(f"\nUkerader: {len(uke_df):,} ({len(week_days):,} uker, "
       f"{from_day(first_sunday)} – {from_day(last_complete_sunday)})")
 
@@ -624,7 +711,7 @@ KLOKKE_SCHEMA = StructType([
     StructField("antall_pauser", IntegerType(), False),
     StructField("dager_til_foerste_anmodning", IntegerType(), True),
     StructField("tilstand", StringType(), False),
-    StructField("trukket", BooleanType(), False),
+    StructField("fullt_dekket", BooleanType(), False),
     StructField("avvik_mot_tidsbruk", DoubleType(), True),
     StructField("kjoert_tidspunkt", TimestampType(), False),
     StructField("kjoere_id", StringType(), False),
@@ -635,7 +722,7 @@ UKE_SCHEMA = StructType([
     StructField("iso_uke", IntegerType(), False),
     StructField("enhet", StringType(), False),
     StructField("indikator", StringType(), False),
-] + [StructField(c, IntegerType(), False) for c in STOCK_LABELS + FLOW_LABELS] + [
+] + [StructField(c, IntegerType(), c in SPLIT_LABELS) for c in STOCK_LABELS + FLOW_LABELS] + [
     StructField("kjoert_tidspunkt", TimestampType(), False),
     StructField("kjoere_id", StringType(), False),
 ])
@@ -652,16 +739,16 @@ klokke_records = [
         None if _num(r.frist_dager) is None else float(r.frist_dager),
         int(r.klokke_dager), int(r.pause_dager), int(r.antall_pauser),
         None if _num(r.dager_til_foerste_anmodning) is None else int(r.dager_til_foerste_anmodning),
-        r.tilstand, bool(r.trukket),
+        r.tilstand, bool(r.fullt_dekket),
         None if _num(r.tidsbruk) is None else float(r.klokke_dager - r.tidsbruk),
         kjoert, BATCH_ID,
     )
-    for r in fase_df.itertuples(index=False)
+    for r in fase_df[i_vinduet].itertuples(index=False)
 ]
 
 uke_records = [
     (from_day(r.uke_dag), int(iso_week_key(r.uke_dag)), str(r.enhet), str(r.indikator))
-    + tuple(int(getattr(r, c)) for c in STOCK_LABELS + FLOW_LABELS)
+    + tuple(None if pd.isna(getattr(r, c)) else int(getattr(r, c)) for c in STOCK_LABELS + FLOW_LABELS)
     + (kjoert, BATCH_ID)
     for r in uke_df.itertuples(index=False)
 ]
@@ -677,7 +764,7 @@ if uke_records:
     print(f"flyt_ukentlig skrevet: {len(uke_records):,} rader")
 
     spark.sql(f"""
-        SELECT uke_slutt,
+        SELECT uke_slutt, SUM(aapne) AS aapne,
                SUM(hos_oss) AS hos_oss, SUM(venter_paa_soeker) AS venter,
                SUM(i_faresonen) AS i_faresonen, SUM(over_frist) AS over_frist,
                SUM(mottatt) AS mottatt, SUM(ferdigstilt) AS ferdigstilt

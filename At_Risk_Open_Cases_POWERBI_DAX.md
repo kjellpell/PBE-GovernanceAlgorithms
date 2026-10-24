@@ -158,21 +158,8 @@ Typisk frist (dager) =
 CALCULATE(MEDIAN(Faser[frist_dager]), Faser[Status] = "Under behandling")
 ```
 
-Trukne/utgåtte faser (milepæl «00e Sak trukket/utgått/uaktuell») er ikke produksjon og bør
-ikke telle som ferdigstilt. Hvis `analyser.fase_klokke` er relatert til `Faser` på
-`pk_faser` (én-til-én), ekskluder dem slik:
-
-```DAX
-Ferdigstilt siste 28 dager (uten trukket) =
-CALCULATE(
-    [Ferdigstilt siste 28 dager],
-    fase_klokke[trukket] = FALSE()
-)
-```
-
-Bruk den i `Implisitt behandlingstid` i stedet for `Ferdigstilt siste 28 dager`. For
-trenden bakover er dette allerede gjort i `flyt_ukentlig` (`ferdigstilt` og `trukket` er
-egne kolonner).
+`Ferdigstilt` følger samme definisjon som rapportens `[Produserte faser]`: alle avsluttede
+faser, også de som ble trukket — de har også tatt arbeid og forlatt køen.
 
 ```DAX
 Faresone fargekode =

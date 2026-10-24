@@ -7,8 +7,15 @@
 
 ## Formål
 `At_Risk_Open_Cases_POWERBI_DAX.md` viser **nå**: hvor mange faser er hos oss, i faresonen,
-på vent. Denne siden viser **utviklingen**, uke for uke tilbake til 2015, rekonstruert fra
-milepælene for anmodning/mottak av tilleggsdokumentasjon. Spørsmålene:
+på vent. Denne siden viser **utviklingen** uke for uke:
+- **Åpne totalt, mottatt og ferdigstilt** — tilbake til 2015, rett fra start- og
+  sluttdatoene. Dette erstatter teamflyten i det pensjonerte
+  `Throughput_Pressure_Monitor`.
+- **Fordelingen hos oss / venter / i faresonen / over frist** — bare så langt
+  milepælene for anmodning/mottak av tilleggsdokumentasjon går (ca. 13 måneder). For
+  eldre uker er disse kolonnene **tomme**, ikke null: der vet vi ikke fordelingen. Ukene et
+  tidligere kjøreløp har sett, beholdes, så historikken vokser videre selv om kildens
+  vindu flytter seg. Spørsmålene:
 - Vokser køen hos oss, eller tømmes den?
 - Øker antallet i faresonen — før det viser seg i `Fristprosent`?
 - Kommer veksten fra oss (hos oss) eller fra søkere (på vent)?
@@ -16,7 +23,9 @@ milepælene for anmodning/mottak av tilleggsdokumentasjon. Spørsmålene:
 
 Datakilder (overskrives hver natt, bygges fra kilden — ingen snapshot):
 - `analyser.flyt_ukentlig` — én rad per ISO-uke × enhet × indikator
-- `analyser.fase_klokke` — én rad per fase
+- `analyser.fase_klokke` — én rad per fase som har vært åpen i milepælvinduet.
+  `fullt_dekket = TRUE` betyr at fasen startet i vinduet; for de andre mangler pauser fra
+  før vinduet, så bruk `fullt_dekket` i mål som ser på hele fasens klokke
 
 **Bare hele uker.** `uke_slutt` er søndagen i uken; inneværende uke er ikke med.
 
@@ -37,6 +46,12 @@ månedens siste uke:
 ```DAX
 Siste uke (flyt) =
 MAX(flyt_ukentlig[uke_slutt])
+```
+
+```DAX
+Åpne totalt (uke) =
+VAR U = [Siste uke (flyt)]
+RETURN CALCULATE(SUM(flyt_ukentlig[aapne]), flyt_ukentlig[uke_slutt] = U)
 ```
 
 ```DAX
@@ -73,18 +88,17 @@ Andel hos oss i faresonen (uke) =
 DIVIDE([I faresonen (uke)], [Hos oss (uke)])
 ```
 
-**Strømmer** (mottatt, ferdigstilt, trukket, satt på vent) er *antall i perioden* og
+**Strømmer** (mottatt, ferdigstilt, satt på vent) er *antall i perioden* og
 summeres vanlig:
 
 ```DAX
 Mottatt (flyt) = SUM(flyt_ukentlig[mottatt])
 Ferdigstilt (flyt) = SUM(flyt_ukentlig[ferdigstilt])
-Trukket (flyt) = SUM(flyt_ukentlig[trukket])
 Satt på vent (flyt) = SUM(flyt_ukentlig[satt_paa_vent])
 ```
 
-`Ferdigstilt` teller ikke faser som ble trukket/utgått — de står i `Trukket`, så tempoet
-ikke ser bedre ut enn det er.
+`Ferdigstilt` følger samme definisjon som rapportens `[Produserte faser]`: alle faser som
+ble avsluttet i uken.
 
 ### Implisitt behandlingstid (Littles lov)
 
@@ -115,31 +129,33 @@ CALCULATE(MEDIAN(fase_klokke[frist_dager]), fase_klokke[tilstand] = "Hos oss")
 Dager til første anmodning (median) =
 CALCULATE(
     MEDIAN(fase_klokke[dager_til_foerste_anmodning]),
-    fase_klokke[startdato] >= EDATE(TODAY(), -12)
+    fase_klokke[fullt_dekket] = TRUE()
 )
 ```
 
 ```DAX
 Andel faser med anmodning =
 DIVIDE(
-    CALCULATE(COUNTROWS(fase_klokke), fase_klokke[antall_pauser] > 0),
-    COUNTROWS(fase_klokke)
+    CALCULATE(COUNTROWS(fase_klokke), fase_klokke[antall_pauser] > 0, fase_klokke[fullt_dekket] = TRUE()),
+    CALCULATE(COUNTROWS(fase_klokke), fase_klokke[fullt_dekket] = TRUE())
 )
 ```
 
 ```DAX
 Pausedager per fase (snitt) =
-AVERAGE(fase_klokke[pause_dager])
+CALCULATE(AVERAGE(fase_klokke[pause_dager]), fase_klokke[fullt_dekket] = TRUE())
 ```
 
 ### Kontroll — stemmer rekonstruksjonen?
 
 ```DAX
 Klokke stemmer med tidsbruk (andel) =
-DIVIDE(
-    COUNTROWS(FILTER(fase_klokke, ABS(fase_klokke[avvik_mot_tidsbruk]) <= 2)),
-    COUNTROWS(FILTER(fase_klokke, NOT ISBLANK(fase_klokke[avvik_mot_tidsbruk])))
-)
+VAR Dekket = FILTER(fase_klokke, fase_klokke[fullt_dekket] && NOT ISBLANK(fase_klokke[avvik_mot_tidsbruk]))
+RETURN
+    DIVIDE(
+        COUNTROWS(FILTER(Dekket, ABS(fase_klokke[avvik_mot_tidsbruk]) <= 2)),
+        COUNTROWS(Dekket)
+    )
 ```
 
 Vis denne per indikator på analytikersiden. Høy andel (f.eks. over 90 %) betyr at
@@ -154,6 +170,8 @@ leser systemets `tidsbruk` direkte.
 ### Leder
 - **Linje:** `[Hos oss (uke)]`, `[I faresonen (uke)]` og `[Venter på søker (uke)]` per
   `uke_slutt`, siste 52 uker
+- **Linje, lang historikk:** `[Åpne totalt (uke)]` per måned siden 2015, med
+  `[Mottatt (flyt)]` og `[Ferdigstilt (flyt)]` som stolper
 - **Linje:** `[Implisitt behandlingstid (dager, uke)]` med `[Typisk frist (dager)]` som
   konstant referanselinje
 - **Stolper:** `[Mottatt (flyt)]` mot `[Ferdigstilt (flyt)]` per måned

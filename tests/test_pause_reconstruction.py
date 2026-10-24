@@ -13,10 +13,11 @@ TREE = ast.parse(SOURCE.read_text())
 FUNCTION_NAMES = {
     "to_day", "from_day", "week_sunday", "iso_week_key", "pair_pauses", "phase_segments",
     "overlap_days", "crossing_day", "clip_from", "count_covering", "build_phase_rows",
-    "weekly_table", "agreement",
+    "weekly_table", "agreement", "apply_window",
 }
 CONSTANT_NAMES = {
-    "UENDELIG", "FARESONE_TERSKEL", "VALIDERING_TOLERANSE_DAGER", "STOCK_LABELS", "FLOW_LABELS",
+    "UENDELIG", "FARESONE_TERSKEL", "VALIDERING_TOLERANSE_DAGER", "SPLIT_LABELS", "STOCK_LABELS",
+    "FLOW_LABELS",
 }
 
 EXTRACTED = []
@@ -76,7 +77,8 @@ class PairPausesTests(unittest.TestCase):
     def test_request_then_receipt_is_one_pause(self):
         iv, stats = G["pair_pauses"](events([("A", 10, "pause"), ("A", 25, "gjenoppta")]))
         self.assertEqual(iv[["start", "slutt"]].values.tolist(), [[10, 25]])
-        self.assertEqual(stats, {"gjentatt_anmodning": 0, "mottatt_uten_anmodning": 0})
+        self.assertEqual(stats, {"gjentatt_anmodning": 0, "mottatt_uten_anmodning": 0,
+                                 "antatt_pause_ved_vindusstart": 0})
 
     def test_two_rounds(self):
         iv, _ = G["pair_pauses"](events([
@@ -106,6 +108,27 @@ class PairPausesTests(unittest.TestCase):
             ("A", 10, "pause"), ("A", 20, "pause"), ("A", 20, "gjenoppta"), ("A", 30, "gjenoppta"),
         ]))
         self.assertEqual(iv[["start", "slutt"]].values.tolist(), [[10, 20], [20, 30]])
+
+    def test_receipt_first_for_fase_started_before_window_is_a_pause_from_window_start(self):
+        # The request was sent before the milestone data begins (day 100).
+        iv, stats = G["pair_pauses"](events([("A", 120, "gjenoppta"), ("A", 150, "pause")]),
+                                     vindu_start=100, startet_foer_vindu={"A"})
+        self.assertEqual(iv[["start", "slutt"]].values.tolist(), [[100, 120], [150, UENDELIG]])
+        self.assertEqual(stats["antatt_pause_ved_vindusstart"], 1)
+
+    def test_receipt_first_for_fase_started_inside_window_is_still_ignored(self):
+        # e.g. "Komplett søknad" right after start — no request was ever missed.
+        iv, stats = G["pair_pauses"](events([("B", 120, "gjenoppta")]),
+                                     vindu_start=100, startet_foer_vindu={"A"})
+        self.assertEqual(len(iv), 0)
+        self.assertEqual(stats["mottatt_uten_anmodning"], 1)
+
+    def test_only_the_first_event_can_be_read_as_a_window_start_pause(self):
+        iv, stats = G["pair_pauses"](events([
+            ("A", 110, "pause"), ("A", 120, "gjenoppta"), ("A", 130, "gjenoppta"),
+        ]), vindu_start=100, startet_foer_vindu={"A"})
+        self.assertEqual(iv[["start", "slutt"]].values.tolist(), [[110, 120]])
+        self.assertEqual(stats["mottatt_uten_anmodning"], 1)
 
     def test_faser_are_independent(self):
         iv, _ = G["pair_pauses"](events([
@@ -175,7 +198,7 @@ class BuildPhaseRowsTests(unittest.TestCase):
         self.pauses = {"A": [(30, 50)], "B": [(160, UENDELIG)]}
 
     def rows(self):
-        rows, iv = G["build_phase_rows"](self.f, self.pauses, {"A"}, self.today)
+        rows, iv = G["build_phase_rows"](self.f, self.pauses, self.today)
         return {r["pk_faser"]: r for r in rows}, iv
 
     def test_clock_is_calendar_minus_pause(self):
@@ -191,12 +214,10 @@ class BuildPhaseRowsTests(unittest.TestCase):
         self.assertEqual(rows["B"]["tilstand"], "Venter på søker")
         self.assertEqual(rows["C"]["tilstand"], "Hos oss")
 
-    def test_days_to_first_request_and_withdrawn_flag(self):
+    def test_days_to_first_request(self):
         rows, _ = self.rows()
         self.assertEqual(rows["A"]["dager_til_foerste_anmodning"], 30)
         self.assertIsNone(rows["C"]["dager_til_foerste_anmodning"])
-        self.assertTrue(rows["A"]["trukket"])
-        self.assertFalse(rows["C"]["trukket"])
 
     def test_risk_crossing_respects_pause(self):
         rows, _ = self.rows()
@@ -246,6 +267,42 @@ class WeeklyTableTests(unittest.TestCase):
             self.assertIn(col, out.columns)
 
 
+class TotalOpenTests(unittest.TestCase):
+    def test_total_open_needs_no_milestones(self):
+        f = faser([("A", "I", "T", "F", 0, 30, 60.0, None, None, "Avsluttet"),
+                   ("B", "I", "T", "F", 10, None, 60.0, None, None, "Under behandling")])
+        _, iv = G["build_phase_rows"](f, {"B": [(15, UENDELIG)]}, 100)
+        aapne = iv[iv["etikett"] == "aapne"][["a", "b"]].values.tolist()
+        self.assertEqual(sorted(aapne), [[0, 30], [10, UENDELIG]])
+
+
+class ApplyWindowTests(unittest.TestCase):
+    def frame(self):
+        return pd.DataFrame({
+            "uke_dag": [3, 10, 17], "enhet": "T", "indikator": "I",
+            "aapne": [5, 6, 7], "hos_oss": [5, 6, 4], "venter_paa_soeker": [0, 0, 3],
+            "i_faresonen": [1, 1, 1], "over_frist": [0, 0, 0],
+            "mottatt": [1, 1, 1], "ferdigstilt": [0, 0, 0], "satt_paa_vent": [0, 0, 1],
+        })
+
+    def test_split_is_blank_before_the_window_but_totals_stay(self):
+        out = G["apply_window"](self.frame(), vindu_dag=15)
+        self.assertTrue(out.loc[out["uke_dag"] < 15, "hos_oss"].isna().all())
+        self.assertEqual(out.loc[out["uke_dag"] == 17, "hos_oss"].iloc[0], 4)
+        self.assertEqual(out["aapne"].tolist(), [5, 6, 7])
+        self.assertEqual(out["mottatt"].tolist(), [1, 1, 1])
+
+    def test_weeks_seen_by_an_earlier_run_are_kept(self):
+        earlier = pd.DataFrame({"uke_dag": [10], "enhet": "T", "indikator": "I",
+                                "hos_oss": [2], "venter_paa_soeker": [4],
+                                "i_faresonen": [1], "over_frist": [0]})
+        out = G["apply_window"](self.frame(), vindu_dag=15, tidligere=earlier).set_index("uke_dag")
+        self.assertTrue(pd.isna(out.loc[3, "hos_oss"]))
+        self.assertEqual(out.loc[10, "hos_oss"], 2)
+        self.assertEqual(out.loc[10, "venter_paa_soeker"], 4)
+        self.assertEqual(out.loc[17, "hos_oss"], 4)   # inside the window: this run wins
+
+
 class AgreementTests(unittest.TestCase):
     def test_share_within_tolerance_and_median(self):
         share, median, n = G["agreement"]([10, 20, 30, 40], [10, 21, 35, None], tolerance=2)
@@ -287,7 +344,7 @@ class EndToEndOnSyntheticCasesTests(unittest.TestCase):
         by = {}
         for f, s, e in iv[["pk_faser", "start", "slutt"]].itertuples(index=False):
             by.setdefault(f, []).append((int(s), int(e)))
-        out, _ = G["build_phase_rows"](faser(rows), by, set(), 10_000)
+        out, _ = G["build_phase_rows"](faser(rows), by, 10_000)
         got = {r["pk_faser"]: r["klokke_dager"] for r in out}
         self.assertEqual(got, expected)
 

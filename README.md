@@ -46,13 +46,7 @@ step removed from the raw quantity, and needs someone who can defend the method:
 - `Fristprosent` p-chart — monthly value against control limits that depend on that month's volume (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `PELT_Changepoint` (on demand) — when an unexplained shift in the average happened and which team/phase it came from; always shown with its run date
 - `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
-- `Throughput_Pressure_Monitor` — `pressure_nivaa` reads fine; the five-factor weighted score behind it doesn't
-
-Note the asymmetry between the two flow/queue pages: `Phase_Bottleneck_Detector` earns
-leader-report placement specifically because of `arsak_tekst` — its sibling
-`Throughput_Pressure_Monitor` has no equivalent plain-language field, only the composite
-score, so it stays in the analyst report despite being the same pattern one grain up.
-That's a real difference in what the two tables expose, not an inconsistency to fix.
+- `Pause_Reconstruction` checks — days to first request per team, and how well the rebuilt clock matches the system's `tidsbruk`
 
 ## Scripts — the addon signal DAX can't produce
 
@@ -60,14 +54,13 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 |---|---|---|
 | `PELT_Changepoint.py` | `pelt_analyse`, `pelt_analyse_detaljer` — **on demand, not scheduled** | PELT changepoints + drill-down — segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
-| `Throughput_Pressure_Monitor.py` | `gjennomstroemming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
-| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
+| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Phase-level queue pressure + phase-time deviation vs. baseline, with a plain-language reason |
 | `Pause_Reconstruction.py` | `fase_klokke`, `flyt_ukentlig` | Deadline clock per fase and weekly history of with-us / waiting / at-risk, rebuilt from completion milestones — interval algorithm |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
 `START_YEAR = 2015` is a top-of-file constant, not a shared config — it's duplicated as a
 literal in four scripts: `PELT_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
-`Throughput_Pressure_Monitor.py`, `Phase_Bottleneck_Detector.py`. If the earliest reliable
+`Phase_Bottleneck_Detector.py`, `Pause_Reconstruction.py`. If the earliest reliable
 year in your Lakehouse changes, update it in all four — there's no single place that fixes
 it for every script. (`Kostra.py` pulls whatever SSB has.)
 
@@ -88,19 +81,24 @@ Three things that used to be here were retired:
   (`Fristprosent_Kontrollkort_POWERBI_DAX.md`: rolling 12 months, change vs. last year,
   p-chart) and by the leading indicators. PELT, which shared the script, stays on demand
   as `PELT_Changepoint.py`. See git history for `CUSUM_Changepoint.py`.
+- `Throughput_Pressure_Monitor.py` (`gjennomstroemming_press_enhet`/`_fase`, retired
+  October 2026) — its team-level flow (intake vs. completions, open queue) is now in
+  `Pause_Reconstruction.py`'s `flyt_ukentlig`, weekly and back to 2015, together with the
+  with-us/waiting/at-risk split a leader can read directly instead of a five-factor score.
+  Its fase table duplicated `Phase_Bottleneck_Detector`. See git history.
 
 All (except `Kostra.py` and `PELT_Changepoint.py`) run nightly after the main data
 pipeline. `PELT_Changepoint.py` is run by hand when needed (e.g. quarterly).
 
-`PELT_Changepoint`, `Throughput_Pressure_Monitor` and `Phase_Bottleneck_Detector` score
+`PELT_Changepoint`, `Phase_Bottleneck_Detector` and `Pause_Reconstruction` score
 only **complete** periods: the current calendar month (and the current ISO week for
 PELT's weekly series) is excluded in SQL (`MONTH_CUTOFF_SQL`/`WEEK_CUTOFF_SQL`), so a
 half-filled month never reads as a drop, and the DAX "siste analysedato" measures land on
 the last complete period. `Seasonal_YTD_ratio_extrapolation` is the exception on purpose —
 it handles the part-month itself and anchors on the last complete month.
 
-Throughput_Pressure_Monitor and Phase_Bottleneck_Detector were briefly native DAX; reverted
-— the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
+Phase_Bottleneck_Detector (and the retired Throughput_Pressure_Monitor) were briefly native
+DAX; reverted — the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
 role DAX has no clean primitive for, exactly the "possible but not simple" case above.
 
 ## Closed-case trend, drift, and forecast
@@ -185,36 +183,9 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
 
 ## Flow and queue health
 
-### Throughput_Pressure_Monitor.py
-
-**Scheduled for retirement** once `Pause_Reconstruction.py`'s first runs in Fabric pass
-their validation (see below): its weekly flow history per team (queue with us,
-waiting share, at-risk, intake/output) covers this script's team-level job with measures a
-leader can read directly, and its fase support table duplicates `Phase_Bottleneck_Detector`.
-Until then it stays, as the only team-level flow history.
-
-Team-level (`enhet`) flow imbalance (received vs. completed) and processing-time
-deviation vs. a rolling baseline, combined into a `pressure_nivaa`
-(`Lav`/`Moderat`/`Høy`/`Kritisk`).
-
-- **Output:** `gjennomstroemming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
-- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`, `NETTO_FLYT_REL_TERSKEL` (0.10), `SEASONAL_BASELINE_YEARS` (3)
-- Net flow scores only when it is large and unseasonal: `netto_flyt_rel` = (net flow −
-  same-month median of the three prior years) / median output of the last 12 months must
-  exceed 0.10. The streak counts consecutive months of that, over a gap-filled calendar
-  (a month with no activity is a 0/0 row, not skipped). KPI measures in the DAX doc
-  exclude `tilstrekkelig_volum = FALSE` and `enhet = "Ukjent"`; `pressure_nivaa` itself
-  still scores every row
-- Flow is counted the same way everywhere: intake in the month of `startmilepaeldato`,
-  output in the month of `sluttmilepaeldato`, `netto_flyt` = intake − output (team level
-  and the fase support table alike)
-- `netto_flyt_streak` (consecutive positive-flow months) is exactly the kind of
-  order-dependent running count DAX has no clean primitive for — a script, not a fancy
-  measure
-
 ### Phase_Bottleneck_Detector.py
 
-Same pattern one level down — phase-level (`fasetittel`) queue pressure and tidsbruk
+Phase-level (`fasetittel`) queue pressure and tidsbruk
 deviation, `alvorlighet` (`Lav`/`Moderat`/`Høy`/`Kritisk`) with an `arsak_kode`/`arsak_tekst`
 explaining the flag.
 
@@ -246,21 +217,28 @@ Entirely live DAX. Same scope as the official `Fristprosent` (`%avtalt%` include
 
 ### Pause_Reconstruction.py — weekly history of the same
 
-The live page knows only "now". `Pause_Reconstruction.py` rebuilds history from the
-milestones "Behov for/Anmodning om tilleggsdokumentasjon" (pause) and "Mottatt
-tilleggsdokumentasjon"/"Komplett søknad" (resume), so every week back to `START_YEAR` gets
-its with-us, waiting, at-risk and past-deadline counts, plus intake, completions,
-withdrawals ("00e Sak trukket/utgått/uaktuell") and requests sent. Rebuilt from source every
-night and overwritten, not appended, so there is no growing snapshot table. That is the
-difference from the retired `Backlog_Aging_Distribution`/`sak_frist_risiko_trend`.
+The live page knows only "now". `Pause_Reconstruction.py` rebuilds the history weekly:
+
+- **Open in total, intake and completions** (same definition as `[Produserte faser]`) come
+  straight from start and end dates, so they go back to `START_YEAR`. This is the team-level
+  flow the retired `Throughput_Pressure_Monitor` used to give.
+- **The split — with us / waiting / at risk / past deadline — needs the milestones**
+  "Behov for/Anmodning om tilleggsdokumentasjon" (pause) and "Mottatt
+  tilleggsdokumentasjon"/"Komplett søknad" (resume). They only go back ~13 months, so the
+  split starts at the earliest milestone date (`HISTORIKK_FRA`, found from the data). Older
+  weeks are NULL, not zero. A fase already on hold when the window opens shows up as a
+  receipt without a request; if it started before the window, that is read as a pause from
+  the window start.
+- **History accumulates without a snapshot table.** Each run rewrites everything, but keeps
+  the split for weeks before the current window from the previous run. If the source
+  window rolls forward, nothing that was once visible is lost.
 
 - **Table, column and milestone names are constants at the top of the script**
-  (`MILEPEL_TABELL`, `MILEPEL_*_KOLONNE`, `PAUSE_MILEPELER`, `GJENOPPTA_MILEPELER`,
-  `TRUKKET_MILEPELER`). They follow the repo's earlier milestone scripts. Cell 1 stops with
+  (`MILEPEL_TABELL`, `MILEPEL_*_KOLONNE`, `PAUSE_MILEPELER`, `GJENOPPTA_MILEPELER`). They follow the repo's earlier milestone scripts. Cell 1 stops with
   a message naming what to change, and lists candidate names, if the table, a column or the
   milestones aren't found
 - **Validation printed every run:** reconstructed clock vs. the system's `tidsbruk`, pause
-  days vs. `bransjetid` (closed faser), and reconstructed state vs. `Status` (open faser).
+  days vs. `bransjetid` (closed faser that started inside the window), and reconstructed state vs. `Status` (open faser).
   High agreement means the weekly history can be trusted. Low agreement for an indikator
   means its history is approximate (e.g. other milestone names, waiting on external parties,
   a different clock rule). The live at-risk page is unaffected either way
