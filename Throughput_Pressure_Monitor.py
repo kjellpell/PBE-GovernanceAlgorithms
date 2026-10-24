@@ -37,6 +37,12 @@ BASELINE_MONTHS = 12
 MIN_BASELINE_OBS = 6
 MIN_TEAM_VOLUME = 10
 POSITIVE_FLOW_STREAK = 3
+# Net flow only counts as pressure when it is large relative to the team's
+# normal output: (netto_flyt - same-month seasonal baseline) divided by the
+# median ferdigstilt_antall over the previous BASELINE_MONTHS must exceed this.
+NETTO_FLYT_REL_TERSKEL = 0.10
+SEASONAL_BASELINE_YEARS = 3      # same calendar month in this many prior years
+MIN_SEASONAL_BASELINE_YEARS = 2
 
 # Only complete months are scored: the current calendar month is still
 # filling up, so its counts would look like a drop in output every run. DAX "siste analysedato" measures pick
@@ -58,6 +64,8 @@ CREATE TABLE IF NOT EXISTS analyser.gjennomstroemming_press_enhet (
     netto_flyt               INT         NOT NULL,
     median_tidsbruk          DOUBLE,
     p90_tidsbruk             DOUBLE,
+    netto_flyt_saesong_baseline DOUBLE,
+    netto_flyt_rel           DOUBLE,
     netto_flyt_streak        INT         NOT NULL,
     baseline_p90_tidsbruk    DOUBLE,
     tidsbruk_avvik_pct       DOUBLE,
@@ -68,7 +76,7 @@ CREATE TABLE IF NOT EXISTS analyser.gjennomstroemming_press_enhet (
     kjoere_id                STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Teamnivå-gjennomstrømming per indikator/måned. Kombinerer netto flyt (mottatt-ferdigstilt) og tidsbruksforverring mot historisk baseline.'
+COMMENT 'Teamnivå-gjennomstrømming per indikator/måned (bare hele måneder, også måneder uten aktivitet). netto_flyt = mottatt (startmåned) - ferdigstilt (sluttmåned). netto_flyt_saesong_baseline er median netto flyt i samme kalendermåned de tre foregående årene. netto_flyt_rel = (netto_flyt - sesongbaseline) / median ferdigstilt siste 12 måneder; over 0,10 regnes som press. netto_flyt_streak er antall måneder på rad med slikt press. Kombineres med tidsbruksforverring mot historisk baseline.'
 """)
 
 spark.sql("""
@@ -251,23 +259,79 @@ def combine_flow(received_df, completed_df, keys):
 # CELL 3 — Compute team-level pressure
 # =============================================================================
 
+def seasonal_flow_baseline(periods, netto_flyt, years=SEASONAL_BASELINE_YEARS,
+                           min_years=MIN_SEASONAL_BASELINE_YEARS):
+    """Median netto_flyt for the same calendar month in the `years` prior
+    years (NaN with fewer than `min_years` of them). January and the months
+    after summer normally take in more than they finish; this is the "normal"
+    a month's net flow is compared with."""
+    lookup = dict(zip((int(p) for p in periods), netto_flyt))
+    out = []
+    for p in periods:
+        year, month = int(p) // 100, int(p) % 100
+        prior = [lookup[(year - k) * 100 + month] for k in range(1, years + 1)
+                 if (year - k) * 100 + month in lookup]
+        out.append(float(np.median(prior)) if len(prior) >= min_years else np.nan)
+    return np.array(out, dtype="float64")
+
+
+def flow_pressure(g):
+    """For one enhet x indikator, sorted by period with no gap months:
+    - netto_flyt_saesong_baseline: same-month median net flow, prior 3 years
+    - netto_flyt_rel: (netto_flyt - seasonal baseline) / median
+      ferdigstilt_antall over the previous BASELINE_MONTHS months. With no
+      seasonal baseline yet, netto_flyt itself is used.
+    - netto_flyt_press: netto_flyt_rel > NETTO_FLYT_REL_TERSKEL. +1 on a team
+      finishing 200 a month is not pressure; +30 is.
+    - netto_flyt_streak: consecutive months with netto_flyt_press
+    Returns a copy of g with these columns added."""
+    g = g.copy()
+    g["netto_flyt_saesong_baseline"] = seasonal_flow_baseline(
+        g["period"].tolist(), g["netto_flyt"].astype(float).tolist()
+    )
+    justert = g["netto_flyt"] - g["netto_flyt_saesong_baseline"].fillna(0.0)
+    ferdig_baseline = (
+        g["ferdigstilt_antall"].astype(float).shift(1)
+        .rolling(BASELINE_MONTHS, min_periods=MIN_BASELINE_OBS)
+        .median()
+    )
+    g["netto_flyt_rel"] = np.where(
+        ferdig_baseline.notna() & (ferdig_baseline > 0),
+        justert / ferdig_baseline,
+        np.nan,
+    )
+    g["netto_flyt_press"] = g["netto_flyt_rel"] > NETTO_FLYT_REL_TERSKEL
+
+    streak = []
+    current = 0
+    for v in g["netto_flyt_press"].tolist():
+        current = current + 1 if v else 0
+        streak.append(current)
+    g["netto_flyt_streak"] = streak
+    return g
+
+
+def pressure_label(score):
+    if score >= 4.0:
+        return "Kritisk"
+    if score >= 3.0:
+        return "Hoy"
+    if score >= 1.5:
+        return "Moderat"
+    return "Lav"
+
+
+TEAM_KEYS = ["indikator", "enhet"]
+
 if received.empty and completed.empty:
-    team_df = pd.DataFrame(columns=[
-        "indikator", "enhet", "period", "mottatt_antall", "ferdigstilt_antall",
+    team_df = pd.DataFrame(columns=TEAM_KEYS + [
+        "period", "mottatt_antall", "ferdigstilt_antall",
         "netto_flyt", "median_tidsbruk", "p90_tidsbruk",
     ])
 else:
-    team_df = received.merge(
-        completed,
-        on=["indikator", "enhet", "period"],
-        how="outer",
-    )
-    team_df["mottatt_antall"] = team_df["mottatt_antall"].fillna(0).astype("int32")
-    team_df["ferdigstilt_antall"] = team_df["ferdigstilt_antall"].fillna(0).astype("int32")
-    team_df["netto_flyt"] = team_df["mottatt_antall"] - team_df["ferdigstilt_antall"]
-
-    for col in ("median_tidsbruk", "p90_tidsbruk"):
-        team_df[col] = pd.to_numeric(team_df[col], errors="coerce").astype("float64")
+    # combine_flow also fills months with no activity, so the streak below
+    # can't run across a month that had no row at all.
+    team_df = combine_flow(received, completed, TEAM_KEYS)
 
 
 def _month_end_from_period(period: int):
@@ -278,18 +342,8 @@ def _month_end_from_period(period: int):
 
 out_rows = []
 for (indikator, enhet), grp in team_df.groupby(["indikator", "enhet"], dropna=False):
-    g = grp.sort_values("period").copy()
+    g = flow_pressure(grp.sort_values("period"))
     enhet_value = "Ukjent" if enhet is None or enhet == "" else str(enhet)
-
-    streak = []
-    current = 0
-    for v in g["netto_flyt"].tolist():
-        if v > 0:
-            current += 1
-        else:
-            current = 0
-        streak.append(current)
-    g["netto_flyt_streak"] = streak
 
     g["baseline_p90_tidsbruk"] = (
         g["p90_tidsbruk"].shift(1)
@@ -304,23 +358,14 @@ for (indikator, enhet), grp in team_df.groupby(["indikator", "enhet"], dropna=Fa
     )
 
     score = np.zeros(len(g), dtype="float64")
-    score += (g["netto_flyt"] > 0).astype(float) * 1.5
+    score += g["netto_flyt_press"].astype(float) * 1.5
     score += (g["netto_flyt_streak"] >= POSITIVE_FLOW_STREAK).astype(float) * 2.0
     score += (g["tidsbruk_avvik_pct"] > 0.10).astype(float) * 1.0
     score += (g["tidsbruk_avvik_pct"] > 0.25).astype(float) * 1.0
     score += ((g["ferdigstilt_antall"] > 0) & (g["mottatt_antall"] >= g["ferdigstilt_antall"] * 1.3)).astype(float) * 1.0
     g["pressure_score"] = score
 
-    def _label(s):
-        if s >= 4.0:
-            return "Kritisk"
-        if s >= 3.0:
-            return "Hoy"
-        if s >= 1.5:
-            return "Moderat"
-        return "Lav"
-
-    g["pressure_nivaa"] = g["pressure_score"].apply(_label)
+    g["pressure_nivaa"] = g["pressure_score"].apply(pressure_label)
     g["tilstrekkelig_volum"] = (
         (g["mottatt_antall"] >= MIN_TEAM_VOLUME)
         | (g["ferdigstilt_antall"] >= MIN_TEAM_VOLUME)
@@ -336,6 +381,8 @@ for (indikator, enhet), grp in team_df.groupby(["indikator", "enhet"], dropna=Fa
             "netto_flyt": int(row["netto_flyt"]),
             "median_tidsbruk": float(row["median_tidsbruk"]) if pd.notna(row["median_tidsbruk"]) else None,
             "p90_tidsbruk": float(row["p90_tidsbruk"]) if pd.notna(row["p90_tidsbruk"]) else None,
+            "netto_flyt_saesong_baseline": float(row["netto_flyt_saesong_baseline"]) if pd.notna(row["netto_flyt_saesong_baseline"]) else None,
+            "netto_flyt_rel": float(row["netto_flyt_rel"]) if pd.notna(row["netto_flyt_rel"]) else None,
             "netto_flyt_streak": int(row["netto_flyt_streak"]),
             "baseline_p90_tidsbruk": float(row["baseline_p90_tidsbruk"]) if pd.notna(row["baseline_p90_tidsbruk"]) else None,
             "tidsbruk_avvik_pct": float(row["tidsbruk_avvik_pct"]) if pd.notna(row["tidsbruk_avvik_pct"]) else None,
@@ -421,6 +468,8 @@ TEAM_SCHEMA = StructType([
     StructField("netto_flyt", IntegerType(), False),
     StructField("median_tidsbruk", DoubleType(), True),
     StructField("p90_tidsbruk", DoubleType(), True),
+    StructField("netto_flyt_saesong_baseline", DoubleType(), True),
+    StructField("netto_flyt_rel", DoubleType(), True),
     StructField("netto_flyt_streak", IntegerType(), False),
     StructField("baseline_p90_tidsbruk", DoubleType(), True),
     StructField("tidsbruk_avvik_pct", DoubleType(), True),
@@ -477,7 +526,10 @@ if not team_out.empty:
     team_spark = spark.createDataFrame(
         to_records(team_out.to_dict("records"), TEAM_SCHEMA), schema=TEAM_SCHEMA
     )
-    team_spark.write.mode("overwrite").saveAsTable("analyser.gjennomstroemming_press_enhet")
+    # overwriteSchema: the table is fully rewritten every night, and new
+    # columns (netto_flyt_rel, netto_flyt_saesong_baseline) must replace the
+    # schema the CREATE TABLE IF NOT EXISTS above left from an earlier run.
+    team_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.gjennomstroemming_press_enhet")
     print(f"gjennomstroemming_press_enhet skrevet: {len(team_out):,} rader")
 else:
     print("Ingen team-resultater å skrive")

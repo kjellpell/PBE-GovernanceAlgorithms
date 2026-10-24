@@ -21,17 +21,28 @@ enhetsnivå og (fra oktober 2026) på fasenivå i `gjennomstroemming_press_fase`
 fasetabellen gruppert på `COALESCE(slutt, start)`, slik at avsluttede faser nullet seg ut
 og bare fortsatt åpne faser ga positiv netto flyt.
 
+### Når regnes netto flyt som press? (endret oktober 2026)
+- `netto_flyt_saesong_baseline` — median `netto_flyt` i **samme kalendermåned** de tre
+  foregående årene (tom før det finnes to slike år). Januar og høsten tar normalt inn
+  mer enn de ferdigstiller; det er ikke press.
+- `netto_flyt_rel` = (`netto_flyt` − sesongbaseline) / median `ferdigstilt_antall` siste
+  12 måneder. +1 i et team som ferdigstiller 200 i måneden er støy; +40 er 20 %.
+- Netto flyt gir poeng i `pressure_score` bare når `netto_flyt_rel` > 0,10
+  (`NETTO_FLYT_REL_TERSKEL`). `netto_flyt_streak` teller måneder **på rad** med slikt
+  press — måneder uten aktivitet er egne rader (0 inn, 0 ut) og bryter rekken.
+- Tidligere ga enhver `netto_flyt > 0` poeng, og rekken hoppet over måneder uten rader.
+
 ## Anbefalte visualer
 
 ### 1) KPI-kort (øverst)
-- Antall enheter med `pressure_nivaa` = `Kritisk`
-- Antall enheter med `pressure_nivaa` i (`Hoy`, `Kritisk`)
+- Antall enheter med `pressure_nivaa` = `Kritisk` (bare `tilstrekkelig_volum`, ikke `Ukjent`)
+- Antall enheter med `pressure_nivaa` i (`Hoy`, `Kritisk`) (samme filter)
 - Sum `netto_flyt` siste måned
 - Median `tidsbruk_avvik_pct` siste måned
 
 ### 2) Prioritert tabell (hovedliste)
 Vis siste `analyse_dato`:
-- `enhet`, `indikator`, `pressure_nivaa`, `pressure_score`, `netto_flyt`, `netto_flyt_streak`, `p90_tidsbruk`, `tidsbruk_avvik_pct`
+- `enhet`, `indikator`, `pressure_nivaa`, `pressure_score`, `netto_flyt`, `netto_flyt_rel`, `netto_flyt_streak`, `p90_tidsbruk`, `tidsbruk_avvik_pct`
 - Sortering: `pressure_score` desc, `netto_flyt` desc
 
 ### 3) Trendlinje per enhet
@@ -84,9 +95,15 @@ CALCULATE(
         gjennomstroemming_press_enhet,
         gjennomstroemming_press_enhet[analyse_dato] = [Siste analysedato]
             && gjennomstroemming_press_enhet[pressure_nivaa] = "Kritisk"
+            && gjennomstroemming_press_enhet[tilstrekkelig_volum] = TRUE()
+            && gjennomstroemming_press_enhet[enhet] <> "Ukjent"
     )
 )
 ```
+
+Små team (`tilstrekkelig_volum = FALSE`) og faser uten registrert enhet (`Ukjent`) holdes
+utenfor KPI-tellingene — de kan få høy poengsum av noen få saker. De står fortsatt i
+tabellen og kan vises i detaljlisten.
 
 ### Antall høyt press (Hoy + Kritisk)
 ```DAX
@@ -97,6 +114,8 @@ CALCULATE(
         gjennomstroemming_press_enhet,
         gjennomstroemming_press_enhet[analyse_dato] = [Siste analysedato]
             && gjennomstroemming_press_enhet[pressure_nivaa] IN {"Hoy", "Kritisk"}
+            && gjennomstroemming_press_enhet[tilstrekkelig_volum] = TRUE()
+            && gjennomstroemming_press_enhet[enhet] <> "Ukjent"
     )
 )
 ```
@@ -145,5 +164,5 @@ SWITCH(
 - `pressure_nivaa`
 
 ## Tolkning
-- `netto_flyt > 0` over flere perioder + økende `p90_tidsbruk` = sannsynlig kapasitetsproblem.
+- `netto_flyt_rel` > 0,10 over flere perioder (`netto_flyt_streak` ≥ 3) + økende `p90_tidsbruk` = sannsynlig kapasitetsproblem.
 - Høy `fase_bidrag_score` identifiserer hvor tiltak bør settes inn først.

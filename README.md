@@ -166,7 +166,13 @@ deviation vs. a rolling baseline, combined into a `pressure_nivaa`
 (`Lav`/`Moderat`/`Hoy`/`Kritisk`).
 
 - **Output:** `gjennomstroemming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
-- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`
+- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`, `NETTO_FLYT_REL_TERSKEL` (0.10), `SEASONAL_BASELINE_YEARS` (3)
+- Net flow scores only when it is large and unseasonal: `netto_flyt_rel` = (net flow −
+  same-month median of the three prior years) / median output of the last 12 months must
+  exceed 0.10. The streak counts consecutive months of that, over a gap-filled calendar
+  (a month with no activity is a 0/0 row, not skipped). KPI measures in the DAX doc
+  exclude `tilstrekkelig_volum = FALSE` and `enhet = "Ukjent"`; `pressure_nivaa` itself
+  still scores every row
 - Flow is counted the same way everywhere: intake in the month of `startmilepaeldato`,
   output in the month of `sluttmilepaeldato`, `netto_flyt` = intake − output (team level
   and the fase support table alike)
