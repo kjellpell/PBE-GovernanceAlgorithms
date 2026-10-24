@@ -9,7 +9,7 @@ skilles **hos oss** (`Faser[Status] = "Under behandling"`) fra **venter** (åpen
 status). Bare faser hos oss kan være i faresonen; ventende faser vises som egen andel.
 
 ## Formål
-Alle andre signaler i dette repoet (CUSUM, PELT, prognose, flyt, flaskehals) regnes på
+Alle andre signaler i dette repoet (PELT, prognose, 12-måneders fristprosent, p-kort, flyt, flaskehals) regnes på
 **avsluttede** faser. De kommer derfor etter: en fase som kommer til å bryte fristen vises
 først når den lukkes. Men den er synlig lenge før — som en åpen fase som eldes. Denne siden
 svarer på:

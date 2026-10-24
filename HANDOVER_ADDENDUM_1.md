@@ -33,14 +33,21 @@ The original handover treated every open phase as "our work". This addendum:
    Fristprosent = produced phases, with `%avtalt%` included. Severity value is `Høy`.
    No forecast-history table.
 
-## 2. Already done on `claude/lean-early-warning` (commit `a4346a9`) — don't redo
+## 2. Already done on `claude/lean-early-warning` — don't redo
 - **Gini page retired.** `Caseworker_Load_Concentration_POWERBI_DAX.md` and
   `tests/test_gini_reference.py` were deleted; the README notes the retirement. Reasons:
   it is hard to read, it is individual-level monitoring, and it is not an early warning.
-- **PELT on demand.** `CUSUM_Changepoint.py` has `KJOER_PELT = False`. CUSUM runs nightly;
-  PELT and the drill-down run only when someone sets the flag to `True` and runs the
-  notebook by hand. With the flag off, the `pelt_*` tables keep the last manual run. A test
-  pins the default. The DAX doc tells readers to show `kjoert_tidspunkt` on PELT pages.
+- **CUSUM retired; PELT on demand.** `CUSUM_Changepoint.py` is now `PELT_Changepoint.py`,
+  with all CUSUM code, the `cusum_analyse` table write, the CUSUM tests and the CUSUM DAX
+  removed. It is **not scheduled**; someone runs it by hand. The DAX doc is
+  `PELT_Changepoint_POWERBI_DAX.md`; the tests are `tests/test_pelt_changepoint.py`.
+  Reasons: CUSUM watched a lagging measure, was slow (~9 months for 1σ monthly), and gave
+  frequent false alarms with a 3-year same-month baseline.
+- **Replacement, live DAX:** `Fristprosent_Kontrollkort_POWERBI_DAX.md`:
+  - `Fristprosent 12 mnd`, `Endring mot i fjor (pp)` and `Trendretning (12 mnd)` for the
+    leader report;
+  - a monthly p-chart (centre = same month, prior 3 years, pooled counts) for the analyst
+    report.
 - **At-risk page scoped to cases with us.** `At_Risk_Open_Cases_POWERBI_DAX.md` now filters on
   `Status = "Under behandling"`. The measures were renamed: `Hos oss`,
   `Hos oss i faresonen`, `Hos oss over frist`, `Andel hos oss i faresonen`. New measures:
@@ -129,13 +136,16 @@ and the number of false alarms. Candidates:
 - (a) implied processing time vs. deadline;
 - (b) `i_faresonen` share;
 - (c) waiting share;
-- (d) fixed CUSUM on frist% (`tilstand`), monthly and weekly;
-- (e) a p-chart on monthly frist%: centre line = same-month mean over the prior 3 years,
-  limits = ±3·√(p(1−p)/n).
+- (d) `Trendretning (12 mnd)` (±2 points vs. the same 12 months last year);
+- (e) the p-chart in `Fristprosent_Kontrollkort_POWERBI_DAX.md`: a point below the lower
+  limit, or 8 in a row below the centre line.
+
+(d) and (e) are lagging by design. Include them to measure how much earlier (a)–(c) warn,
+not as candidates for the warning itself.
 
 Define a "dip" up front (e.g. monthly frist% ≥ 5 points below the same month's 3-year mean)
 and state it in the report. Do the backtest as an on-demand script
-`Backtest_Early_Warning.py`, with its pure functions tested. Write the results to
+`Backtest_Early_Warning.py` (on demand), with its pure functions tested. Write the results to
 `BACKTEST_RESULTS.md`, not to a table. Recommend which signals go on the leader page.
 
 ### P2-3 Retire `Throughput_Pressure_Monitor` (after P2-0 is validated)
@@ -153,18 +163,15 @@ classification**; store it as a small table. In `Phase_Bottleneck_Detector.py`, 
 ekstern part — ikke intern flaskehals." Add a test.
 
 ### P2-5 Decision-gated (ask first; don't start without a yes)
-- **CUSUM's fate.** If P2-2 shows CUSUM gives no earlier warning than (a)–(c) or the
-  p-chart, replace it with the p-chart as live DAX and retire `CUSUM_Changepoint.py`'s
-  nightly CUSUM part. PELT stays on demand either way.
 - **Organisational-change evaluation.** A simple change log (date, enhet, description), kept
   as a CSV or SharePoint list that the human maintains, plus an on-demand
   `Intervention_Analysis.py`. That script runs an interrupted time series (segmented
   regression: level and slope change at the known date, seasonal terms) per logged change.
   Where some teams weren't changed, it adds a difference-in-differences against them. Pure
   NumPy least squares; no statsmodels. The log entries also go on trend charts as markers.
-- **`Behandlingstid` in CUSUM.** If `tidsbruk` includes on-hold time (check against
-  `fase_klokke`), the CUSUM `Behandlingstid` series mixes applicant behaviour with ours.
-  Either switch it to clock days or drop it.
+- **`Behandlingstid` in PELT and the reports.** If `tidsbruk` includes on-hold time (check
+  against `fase_klokke`), every `Behandlingstid` view mixes applicant behaviour with ours.
+  Either switch it to clock days or report both.
 
 ## 4. Questions to ask the human (in one go, when you reach P2-0)
 1. Milestone table, and the exact type names for request and receipt.

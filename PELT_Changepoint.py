@@ -1,45 +1,43 @@
 # =============================================================================
-# CUSUM drift detection and changepoint detection per indicator.
-# Runs nightly after main data pipeline.
+# PELT changepoint detection per indicator — ON DEMAND, not scheduled.
 #
-# CUSUM:
-#   Detects small persistent shifts in frist%, behandlingstid,
-#   and produksjonsdifferanse. More sensitive than threshold alerts
-#   for gradual deterioration. Runs on both monthly and weekly series.
+# Run this notebook by hand (e.g. quarterly, or when someone asks "did
+# something change?"). It looks BACKWARDS: it finds structural shifts in the
+# average of Fristprosent, Behandlingstid and Produksjonsdifferanse that
+# nobody logged — a registration-practice change, a system migration, a rule
+# change. It is not an early warning (it needs ~6 periods after a break to see
+# it), and it is not the tool for evaluating a KNOWN organisational change —
+# for that, use an interrupted time series at the known date.
 #
 # Changepoint (PELT):
-#   Identifies the exact period where a structural shift occurred.
-#   Output marks the changepoint on the time series chart and shows
-#   before/after means. Runs on monthly series only for stability,
-#   weekly for early detection.
+#   Identifies the period where a structural shift occurred and the
+#   before/after means. Monthly and weekly series.
 #
 # Drill-down:
 #   For the most recent changepoint per indikator/maaltall/granularitet,
-#   breaks the shift down by enhet (team) and fasetittel (process step) so
-#   a signal can be pinpointed to a team or a step, not just a product group.
+#   breaks the shift down by enhet (team) and fasetittel (process step).
 #   Saksbehandler is deliberately excluded — too thin per-segment volume,
 #   and individual-level automated flagging is out of scope for this layer.
 #
-# Output tables (addon signal only — no raw value; that's a live DAX
-# measure against saksbehandling.faser, see CUSUM_Changepoint_POWERBI_DAX.md):
-#   cusum_analyse     — løpende CUSUM-verdier og signalflagg
-#   pelt_analyse      — oppdagede endringspunkter med gjennomsnitt før/etter
+# Output tables (overwritten on each manual run — show kjoert_tidspunkt in
+# reports so nobody reads an old run as last night's):
+#   pelt_analyse          — oppdagede endringspunkter med gjennomsnitt før/etter
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
 #
-# Schedule: nightly, after main data pipeline — CUSUM only. PELT and the
-# drill-down are ON DEMAND: they run only when KJOER_PELT = True (set it and
-# run this notebook by hand, e.g. quarterly or after an organisational
-# change). With KJOER_PELT = False the pelt_* tables are left untouched, so
-# they keep the result of the last on-demand run (see kjoert_tidspunkt).
-# PELT looks backwards — it finds breaks you didn't know about — and is not
-# part of the early-warning signal, so it doesn't need to run every night.
+# CUSUM drift detection used to live in this script (CUSUM_Changepoint.py,
+# table cusum_analyse). Retired October 2026: on a lagging, closed-case
+# measure it was slow (~9 months to see a 1-sigma monthly shift) and, with a
+# recent same-month baseline, raised frequent false alarms. Replaced by live
+# DAX (rolling 12-month Fristprosent and a p-chart, see
+# Fristprosent_Kontrollkort_POWERBI_DAX.md) and by the leading indicators in
+# At_Risk_Open_Cases_POWERBI_DAX.md. See git history if it is ever needed.
+#
 # Requires: nothing to install. PELT runs on a built-in pure-NumPy
 # implementation with an L2 (mean-shift) cost — see _pelt_l2() below. No
 # external library, so no `%pip install` cell: on tenants with inline
 # library installation disabled, that magic command fails the whole
 # notebook run with MagicUsageError before any Python cell executes.
-# Minimum history: 24 monthly / 52 weekly observations per indicator; CUSUM
-# output starts once a month/week has >= 2 prior years of the same position.
+# Minimum history: 24 monthly / 52 weekly observations per indicator.
 # =============================================================================
 
 from pyspark.sql import SparkSession
@@ -55,13 +53,7 @@ spark = SparkSession.builder.getOrCreate()
 BATCH_ID      = datetime.now().strftime("%Y%m%dT%H%M%S")
 MIN_MONTHLY   = 24
 MIN_WEEKLY    = 52
-CUSUM_K       = 0.5   # allowance parameter — half sigma is standard
-CUSUM_H       = 5.0   # decision threshold — 5 sigma cumulative
 START_YEAR    = 2015  # exclude data before this year — adjust if older data is reliable
-
-# PELT changepoints + drill-down: on demand only. Leave False in the nightly
-# schedule; set True and run by hand when you want a fresh changepoint search.
-KJOER_PELT    = False
 
 # Only complete periods are scored: the current calendar month (and, for the
 # weekly series, the current ISO week) is still filling up, so its counts and
@@ -69,20 +61,6 @@ KJOER_PELT    = False
 # up the last complete period automatically as a result.
 MONTH_CUTOFF_SQL = "CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE)"
 WEEK_CUTOFF_SQL  = "CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE)"   # Monday of this ISO week
-
-# Seasonal baseline — each observation is standardised against the SAME
-# calendar month (monthly) or ISO week (weekly) in the preceding
-# CUSUM_BASELINE_YEARS years, never including its own year. That removes
-# seasonality (July is compared with earlier Julys, not with March), keeps the
-# reference recent (not "different from 2015"), and still can't absorb a
-# drift that builds up inside the current year. See standardise_seasonal().
-CUSUM_BASELINE_YEARS        = 3
-CUSUM_MIN_BASELINE_YEARS    = 2   # fewer prior years for a month/week -> no score for it
-CUSUM_MIN_POST_BASELINE_OBS = 4   # need at least this many standardised points to run CUSUM
-
-# tilstand (the persistent state a board card reads) returns to Stabil only
-# after this many consecutive quiet periods — see run_cusum().
-CUSUM_RECOVERY_PERIODS      = 3
 
 DRILLDOWN_DIMENSIONS     = ["enhet", "fasetittel"]  # confirmed against the Lakehouse schema
 MIN_SEGMENT_OBS          = 10   # segments below this are marked utilstrekkelig_volum, not tested
@@ -97,24 +75,6 @@ PELT_MIN_SIZE            = 6
 # =============================================================================
 # CELL 1 — Create output tables
 # =============================================================================
-
-spark.sql("""
-CREATE TABLE IF NOT EXISTS analyser.cusum_analyse (
-    indikator        STRING      NOT NULL,
-    maaltall         STRING      NOT NULL,
-    granularitet     STRING      NOT NULL,
-    analyse_dato     DATE        NOT NULL,
-    cusum_positiv    DOUBLE,
-    cusum_negativ    DOUBLE,
-    signal           BOOLEAN     NOT NULL,
-    signalretning    STRING,
-    tilstand         STRING,
-    kjoert_tidspunkt TIMESTAMP   NOT NULL,
-    kjoere_id        STRING      NOT NULL
-)
-USING DELTA
-COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. Hver periode sammenlignes med samme måned/ISO-uke de tre foregående årene (sesongjustert, nylig baseline). signal=true og signalretning (Stigende/Synkende) markerer perioden akkumulatoren krysset terskelen (hendelse). tilstand (Stigende/Synkende/Stabil) er siste signalerte retning, holdt til motsatt signal eller tre rolige perioder på rad — det er denne et bord-nivå mål skal lese. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato (se CUSUM_Changepoint_POWERBI_DAX.md).'
-""")
 
 spark.sql("""
 CREATE TABLE IF NOT EXISTS analyser.pelt_analyse (
@@ -196,7 +156,7 @@ def iso_week_key(d):
 # denominator = produced faser (both start and slutt set), numerator = those
 # with innenfor_frist = 1, %avtalt% indicators INCLUDED. (Until October 2026
 # this used frist_dager IS NOT NULL as the denominator and excluded %avtalt%,
-# so CUSUM and the forecast measured two different Fristprosent.)
+# so this script and the forecast measured two different Fristprosent.)
 monthly_frist = spark.sql(f"""
     SELECT
         pr.indikator,
@@ -340,7 +300,7 @@ monthly_prod = production_balance(monthly_started, monthly_ended)
 weekly_prod  = production_balance(weekly_started, weekly_ended)
 
 # Spark DECIMAL columns (e.g. AVG(tidsbruk)) arrive as decimal.Decimal objects,
-# which cannot be mixed with floats in the CUSUM arithmetic.
+# which cannot be mixed with floats in the PELT arithmetic.
 for _df in (monthly_frist, monthly_tid, monthly_prod, weekly_frist, weekly_prod):
     _df["verdi"]  = pd.to_numeric(_df["verdi"], errors="coerce").astype("float64")
     _df["period"] = pd.to_numeric(_df["period"], errors="coerce").astype("int64")
@@ -389,129 +349,6 @@ def to_float_series(series):
     """Spark DECIMAL columns arrive as decimal.Decimal, which cannot be mixed
     with floats in the arithmetic below."""
     return pd.to_numeric(series, errors="coerce").astype("float64")
-
-
-def standardise_seasonal(series, granularitet, years=CUSUM_BASELINE_YEARS,
-                         min_years=CUSUM_MIN_BASELINE_YEARS):
-    """
-    Standardise a YYYYMM (Månedlig) or ISO YYYYWW (Ukentlig) series against
-    the same month/week in the preceding `years` years.
-
-    For an observation in year Y at position p (month or ISO week):
-      mu    = mean of position p in years Y-years .. Y-1 (needs >= min_years
-              of them; otherwise the observation gets NaN = no score)
-      sigma = pooled within-position standard deviation over those same
-              years: every baseline value minus its own position's mean,
-              squared, summed, divided by (values - positions). Pooling over
-              all months/weeks gives a stable sigma; a per-position sigma
-              from 2-3 values would not be.
-    The observation's own year is never in its baseline. Returns a float
-    Series on the same index, NaN where no baseline exists.
-    """
-    s = to_float_series(series).dropna()
-    out = pd.Series(np.nan, index=s.index, dtype="float64")
-    if s.empty:
-        return out
-
-    periods = np.asarray(s.index, dtype="int64")
-    df = pd.DataFrame(
-        {"aar": periods // 100, "pos": periods % 100, "verdi": s.to_numpy()},
-        index=s.index,
-    )
-
-    for aar in np.unique(df["aar"]):
-        base = df[(df["aar"] >= aar - years) & (df["aar"] < aar)]
-        if base.empty:
-            continue
-        stats = base.groupby("pos")["verdi"].agg(["mean", "count"])
-        stats = stats[stats["count"] >= min_years]
-        if stats.empty:
-            continue
-
-        used  = base[base["pos"].isin(stats.index)]
-        resid = used["verdi"] - used["pos"].map(stats["mean"])
-        dof   = len(resid) - len(stats)
-        if dof <= 0:
-            continue
-        sigma = float(np.sqrt(np.sum(resid ** 2) / dof))
-        if not np.isfinite(sigma) or sigma == 0:
-            continue
-
-        target = df[(df["aar"] == aar) & df["pos"].isin(stats.index)]
-        out.loc[target.index] = (target["verdi"] - target["pos"].map(stats["mean"])) / sigma
-
-    return out
-
-
-def run_cusum(series, granularitet="Månedlig", k=CUSUM_K, h=CUSUM_H,
-              years=CUSUM_BASELINE_YEARS, recovery_periods=CUSUM_RECOVERY_PERIODS):
-    """
-    Two-sided CUSUM on the seasonally standardised series (standardise_seasonal).
-    k = allowance (typically 0.5 * expected shift in sigma units)
-    h = decision threshold (typically 4-5)
-
-    Event vs. state:
-    - signal / signal_direction is the EVENT: True / Stigende / Synkende only
-      in the period an accumulator crosses h. That accumulator is then reset
-      to 0 (standard SPC practice — otherwise it saturates after the first
-      sustained shift and can't register a recovery or a second shift).
-    - tilstand is the STATE a board card should read: the last signalled
-      direction, held until an opposite signal fires or the matching side has
-      been quiet for `recovery_periods` consecutive periods. Quiet = the
-      accumulator is below h/2 AND that period's value did not push it up
-      (z - k <= 0 for Stigende, -z - k <= 0 for Synkende). Without the second
-      condition, the reset itself (accumulator back at 0, refilling slowly
-      under a small shift) looked like a recovery, and a sustained 1-sigma
-      decline read Synkende only about half the time.
-
-    Returns DataFrame with cusum_pos, cusum_neg, signal, signal_direction,
-    tilstand — indexed by the periods that had a baseline — or None when too
-    few periods could be standardised. Direction values are always
-    Stigende/Synkende/Stabil, so DAX can read them with no translation.
-    """
-    z = standardise_seasonal(series, granularitet, years=years).dropna()
-    if len(z) < CUSUM_MIN_POST_BASELINE_OBS:
-        return None
-
-    values    = z.to_numpy()
-    n         = len(values)
-    cusum_pos = np.zeros(n)
-    cusum_neg = np.zeros(n)
-    signal    = np.zeros(n, dtype=bool)
-    retning   = np.full(n, "Stabil", dtype=object)
-    tilstand  = np.full(n, "Stabil", dtype=object)
-
-    prev_pos = prev_neg = 0.0
-    state    = "Stabil"
-    quiet    = 0
-    for i in range(n):
-        pos = max(0.0, prev_pos + values[i] - k)
-        neg = max(0.0, prev_neg - values[i] - k)
-
-        if pos > h:
-            signal[i], retning[i], pos = True, "Stigende", 0.0
-        elif neg > h:
-            signal[i], retning[i], neg = True, "Synkende", 0.0
-
-        if signal[i]:
-            state, quiet = retning[i], 0
-        elif state != "Stabil":
-            acc  = pos if state == "Stigende" else neg
-            push = (values[i] - k) if state == "Stigende" else (-values[i] - k)
-            quiet = quiet + 1 if (acc < h / 2 and push <= 0) else 0
-            if quiet >= recovery_periods:
-                state, quiet = "Stabil", 0
-
-        cusum_pos[i], cusum_neg[i], tilstand[i] = pos, neg, state
-        prev_pos, prev_neg = pos, neg
-
-    return pd.DataFrame({
-        "cusum_pos":        cusum_pos,
-        "cusum_neg":        cusum_neg,
-        "signal":           signal,
-        "signal_direction": retning,
-        "tilstand":         tilstand,
-    }, index=z.index)
 
 
 # =============================================================================
@@ -872,7 +709,6 @@ series_configs = [
     ("Produksjonsdifferanse",   weekly_prod,   "Ukentlig", MIN_WEEKLY),
 ]
 
-cusum_rows       = []
 changepoint_rows = []
 
 for metrikk, df, granularitet, min_obs in series_configs:
@@ -887,27 +723,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
         if len(ind_data.dropna()) < min_obs:
             continue
 
-        # ── CUSUM ──────────────────────────────────────────────────
-        cusum = run_cusum(ind_data, granularitet)
-        if cusum is not None:
-            for idx, row in cusum.iterrows():
-                cusum_rows.append({
-                    "indikator":       indikator,
-                    "maaltall":        metrikk,
-                    "granularitet":    granularitet,
-                    "analyse_dato":    _periode_to_date(idx, granularitet),
-                    "cusum_positiv":   round(float(row["cusum_pos"]), 4),
-                    "cusum_negativ":   round(float(row["cusum_neg"]), 4),
-                    "signal":          bool(row["signal"]),
-                    "signalretning":   row["signal_direction"],
-                    "tilstand":        row["tilstand"],
-                    "kjoert_tidspunkt": datetime.now(),
-                    "kjoere_id":       BATCH_ID,
-                })
-
-        # ── Changepoint (monthly and weekly — on demand, see KJOER_PELT) ─
-        if not KJOER_PELT:
-            continue
+        # ── Changepoint (monthly and weekly) ─────────────────────
         breakpoints = run_changepoint(ind_data, granularitet)
         for cp in extract_changepoint_stats(ind_data, breakpoints, granularitet):
             changepoint_rows.append({
@@ -922,12 +738,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
                 "kjoere_id":    BATCH_ID,
             })
 
-print(f"CUSUM rows computed:       {len(cusum_rows)}")
-print(f"Changepoint rows computed: {len(changepoint_rows)}"
-      + ("" if KJOER_PELT else "  (PELT hoppet over — KJOER_PELT = False)"))
-print(f"Active CUSUM signals:      "
-      f"{sum(1 for r in cusum_rows if r['signal'])}")
-
+print(f"Changepoint rows computed: {len(changepoint_rows)}")
 
 # =============================================================================
 # CELL 5B — Drill down the most recent changepoint per series by enhet/fasetittel
@@ -964,20 +775,6 @@ print(f"Drilldown rows computed:   {len(drilldown_rows)}")
 
 # Explicit schemas — pandas infers int64/object, which does not match the
 # INT/DOUBLE columns in the Delta tables and breaks the overwrite merge.
-CUSUM_SCHEMA = StructType([
-    StructField("indikator",        StringType(),    False),
-    StructField("maaltall",         StringType(),    False),
-    StructField("granularitet",     StringType(),    False),
-    StructField("analyse_dato",     DateType(),      False),
-    StructField("cusum_positiv",    DoubleType(),    True),
-    StructField("cusum_negativ",    DoubleType(),    True),
-    StructField("signal",           BooleanType(),   False),
-    StructField("signalretning",    StringType(),    True),
-    StructField("tilstand",         StringType(),    True),
-    StructField("kjoert_tidspunkt", TimestampType(), False),
-    StructField("kjoere_id",        StringType(),    False),
-])
-
 PELT_SCHEMA = StructType([
     StructField("indikator",                  StringType(),    False),
     StructField("maaltall",                   StringType(),    False),
@@ -1037,13 +834,6 @@ def to_records(rows, schema):
     return out
 
 
-if cusum_rows:
-    cusum_spark = spark.createDataFrame(
-        to_records(cusum_rows, CUSUM_SCHEMA), schema=CUSUM_SCHEMA
-    )
-    cusum_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.cusum_analyse")
-    print(f"cusum_analyse skrevet: {len(cusum_rows)} rader")
-
 if changepoint_rows:
     cp_spark = spark.createDataFrame(
         to_records(changepoint_rows, PELT_SCHEMA), schema=PELT_SCHEMA
@@ -1057,24 +847,6 @@ if drilldown_rows:
     )
     drilldown_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.pelt_analyse_detaljer")
     print(f"pelt_analyse_detaljer skrevet: {len(drilldown_rows)} rader")
-
-# Summary — series whose current state (latest row) is not Stabil
-if cusum_rows:
-    spark.sql(f"""
-                SELECT indikator, maaltall, granularitet, analyse_dato, tilstand
-                FROM (
-                    SELECT *,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY indikator, maaltall, granularitet
-                               ORDER BY analyse_dato DESC
-                           ) AS rn
-                    FROM analyser.cusum_analyse
-                    WHERE kjoere_id = '{BATCH_ID}'
-                ) siste
-                WHERE rn = 1
-                    AND tilstand <> 'Stabil'
-                ORDER BY maaltall, indikator
-    """).show(50, truncate=False)
 
 if changepoint_rows:
     spark.sql(f"""
@@ -1103,6 +875,6 @@ if drilldown_rows:
 
 # =============================================================================
 # Power BI/DAX guidance moved to separate documentation:
-#   see CUSUM_Changepoint_POWERBI_DAX.md
+#   see PELT_Changepoint_POWERBI_DAX.md
 # =============================================================================
 

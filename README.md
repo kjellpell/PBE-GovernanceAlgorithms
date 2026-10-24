@@ -36,13 +36,14 @@ first. Split into two Power BI reports along that line, rather than one report m
 self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
-- `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
+- `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` and `Trendretning (12 mnd)` — a percentage, a change in points and one word (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
 - `At_Risk_Open_Cases` — faser **with us** (`Status = "Under behandling"`) that have used ≥ 75 % of their deadline or are past it, the share waiting on the applicant, and implied processing time (queue with us ÷ recent completions) vs. the deadline: plain counts, shares and days, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
-- `CUSUM_Changepoint` — why *this* month triggered, not last month, depends on the same-month-prior-years baseline
+- `Fristprosent` p-chart — monthly value against control limits that depend on that month's volume (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
+- `PELT_Changepoint` (on demand) — when an unexplained shift in the average happened and which team/phase it came from; always shown with its run date
 - `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
 - `Throughput_Pressure_Monitor` — `pressure_nivaa` reads fine; the five-factor weighted score behind it doesn't
 
@@ -56,14 +57,14 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 
 | File | Output table(s) | What it computes |
 |---|---|---|
-| `CUSUM_Changepoint.py` | `cusum_analyse` (nightly); `pelt_analyse`, `pelt_analyse_detaljer` (on demand, `KJOER_PELT`) | CUSUM drift score + PELT changepoints — recursive/segmentation math |
+| `PELT_Changepoint.py` | `pelt_analyse`, `pelt_analyse_detaljer` — **on demand, not scheduled** | PELT changepoints + drill-down — segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
 | `Throughput_Pressure_Monitor.py` | `gjennomstroemming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
 `START_YEAR = 2015` is a top-of-file constant, not a shared config — it's duplicated as a
-literal in four scripts: `CUSUM_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
+literal in four scripts: `PELT_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
 `Throughput_Pressure_Monitor.py`, `Phase_Bottleneck_Detector.py`. If the earliest reliable
 year in your Lakehouse changes, update it in all four — there's no single place that fixes
 it for every script. (`Kostra.py` pulls whatever SSB has.)
@@ -78,13 +79,20 @@ Three things that used to be here were retired:
   individual-level monitoring that needs a separate employee-representative process, and
   not an early-warning signal. Team-level at-risk counts answer the operational question
   without naming individuals. See git history if it is ever needed again.
+- CUSUM drift detection (`cusum_analyse`, `Trendretning (CUSUM)`, retired October 2026) —
+  on a lagging closed-case measure it was slow (~9 months to see a sustained 1σ shift in
+  monthly data) and, with a recent same-month baseline, raised frequent false alarms; a
+  leader also couldn't see why the word on the card changed. Replaced by live DAX
+  (`Fristprosent_Kontrollkort_POWERBI_DAX.md`: rolling 12 months, change vs. last year,
+  p-chart) and by the leading indicators. PELT, which shared the script, stays on demand
+  as `PELT_Changepoint.py`. See git history for `CUSUM_Changepoint.py`.
 
-All (except `Kostra.py`) run nightly after the main data pipeline — except the PELT part of
-`CUSUM_Changepoint.py`, which runs only when `KJOER_PELT = True` is set by hand.
+All (except `Kostra.py` and `PELT_Changepoint.py`) run nightly after the main data
+pipeline. `PELT_Changepoint.py` is run by hand when needed (e.g. quarterly).
 
-`CUSUM_Changepoint`, `Throughput_Pressure_Monitor` and `Phase_Bottleneck_Detector` score
+`PELT_Changepoint`, `Throughput_Pressure_Monitor` and `Phase_Bottleneck_Detector` score
 only **complete** periods: the current calendar month (and the current ISO week for
-CUSUM's weekly series) is excluded in SQL (`MONTH_CUTOFF_SQL`/`WEEK_CUTOFF_SQL`), so a
+PELT's weekly series) is excluded in SQL (`MONTH_CUTOFF_SQL`/`WEEK_CUTOFF_SQL`), so a
 half-filled month never reads as a drop, and the DAX "siste analysedato" measures land on
 the last complete period. `Seasonal_YTD_ratio_extrapolation` is the exception on purpose —
 it handles the part-month itself and anchors on the last complete month.
@@ -95,17 +103,23 @@ role DAX has no clean primitive for, exactly the "possible but not simple" case 
 
 ## Closed-case trend, drift, and forecast
 
-### CUSUM_Changepoint.py
+### Fristprosent level: rolling 12 months and p-chart (live DAX)
 
-Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per indicator,
-on both monthly and weekly series.
+`Fristprosent_Kontrollkort_POWERBI_DAX.md`. Leader report: `Fristprosent 12 mnd`,
+`Endring mot i fjor (pp)` and `Trendretning (12 mnd)` (±2 points, hidden below 100
+produced faser a year). Analyst report: a monthly p-chart, with the centre line = the same
+calendar month in the three prior years (pooled counts) and limits ±3·√(p(1−p)/n). These
+confirm that a shift has happened; they are not the early warning (see Leading indicator).
 
-- **CUSUM runs nightly; PELT + drill-down run on demand** (`KJOER_PELT`, default `False`).
-  PELT looks backwards — it finds breaks nobody logged (registration practice, system
-  migration, rule change) — and needs ~6 periods after a break before it can see it, so it
-  adds nothing to a nightly early warning. With `KJOER_PELT = False` the `pelt_*` tables
-  keep the last manual run; show `kjoert_tidspunkt` on those pages. To evaluate a *known*
-  organisational change, use an interrupted time series at the known date, not PELT
+### PELT_Changepoint.py (on demand)
+
+Finds structural breakpoints (PELT) in the average of each indicator's series, monthly and
+weekly, and breaks the latest one down by team and phase. **Not scheduled** — run by hand,
+e.g. quarterly. It looks backwards: it finds breaks nobody logged (registration practice,
+system migration, rule change) and needs ~6 periods after a break to see it, so it is not
+an early warning. To evaluate a *known* organisational change, use an interrupted time
+series at the known date, not PELT. The `pelt_*` tables keep the last manual run; show
+`kjoert_tidspunkt` on those pages.
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
 - `Fristprosent` has one official definition across the repo: produced faser (start and
@@ -118,30 +132,13 @@ on both monthly and weekly series.
   is week 202501, not 202401. Mixing calendar year with ISO week mis-placed New Year
   days and would crash the nightly run on a date like 1 Jan 2021 (`202153` does not exist)
 - **No install step, no external dependency.** PELT runs on a built-in pure-NumPy
-  implementation with an L2 (mean-shift) cost (`_pelt_l2` in `CUSUM_Changepoint.py`) —
+  implementation with an L2 (mean-shift) cost (`_pelt_l2` in `PELT_Changepoint.py`) —
   detects a shift in the average, not a volatility change with the average unchanged.
   Never add an inline `%pip install` cell for a changepoint library: it fails with
   `MagicUsageError` on tenants where inline installation is disabled, and isn't needed here
-- **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `CUSUM_BASELINE_YEARS` (3), `CUSUM_MIN_BASELINE_YEARS` (2), `CUSUM_MIN_POST_BASELINE_OBS`, `CUSUM_RECOVERY_PERIODS` (3)
-- Each observation is standardised against the **same calendar month (or ISO week) in the
-  three preceding years**, never its own year (`standardise_seasonal`): seasonally
-  adjusted, recent, and unable to absorb drift inside the current year. Sigma is pooled
-  over all positions in those years. No output for a month/week with fewer than two prior
-  years. A shift lasting several years becomes the new normal by design
-- `signal`/`signalretning` are the **event** (the period an accumulator crossed `h`, then
-  reset); `tilstand` is the **state** — the last signalled direction, held until an
-  opposite signal or `CUSUM_RECOVERY_PERIODS` quiet periods in a row (accumulator below
-  `h/2` and not pushing further). All use `Stigende`/`Synkende`/`Stabil`, so a board-level
-  measure reads `cusum_analyse[tilstand]` directly with no translation SWITCH
-  (`endringsretning` in `pelt_analyse` is never `Stabil` — a changepoint row only exists
-  when a shift was actually detected)
-- `cusum_analyse` stores only `cusum_positiv`/`cusum_negativ`/`signal` — the raw value is a
-  live DAX measure against `Faser`, defined elsewhere in the model
-- Board/governance trend direction (`Stigende`/`Synkende`/`Stabil`) is `Trendretning (CUSUM)`
-  in `CUSUM_Changepoint_POWERBI_DAX.md` — `tilstand` on the latest row, not a
-  separately-computed DAX slope. (It used to read `signalretning`, which is only non-`Stabil`
-  in the firing period, so a board card said "stable" every other month during a real decline)
-
+- **Key constants:** `PELT_MIN_SIZE` (6), `MIN_SEGMENT_OBS` (10), `RECENT_CHANGEPOINT_DAYS`
+- `endringsretning` in `pelt_analyse` is `Stigende`/`Synkende`, never `Stabil` — a
+  changepoint row only exists when a shift was actually detected
 - PELT's penalty uses a robust noise estimate, `1.4826 · MAD(diff(values)) / √2`, not
   `np.std(values)` — real shifts inflate the plain std, and a large old shift could hide
   a moderate recent one entirely
