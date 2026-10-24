@@ -38,6 +38,11 @@ MIN_BASELINE_OBS = 6
 MIN_TEAM_VOLUME = 10
 POSITIVE_FLOW_STREAK = 3
 
+# Only complete months are scored: the current calendar month is still
+# filling up, so its counts would look like a drop in output every run. DAX "siste analysedato" measures pick
+# up the last complete period automatically as a result.
+MONTH_CUTOFF_SQL = "CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE)"
+
 
 # =============================================================================
 # CELL 1 — Create output tables
@@ -106,6 +111,7 @@ received = spark.sql(f"""
       AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
       AND pr.indikator NOT LIKE '%avtalt%'
       AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+      AND pr.startmilepaeldato < {MONTH_CUTOFF_SQL}
     GROUP BY pr.indikator, COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
              YEAR(pr.startmilepaeldato), MONTH(pr.startmilepaeldato)
 """).toPandas()
@@ -125,6 +131,7 @@ completed = spark.sql(f"""
       AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
       AND pr.indikator NOT LIKE '%avtalt%'
       AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+      AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
     GROUP BY pr.indikator, COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
              YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
@@ -147,6 +154,7 @@ phase_received = spark.sql(f"""
       AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
       AND pr.indikator NOT LIKE '%avtalt%'
       AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+      AND pr.startmilepaeldato < {MONTH_CUTOFF_SQL}
     GROUP BY pr.indikator,
              COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
              COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase'),
@@ -169,6 +177,7 @@ phase_completed = spark.sql(f"""
       AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
       AND pr.indikator NOT LIKE '%avtalt%'
       AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+      AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
     GROUP BY pr.indikator,
              COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
              COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase'),

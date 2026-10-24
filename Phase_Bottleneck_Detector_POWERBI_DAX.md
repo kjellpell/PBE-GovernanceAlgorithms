@@ -66,6 +66,8 @@ ligge på omtrent samme nivå som tidligere måneder.
 ## DAX-forslag
 
 ### Siste analysedato
+Tabellen inneholder bare **hele måneder**; inneværende måned skrives ikke før den er
+ferdig, så `[Siste analysedato flaskehals]` er alltid slutten av forrige måned.
 ```DAX
 Siste analysedato flaskehals =
 CALCULATE(

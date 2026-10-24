@@ -57,6 +57,9 @@ Fra `analyser.gjennomstroemming_press_fase`:
 ## DAX-forslag
 
 ### Siste dato i kontekst
+Tabellen inneholder bare **hele måneder** — inneværende måned skrives ikke før den er
+ferdig. `[Siste analysedato]` er derfor alltid slutten av forrige måned, ikke en halv
+måned som ser ut som et fall i ferdigstilte saker.
 ```DAX
 Siste analysedato =
 CALCULATE(

@@ -53,6 +53,13 @@ CUSUM_K       = 0.5   # allowance parameter — half sigma is standard
 CUSUM_H       = 5.0   # decision threshold — 5 sigma cumulative
 START_YEAR    = 2015  # exclude data before this year — adjust if older data is reliable
 
+# Only complete periods are scored: the current calendar month (and, for the
+# weekly series, the current ISO week) is still filling up, so its counts and
+# rates would look like a drop every run. DAX "siste analysedato" measures pick
+# up the last complete period automatically as a result.
+MONTH_CUTOFF_SQL = "CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE)"
+WEEK_CUTOFF_SQL  = "CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE)"   # Monday of this ISO week
+
 # Seasonal baseline — each observation is standardised against the SAME
 # calendar month (monthly) or ISO week (weekly) in the preceding
 # CUSUM_BASELINE_YEARS years, never including its own year. That removes
@@ -185,6 +192,7 @@ monthly_frist = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
         ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
@@ -203,6 +211,7 @@ monthly_tid = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
         ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
@@ -224,6 +233,7 @@ monthly_started = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+            AND pr.startmilepaeldato < {MONTH_CUTOFF_SQL}
         GROUP BY pr.indikator, YEAR(pr.startmilepaeldato), MONTH(pr.startmilepaeldato)
 """).toPandas()
 
@@ -239,6 +249,7 @@ monthly_ended = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
@@ -263,6 +274,7 @@ weekly_frist = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {WEEK_CUTOFF_SQL}
         GROUP BY pr.indikator, {iso_week_sql('pr.sluttmilepaeldato')}
         ORDER BY pr.indikator, period
 """).toPandas()
@@ -280,6 +292,7 @@ weekly_started = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+            AND pr.startmilepaeldato < {WEEK_CUTOFF_SQL}
         GROUP BY pr.indikator, {iso_week_sql('pr.startmilepaeldato')}
 """).toPandas()
 
@@ -295,6 +308,7 @@ weekly_ended = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {WEEK_CUTOFF_SQL}
         GROUP BY pr.indikator, {iso_week_sql('pr.sluttmilepaeldato')}
 """).toPandas()
 

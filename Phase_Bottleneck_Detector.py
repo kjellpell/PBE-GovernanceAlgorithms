@@ -40,6 +40,11 @@ START_YEAR = 2015
 BASELINE_MONTHS = 12
 MIN_BASELINE_OBS = 6
 MIN_SEGMENT_OBS = 10
+
+# Only complete months are scored: the current calendar month is still
+# filling up, so its counts would look like a drop in output every run. DAX "siste analysedato" measures pick
+# up the last complete period automatically as a result.
+MONTH_CUTOFF_SQL = "CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE)"
 KO_VEKST_TERSKEL = 0.10  # queue must be this much above its median over the last BASELINE_MONTHS
 
 
@@ -100,6 +105,7 @@ received = spark.sql(f"""
       AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
       AND pr.indikator NOT LIKE '%avtalt%'
       AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+      AND pr.startmilepaeldato < {MONTH_CUTOFF_SQL}
     GROUP BY pr.indikator,
              COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
              COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase'),
@@ -126,6 +132,7 @@ completed = spark.sql(f"""
       AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
       AND pr.indikator NOT LIKE '%avtalt%'
       AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+      AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
     GROUP BY pr.indikator,
              COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
              COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase'),

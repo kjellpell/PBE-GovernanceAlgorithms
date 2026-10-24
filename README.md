@@ -79,6 +79,13 @@ signal, just not a trend.
 
 All (except `Kostra.py`) run nightly after the main data pipeline.
 
+`CUSUM_Changepoint`, `Throughput_Pressure_Monitor` and `Phase_Bottleneck_Detector` score
+only **complete** periods: the current calendar month (and the current ISO week for
+CUSUM's weekly series) is excluded in SQL (`MONTH_CUTOFF_SQL`/`WEEK_CUTOFF_SQL`), so a
+half-filled month never reads as a drop, and the DAX "siste analysedato" measures land on
+the last complete period. `Seasonal_YTD_ratio_extrapolation` is the exception on purpose —
+it handles the part-month itself and anchors on the last complete month.
+
 Throughput_Pressure_Monitor and Phase_Bottleneck_Detector were briefly native DAX; reverted
 — the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
 role DAX has no clean primitive for, exactly the "possible but not simple" case above.

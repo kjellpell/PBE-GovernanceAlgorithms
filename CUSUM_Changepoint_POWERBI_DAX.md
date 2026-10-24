@@ -51,6 +51,9 @@ Tidligere leste bordkortet `signalretning` på siste rad. Under en vedvarende ne
 det da `Synkende` bare i måneden signalet fyrte og `Stabil` ellers — i en simulering
 halvparten av månedene. Bruk `tilstand` på alle kort som skal svare på «hvordan går det nå».
 
+**Bare hele perioder:** inneværende måned (månedlig) og inneværende ISO-uke (ukentlig)
+er ikke med, så `[Siste CUSUM-dato]` er siste hele måned/uke.
+
 ## Visualforslag
 
 ### 1) CUSUM-linje (tidlig varsling)
