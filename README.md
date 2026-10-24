@@ -1,7 +1,7 @@
 # PBE-GovernanceAlgorithms
 
 One system for monitoring case-processing indicators (`Fristprosent`, `Behandlingstid`,
-`Produksjonsdifferanse`) from several angles: trend, drift, forecast, flow, workload. All views read the same fact table
+`Produksjonsdifferanse`) from several angles: trend, drift, forecast, flow. All views read the same fact table
 (`saksbehandling.faser`, `pk_indikator` from `felles.indikator`), all output values in
 Norwegian, DAX measure names in Norwegian.
 
@@ -38,14 +38,13 @@ self-explanatory labels with numbers that need a briefing:
 **Leder-rapport** — reads cold, no explanation needed:
 - `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
-- `At_Risk_Open_Cases` — open faser that have used ≥ 75 % of their deadline, and those already past it: plain counts and a share, live DAX
+- `At_Risk_Open_Cases` — faser **with us** (`Status = "Under behandling"`) that have used ≥ 75 % of their deadline or are past it, the share waiting on the applicant, and implied processing time (queue with us ÷ recent completions) vs. the deadline: plain counts, shares and days, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
 - `CUSUM_Changepoint` — why *this* month triggered, not last month, depends on the same-month-prior-years baseline
 - `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
 - `Throughput_Pressure_Monitor` — `pressure_nivaa` reads fine; the five-factor weighted score behind it doesn't
-- `Caseworker_Load_Concentration` — a Gini coefficient teaches a leader nothing on sight the way a percentage or a day count does; the color band is doing all the communicating, so keep the raw number out of any leader-facing view entirely
 
 Note the asymmetry between the two flow/queue pages: `Phase_Bottleneck_Detector` earns
 leader-report placement specifically because of `arsak_tekst` — its sibling
@@ -57,7 +56,7 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 
 | File | Output table(s) | What it computes |
 |---|---|---|
-| `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | CUSUM drift score + PELT changepoints — recursive/segmentation math |
+| `CUSUM_Changepoint.py` | `cusum_analyse` (nightly); `pelt_analyse`, `pelt_analyse_detaljer` (on demand, `KJOER_PELT`) | CUSUM drift score + PELT changepoints — recursive/segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
 | `Throughput_Pressure_Monitor.py` | `gjennomstroemming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
@@ -69,16 +68,19 @@ literal in four scripts: `CUSUM_Changepoint.py`, `Seasonal_YTD_ratio_extrapolati
 year in your Lakehouse changes, update it in all four — there's no single place that fixes
 it for every script. (`Kostra.py` pulls whatever SSB has.)
 
-Two things that used to be scripts here — daily-open-case age buckets and a persisted
-Gini-concentration trend — were retired: a nightly pipeline plus an ever-growing table was
-too much standing infrastructure for a future maintainer without a coding background to
-keep running, for signals that don't need day-by-day history. See git history for
-`Backlog_Aging_Distribution.py`/`sak_alder_fordeling` if that view is ever needed again;
-`Caseworker_Load_Concentration` survived as a live DAX measure instead (see
-`Caseworker_Load_Concentration_POWERBI_DAX.md`) since it's still worth having as a current
-signal, just not a trend.
+Three things that used to be here were retired:
+- daily-open-case age buckets and a persisted Gini-concentration trend (scripts) — a
+  nightly pipeline plus an ever-growing table was too much standing infrastructure for a
+  future maintainer without a coding background to keep running. See git history for
+  `Backlog_Aging_Distribution.py`/`sak_alder_fordeling`.
+- the live-DAX caseworker Gini page (`Caseworker_Load_Concentration_POWERBI_DAX.md`,
+  retired October 2026) — hard for leaders to read, muddied by part-time and leave,
+  individual-level monitoring that needs a separate employee-representative process, and
+  not an early-warning signal. Team-level at-risk counts answer the operational question
+  without naming individuals. See git history if it is ever needed again.
 
-All (except `Kostra.py`) run nightly after the main data pipeline.
+All (except `Kostra.py`) run nightly after the main data pipeline — except the PELT part of
+`CUSUM_Changepoint.py`, which runs only when `KJOER_PELT = True` is set by hand.
 
 `CUSUM_Changepoint`, `Throughput_Pressure_Monitor` and `Phase_Bottleneck_Detector` score
 only **complete** periods: the current calendar month (and the current ISO week for
@@ -97,6 +99,13 @@ role DAX has no clean primitive for, exactly the "possible but not simple" case 
 
 Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per indicator,
 on both monthly and weekly series.
+
+- **CUSUM runs nightly; PELT + drill-down run on demand** (`KJOER_PELT`, default `False`).
+  PELT looks backwards — it finds breaks nobody logged (registration practice, system
+  migration, rule change) — and needs ~6 periods after a break before it can see it, so it
+  adds nothing to a nightly early warning. With `KJOER_PELT = False` the `pelt_*` tables
+  keep the last manual run; show `kjoert_tidspunkt` on those pages. To evaluate a *known*
+  organisational change, use an interrupted time series at the known date, not PELT
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
 - `Fristprosent` has one official definition across the repo: produced faser (start and
@@ -179,6 +188,12 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
 
 ### Throughput_Pressure_Monitor.py
 
+**Scheduled for retirement** once `Pause_Reconstruction.py` (P2-0 in
+`HANDOVER_ADDENDUM_1.md`) is live: its weekly flow history per team (queue with us,
+waiting share, at-risk, intake/output) covers this script's team-level job with measures a
+leader can read directly, and its fase support table duplicates `Phase_Bottleneck_Detector`.
+Until then it stays, as the only team-level flow history.
+
 Team-level (`enhet`) flow imbalance (received vs. completed) and processing-time
 deviation vs. a rolling baseline, combined into a `pressure_nivaa`
 (`Lav`/`Moderat`/`Høy`/`Kritisk`).
@@ -213,40 +228,26 @@ explaining the flag.
   `Phase_Bottleneck_Detector_POWERBI_DAX.md` — flags should no longer pile up in the
   latest two months
 
-## Workload
-
-### Caseworker load concentration
-
-Is active caseload concentrating on a few caseworkers within a team, even while the
-team's aggregate numbers look fine? Entirely live DAX, no script — per-person
-counts/shares (`Saker[saksansvarlig]`, related to `Faser` on `fk_saker`; active load =
-distinct cases with an open fase) and the Gini coefficient itself, via an average-rank
-`SUMX` iterator over the current enhet x indikator context, not a persisted trend table.
-Ties must use average ranks — a `DENSE` rank made the Gini negative and the badge never
-left green (fixed October 2026; numpy check in `tests/test_gini_reference.py`). See `Caseworker_Load_Concentration_POWERBI_DAX.md`
-for the full measure set and the tradeoff (current signal only, no day-by-day history).
-
-- Gini is scoped to enhet x indikator, never blended across an enhet's indicators (indicator
-  effort/complexity isn't comparable and isn't in the data — blending could mask
-  concentration on a heavier indicator behind a pile of lighter ones) and never broken down
-  per person — individual-level flagging is out of scope for this layer, same reasoning as
-  `CUSUM_Changepoint.py`'s drilldown exclusion.
-- Gini on 1-2 people is meaningless — gated to enhet x indikator combinations with 3+ active
-  caseworkers. The ceiling is (N−1)/N, so the 0.3/0.5 colour thresholds are stricter
-  for a team of 3 than for a team of 12.
-
 ## Leading indicator
 
 ### At-risk open faser (live DAX)
 
 Every other signal here is computed on **closed** faser, so it lags: a fase that will
 breach its deadline only shows up when it closes. `At_Risk_Open_Cases_POWERBI_DAX.md`
-counts **open** faser whose age (calendar days since `startmilepaeldato`, `TODAY()`) is
-at least a threshold share of `frist_dager` (what-if parameter, default 0.75), plus those
-already past the deadline. Entirely live DAX, no script — it needs `TODAY()` but only as a
-current value, not a history. Same scope as the official `Fristprosent` (`%avtalt%`
-included). `frist_dager` is calendar days; the doc shows the `NETWORKDAYS` swap if that
-ever changes. A nightly snapshot to give it a trend was considered and not added.
+counts open faser **with us** (`Faser[Status] = "Under behandling"`) whose age is at least
+a threshold share of `frist_dager` (what-if parameter, default 0.75), plus those already
+past the deadline. Faser waiting on the applicant to complete documentation are outside
+the department's control and normally stop the deadline clock, so they are shown as a
+separate waiting share, never as at risk. `Implisitt behandlingstid` (Little's law: queue
+with us ÷ completions in the last 28 days × 28) compared with the typical deadline is the
+earliest quantitative warning. Entirely live DAX, no script. Same scope as the official
+`Fristprosent` (`%avtalt%` included); `frist_dager` is calendar days.
+
+Interim limitation: age is calendar days since `startmilepaeldato`, which over-states age
+for faser that waited on the applicant earlier (over-flags, never under-flags). The fix is
+planned: reconstruct pause intervals from the "asked for completion"/"received completion"
+milestones into a per-fase deadline clock and a weekly flow history
+(`HANDOVER_ADDENDUM_1.md`, P2-0).
 
 ## External ingestion (not a governance algorithm)
 

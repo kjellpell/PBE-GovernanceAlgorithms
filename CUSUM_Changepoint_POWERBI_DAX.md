@@ -16,6 +16,15 @@ Datakilder:
 - `analyser.pelt_analyse`
 - `analyser.pelt_analyse_detaljer`
 
+**PELT kjøres ved behov, ikke hver natt** (`KJOER_PELT = False` i det planlagte løpet).
+`pelt_analyse` og `pelt_analyse_detaljer` beholder resultatet fra siste manuelle kjøring —
+vis alltid `kjoert_tidspunkt` på PELT-sidene, så ingen tror tallene er fra i natt. PELT
+ser bakover: den finner brudd dere ikke visste om (registreringspraksis, systembytte,
+regelendring). Den er ikke et tidlig varsel, og den er ikke riktig verktøy for å
+evaluere en *kjent* organisasjonsendring — da brukes avbrutt tidsserie (segmentert
+regresjon) på den kjente datoen. Kjør PELT f.eks. kvartalsvis, og sjekk hvert funnet
+brudd mot endringsloggen.
+
 `Fristprosent` følger den **offisielle definisjonen** (samme som
 `Seasonal_YTD_ratio_extrapolation.py` og rapportens `[Produserte faser]`): nevner =
 produserte faser (både start- og sluttmilepæl satt), teller = de med `innenfor_frist = 1`,

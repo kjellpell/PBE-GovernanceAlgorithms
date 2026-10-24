@@ -26,7 +26,13 @@
 #   pelt_analyse      — oppdagede endringspunkter med gjennomsnitt før/etter
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
 #
-# Schedule: nightly, after main data pipeline.
+# Schedule: nightly, after main data pipeline — CUSUM only. PELT and the
+# drill-down are ON DEMAND: they run only when KJOER_PELT = True (set it and
+# run this notebook by hand, e.g. quarterly or after an organisational
+# change). With KJOER_PELT = False the pelt_* tables are left untouched, so
+# they keep the result of the last on-demand run (see kjoert_tidspunkt).
+# PELT looks backwards — it finds breaks you didn't know about — and is not
+# part of the early-warning signal, so it doesn't need to run every night.
 # Requires: nothing to install. PELT runs on a built-in pure-NumPy
 # implementation with an L2 (mean-shift) cost — see _pelt_l2() below. No
 # external library, so no `%pip install` cell: on tenants with inline
@@ -52,6 +58,10 @@ MIN_WEEKLY    = 52
 CUSUM_K       = 0.5   # allowance parameter — half sigma is standard
 CUSUM_H       = 5.0   # decision threshold — 5 sigma cumulative
 START_YEAR    = 2015  # exclude data before this year — adjust if older data is reliable
+
+# PELT changepoints + drill-down: on demand only. Leave False in the nightly
+# schedule; set True and run by hand when you want a fresh changepoint search.
+KJOER_PELT    = False
 
 # Only complete periods are scored: the current calendar month (and, for the
 # weekly series, the current ISO week) is still filling up, so its counts and
@@ -895,7 +905,9 @@ for metrikk, df, granularitet, min_obs in series_configs:
                     "kjoere_id":       BATCH_ID,
                 })
 
-        # ── Changepoint (monthly and weekly — see PELT header note) ─
+        # ── Changepoint (monthly and weekly — on demand, see KJOER_PELT) ─
+        if not KJOER_PELT:
+            continue
         breakpoints = run_changepoint(ind_data, granularitet)
         for cp in extract_changepoint_stats(ind_data, breakpoints, granularitet):
             changepoint_rows.append({
@@ -911,7 +923,8 @@ for metrikk, df, granularitet, min_obs in series_configs:
             })
 
 print(f"CUSUM rows computed:       {len(cusum_rows)}")
-print(f"Changepoint rows computed: {len(changepoint_rows)}")
+print(f"Changepoint rows computed: {len(changepoint_rows)}"
+      + ("" if KJOER_PELT else "  (PELT hoppet over — KJOER_PELT = False)"))
 print(f"Active CUSUM signals:      "
       f"{sum(1 for r in cusum_rows if r['signal'])}")
 

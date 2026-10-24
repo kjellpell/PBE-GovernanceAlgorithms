@@ -495,5 +495,21 @@ class PeltL2FallbackTests(unittest.TestCase):
         self.assertEqual(_pelt_l2(values, min_size=6, penalty=1.0), [])
 
 
+class PeltOnDemandTests(unittest.TestCase):
+    def test_pelt_is_off_in_the_nightly_default(self):
+        # PELT + drill-down are on demand; the committed notebook must not run
+        # them nightly (README: "Closed-case trend, drift, and forecast").
+        values = {
+            node.targets[0].id: node.value
+            for node in TREE.body
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        }
+        self.assertIn("KJOER_PELT", values)
+        self.assertIs(ast.literal_eval(values["KJOER_PELT"]), False)
+
+
 if __name__ == "__main__":
     unittest.main()
+
