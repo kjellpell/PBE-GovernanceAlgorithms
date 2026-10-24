@@ -38,6 +38,7 @@ self-explanatory labels with numbers that need a briefing:
 **Leder-rapport** — reads cold, no explanation needed:
 - `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
+- `At_Risk_Open_Cases` — open faser that have used ≥ 75 % of their deadline, and those already past it: plain counts and a share, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
@@ -233,6 +234,19 @@ for the full measure set and the tradeoff (current signal only, no day-by-day hi
 - Gini on 1-2 people is meaningless — gated to enhet x indikator combinations with 3+ active
   caseworkers. The ceiling is (N−1)/N, so the 0.3/0.5 colour thresholds are stricter
   for a team of 3 than for a team of 12.
+
+## Leading indicator
+
+### At-risk open faser (live DAX)
+
+Every other signal here is computed on **closed** faser, so it lags: a fase that will
+breach its deadline only shows up when it closes. `At_Risk_Open_Cases_POWERBI_DAX.md`
+counts **open** faser whose age (calendar days since `startmilepaeldato`, `TODAY()`) is
+at least a threshold share of `frist_dager` (what-if parameter, default 0.75), plus those
+already past the deadline. Entirely live DAX, no script — it needs `TODAY()` but only as a
+current value, not a history. Same scope as the official `Fristprosent` (`%avtalt%`
+included). `frist_dager` is calendar days; the doc shows the `NETWORKDAYS` swap if that
+ever changes. A nightly snapshot to give it a trend was considered and not added.
 
 ## External ingestion (not a governance algorithm)
 
