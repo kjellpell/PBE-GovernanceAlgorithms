@@ -19,30 +19,29 @@ svarer på:
 
 Dette er et **ledende** signal. Det er ren live DAX mot `Faser`, uten skript: verdien
 avhenger av `TODAY()`, men et øyeblikksbilde trenger ingen historikk (se regelen i
-`README.md`). Konsekvens: siden viser bare «nå», ikke hvordan antallet har utviklet seg.
-En liten nattlig snapshot-tabell (dato × enhet × indikator × antall) ville gitt en trend,
-men er ikke lagt til — det ville delvis gjenopprette det pensjonerte
-`Backlog_Aging_Distribution.py`, og ekstra stående infrastruktur er valgt bort.
+`README.md`). Siden viser «nå». **Trenden** — hvordan antallet hos oss, i faresonen og på
+vent har utviklet seg uke for uke, bakover til 2015 — kommer fra `analyser.flyt_ukentlig`,
+som `Pause_Reconstruction.py` bygger opp fra milepælene (se
+`Pause_Reconstruction_POWERBI_DAX.md`). Ingen voksende snapshot-tabell.
 
 ## Antagelser (rename to match your model)
 - `Faser` — `saksbehandling.faser`, med `startmilepaeldato`, `sluttmilepaeldato`,
-  `frist_dager`, `enhet`, `fasetittel`, `indikator`, `Status`
+  `frist_dager`, `tidsbruk`, `bransjetid`, `enhet`, `fasetittel`, `indikator`, `Status`
 - `Faser[Status] = "Under behandling"` betyr at fasen er **hos oss** (bekreftet). Andre
   statuser på en åpen fase = venter (på søker eller ekstern part)
-- **Midlertidig begrensning:** alder regnes i kalenderdager siden `startmilepaeldato`.
-  En fase som tidligere har ventet på komplettering ser derfor eldre ut enn
-  fristklokken tilsier — målet kan **overvarsle, aldri undervarsle**. Når
-  `analyser.fase_klokke` finnes (oppgave P2-0 i handover-tillegget), byttes
-  `DATEDIFF(...)` ut med `fase_klokke[klokke_dager]`
-- `frist_dager` er **kalenderdager** (bekreftet). Derfor `DATEDIFF(..., DAY)`. Skulle det
-  endres til virkedager, bytt `DATEDIFF(Faser[startmilepaeldato], Idag, DAY)` med
-  `NETWORKDAYS(Faser[startmilepaeldato], Idag)` (eventuelt med en helligdagstabell som
-  tredje argument).
+- **Fristklokken er `Faser[tidsbruk]`**: dager på *vår* side, en løpende akkumulator som
+  oppdateres mens fasen er åpen og står stille mens den venter på søker (den tiden går i
+  `Faser[bransjetid]`). Derfor brukes `tidsbruk`, ikke kalenderdager siden start — en fase
+  som har ventet en måned på tegninger er ikke en måned nærmere fristen. (Tidligere
+  versjoner av denne siden, og det pensjonerte `Inflight_SLA_Risk_Monitor`, regnet
+  kalenderalder og overvarslet derfor.) `Pause_Reconstruction.py` kontrollerer hver natt at
+  `tidsbruk` stemmer med pausene i milepælene — se utskriften der
+- `frist_dager` og `tidsbruk` er **kalenderdager** (bekreftet)
 - Samme omfang som den offisielle `Fristprosent`: fagområde `Byggesak`/`Eiendomssak`/
   `Plansak` (filtrert i modellen), og `%avtalt%`-indikatorer er **med** — en avtalt frist
   er fortsatt en frist.
-- En fase regnes som brutt når antall dager siden start er **større enn** `frist_dager`
-  (samme som at `tidsbruk <= frist_dager` gir `innenfor_frist = 1`). Kontroller mot
+- En fase regnes som brutt når `tidsbruk` er **større enn** `frist_dager` (samme som at
+  `tidsbruk <= frist_dager` gir `innenfor_frist = 1`). Kontroller mot
   hvordan `innenfor_frist` faktisk beregnes i datavarehuset; er det `<`, endre `>` til
   `>=` i `Hos oss over frist`.
 - Tellingen er per **fase** (fristen gjelder fasen), ikke per sak.
@@ -91,31 +90,27 @@ DIVIDE([Venter (ikke hos oss)], [Venter (ikke hos oss)] + [Hos oss])
 ```DAX
 Hos oss i faresonen =
 VAR Terskel = [Faresone terskel]
-VAR Idag = TODAY()
 RETURN
     COUNTROWS(
         FILTER(
             Faser,
             Faser[Status] = "Under behandling"
-                && NOT ISBLANK(Faser[startmilepaeldato])
+                && NOT ISBLANK(Faser[tidsbruk])
                 && NOT ISBLANK(Faser[frist_dager])
-                && DATEDIFF(Faser[startmilepaeldato], Idag, DAY)
-                    >= Faser[frist_dager] * Terskel
+                && Faser[tidsbruk] >= Faser[frist_dager] * Terskel
         )
     )
 ```
 
 ```DAX
 Hos oss over frist =
-VAR Idag = TODAY()
-RETURN
     COUNTROWS(
         FILTER(
             Faser,
             Faser[Status] = "Under behandling"
-                && NOT ISBLANK(Faser[startmilepaeldato])
+                && NOT ISBLANK(Faser[tidsbruk])
                 && NOT ISBLANK(Faser[frist_dager])
-                && DATEDIFF(Faser[startmilepaeldato], Idag, DAY) > Faser[frist_dager]
+                && Faser[tidsbruk] > Faser[frist_dager]
         )
     )
 ```
@@ -133,8 +128,7 @@ Hos oss i faresonen, ikke over frist =
 `Hos oss i faresonen` **inkluderer** dem som allerede er over fristen. Det siste målet
 over er de som fortsatt kan reddes — ofte det mest handlingsrettede tallet.
 
-`Terskel` og `Idag` hentes som variabler før `FILTER`, slik at de beregnes én gang og ikke
-per rad.
+`Terskel` hentes som variabel før `FILTER`, slik at den beregnes én gang og ikke per rad.
 
 ### Implisitt behandlingstid (Littles lov)
 
@@ -164,9 +158,21 @@ Typisk frist (dager) =
 CALCULATE(MEDIAN(Faser[frist_dager]), Faser[Status] = "Under behandling")
 ```
 
-Begrensning: henlagte/trukkede saker som ble lukket etter å ha ventet på søker telles som
-ferdigstilt og får tempoet til å se bedre ut enn det er. Ekskluder dem her når det er
-avklart hvordan de er kodet (handover-tillegget, beslutning 8).
+Trukne/utgåtte faser (milepæl «00e Sak trukket/utgått/uaktuell») er ikke produksjon og bør
+ikke telle som ferdigstilt. Hvis `analyser.fase_klokke` er relatert til `Faser` på
+`pk_faser` (én-til-én), ekskluder dem slik:
+
+```DAX
+Ferdigstilt siste 28 dager (uten trukket) =
+CALCULATE(
+    [Ferdigstilt siste 28 dager],
+    fase_klokke[trukket] = FALSE()
+)
+```
+
+Bruk den i `Implisitt behandlingstid` i stedet for `Ferdigstilt siste 28 dager`. For
+trenden bakover er dette allerede gjort i `flyt_ukentlig` (`ferdigstilt` og `trukket` er
+egne kolonner).
 
 ```DAX
 Faresone fargekode =

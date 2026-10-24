@@ -38,7 +38,8 @@ self-explanatory labels with numbers that need a briefing:
 **Leder-rapport** — reads cold, no explanation needed:
 - `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` and `Trendretning (12 mnd)` — a percentage, a change in points and one word (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
-- `At_Risk_Open_Cases` — faser **with us** (`Status = "Under behandling"`) that have used ≥ 75 % of their deadline or are past it, the share waiting on the applicant, and implied processing time (queue with us ÷ recent completions) vs. the deadline: plain counts, shares and days, live DAX
+- `Pause_Reconstruction` weekly trend — with us, at risk and waiting on the applicant per week, and implied processing time vs. the deadline (`Pause_Reconstruction_POWERBI_DAX.md`)
+- `At_Risk_Open_Cases` — faser **with us** (`Status = "Under behandling"`) whose deadline clock (`tidsbruk`) has used ≥ 75 % of `frist_dager` or is past it, the share waiting on the applicant, and implied processing time (queue with us ÷ recent completions) vs. the deadline: plain counts, shares and days, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
@@ -61,6 +62,7 @@ That's a real difference in what the two tables expose, not an inconsistency to 
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
 | `Throughput_Pressure_Monitor.py` | `gjennomstroemming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
+| `Pause_Reconstruction.py` | `fase_klokke`, `flyt_ukentlig` | Deadline clock per fase and weekly history of with-us / waiting / at-risk, rebuilt from completion milestones — interval algorithm |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
 `START_YEAR = 2015` is a top-of-file constant, not a shared config — it's duplicated as a
@@ -185,8 +187,8 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
 
 ### Throughput_Pressure_Monitor.py
 
-**Scheduled for retirement** once `Pause_Reconstruction.py` (P2-0 in
-`HANDOVER_ADDENDUM_1.md`) is live: its weekly flow history per team (queue with us,
+**Scheduled for retirement** once `Pause_Reconstruction.py`'s first runs in Fabric pass
+their validation (see below): its weekly flow history per team (queue with us,
 waiting share, at-risk, intake/output) covers this script's team-level job with measures a
 leader can read directly, and its fase support table duplicates `Phase_Bottleneck_Detector`.
 Until then it stays, as the only team-level flow history.
@@ -231,20 +233,43 @@ explaining the flag.
 
 Every other signal here is computed on **closed** faser, so it lags: a fase that will
 breach its deadline only shows up when it closes. `At_Risk_Open_Cases_POWERBI_DAX.md`
-counts open faser **with us** (`Faser[Status] = "Under behandling"`) whose age is at least
-a threshold share of `frist_dager` (what-if parameter, default 0.75), plus those already
-past the deadline. Faser waiting on the applicant to complete documentation are outside
-the department's control and normally stop the deadline clock, so they are shown as a
-separate waiting share, never as at risk. `Implisitt behandlingstid` (Little's law: queue
-with us ÷ completions in the last 28 days × 28) compared with the typical deadline is the
-earliest quantitative warning. Entirely live DAX, no script. Same scope as the official
-`Fristprosent` (`%avtalt%` included); `frist_dager` is calendar days.
+counts open faser **with us** (`Faser[Status] = "Under behandling"`) whose deadline clock
+has used at least a threshold share of `frist_dager` (what-if parameter, default 0.75),
+plus those already past it. The clock is `Faser[tidsbruk]`, a live accumulator of days on
+our side that stands still while the applicant completes documentation (that time goes to
+`bransjetid`), so a fase that waited a month for drawings is not a month closer to its
+deadline. Earlier versions of this page, and the retired `Inflight_SLA_Risk_Monitor`, used
+calendar age and over-flagged. Waiting faser are shown as a separate share, never as at
+risk. `Implisitt behandlingstid` (Little's law: queue with us ÷ completions in the last 28
+days × 28) compared with the typical deadline is the earliest quantitative warning.
+Entirely live DAX. Same scope as the official `Fristprosent` (`%avtalt%` included).
 
-Interim limitation: age is calendar days since `startmilepaeldato`, which over-states age
-for faser that waited on the applicant earlier (over-flags, never under-flags). The fix is
-planned: reconstruct pause intervals from the "asked for completion"/"received completion"
-milestones into a per-fase deadline clock and a weekly flow history
-(`HANDOVER_ADDENDUM_1.md`, P2-0).
+### Pause_Reconstruction.py — weekly history of the same
+
+The live page knows only "now". `Pause_Reconstruction.py` rebuilds history from the
+milestones "Behov for/Anmodning om tilleggsdokumentasjon" (pause) and "Mottatt
+tilleggsdokumentasjon"/"Komplett søknad" (resume), so every week back to `START_YEAR` gets
+its with-us, waiting, at-risk and past-deadline counts, plus intake, completions,
+withdrawals ("00e Sak trukket/utgått/uaktuell") and requests sent. Rebuilt from source every
+night and overwritten, not appended, so there is no growing snapshot table. That is the
+difference from the retired `Backlog_Aging_Distribution`/`sak_frist_risiko_trend`.
+
+- **Table, column and milestone names are constants at the top of the script**
+  (`MILEPEL_TABELL`, `MILEPEL_*_KOLONNE`, `PAUSE_MILEPELER`, `GJENOPPTA_MILEPELER`,
+  `TRUKKET_MILEPELER`). They follow the repo's earlier milestone scripts. Cell 1 stops with
+  a message naming what to change, and lists candidate names, if the table, a column or the
+  milestones aren't found
+- **Validation printed every run:** reconstructed clock vs. the system's `tidsbruk`, pause
+  days vs. `bransjetid` (closed faser), and reconstructed state vs. `Status` (open faser).
+  High agreement means the weekly history can be trusted. Low agreement for an indikator
+  means its history is approximate (e.g. other milestone names, waiting on external parties,
+  a different clock rule). The live at-risk page is unaffected either way
+- Waiting on **external parties** (hearings, other agencies) isn't in these milestones, so
+  in the history it counts as with us. `Status` gets it right for today
+- Pure functions (`pair_pauses`, `phase_segments`, `crossing_day`, `weekly_table`, …) are
+  tested in `tests/test_pause_reconstruction.py`. That includes a simulated case system
+  whose clock the reconstruction must reproduce exactly, and stock–flow reconciliation is
+  checked on synthetic data
 
 ## External ingestion (not a governance algorithm)
 
