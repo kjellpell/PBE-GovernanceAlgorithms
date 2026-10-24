@@ -181,9 +181,11 @@ explaining the flag.
 
 Is active caseload concentrating on a few caseworkers within a team, even while the
 team's aggregate numbers look fine? Entirely live DAX, no script — per-person
-counts/shares (`Faser[saksansvarlig]` is already in the model) and the
-Gini coefficient itself, via a `RANKX`/`SUMX` iterator over the current enhet x indikator
-context, not a persisted trend table. See `Caseworker_Load_Concentration_POWERBI_DAX.md`
+counts/shares (`Saker[saksansvarlig]`, related to `Faser` on `fk_saker`; active load =
+distinct cases with an open fase) and the Gini coefficient itself, via an average-rank
+`SUMX` iterator over the current enhet x indikator context, not a persisted trend table.
+Ties must use average ranks — a `DENSE` rank made the Gini negative and the badge never
+left green (fixed October 2026; numpy check in `tests/test_gini_reference.py`). See `Caseworker_Load_Concentration_POWERBI_DAX.md`
 for the full measure set and the tradeoff (current signal only, no day-by-day history).
 
 - Gini is scoped to enhet x indikator, never blended across an enhet's indicators (indicator
@@ -192,7 +194,8 @@ for the full measure set and the tradeoff (current signal only, no day-by-day hi
   per person — individual-level flagging is out of scope for this layer, same reasoning as
   `CUSUM_Changepoint.py`'s drilldown exclusion.
 - Gini on 1-2 people is meaningless — gated to enhet x indikator combinations with 3+ active
-  caseworkers.
+  caseworkers. The ceiling is (N−1)/N, so the 0.3/0.5 colour thresholds are stricter
+  for a team of 3 than for a team of 12.
 
 ## External ingestion (not a governance algorithm)
 

@@ -11,13 +11,13 @@ Denne siden skal svare på:
 
 **Merk:** dette er individdata og er ment for intern kapasitetsplanlegging hos ledere —
 ikke for automatisk individvarsling. Vurder å begrense tilgang til denne siden i Power
-BI-rapportsikkerheten, uansett om tallene kommer fra `Faser[saksansvarlig]`-detaljene
+BI-rapportsikkerheten, uansett om tallene kommer fra `Saker[saksansvarlig]`-detaljene
 (Del 1) eller fra Gini-målet (Del 2) — tilgangsbegrensning må håndheves i rapportlaget,
 ikke ved å gjemme et mål.
 
 This is entirely live DAX — no script, no nightly table. Rank-based Lorenz-curve math
 (the Gini coefficient) is usually assumed to need a script, but it's a standard
-`RANKX`/`SUMX` iterator pattern over the current filter context (enhet x indikator), the
+rank/`SUMX` iterator pattern over the current filter context (enhet x indikator), the
 same shape as any concentration/Pareto measure — not the disconnected-date or
 window-scan trickery this repo's own rule (see `README.md`) flags as too iterative for
 DAX. There is a real tradeoff: this gives you today's concentration only, not a trend
@@ -34,6 +34,7 @@ snapshot-table version if a trend view is ever needed again.
 - `Saker` — `saksbehandling.saker`, with `pk_saker`, `saksansvarlig`, related to `Faser`
   via `Saker[pk_saker]` = `Faser[fk_saker]`
 - Same fagomraade/`%avtalt%` filtering assumption as the rest of this repo's DAX docs
+- `saksansvarlig` lives on `Saker` (case level), not on `Faser` — one owner per case
 - Rows with blank/null `saksansvarlig` (unassigned cases) should be excluded, not
   coalesced to "Ukjent" — an "Ukjent" pseudo-caseworker would corrupt the per-person
   concentration picture
@@ -43,12 +44,16 @@ snapshot-table version if a trend view is ever needed again.
 ```DAX
 Aktiv saksmengde (saksbehandler) =
 CALCULATE(
-    COUNTROWS(Faser),
+    DISTINCTCOUNT(Faser[fk_saker]),
     NOT ISBLANK(Faser[startmilepaeldato]),
     ISBLANK(Faser[sluttmilepaeldato]),
     NOT ISBLANK(Saker[saksansvarlig])
 )
 ```
+
+Teller **saker** med minst én åpen fase, ikke åpne faser: en sak med tre åpne faser
+teller én gang. (Fram til oktober 2026 var dette `COUNTROWS(Faser)`, som ga saker med
+mange parallelle faser for stor vekt.)
 
 ```DAX
 Andel av enhetens saksmengde =
@@ -103,7 +108,11 @@ VAR Total = SUMX(Saksmengder, [@Saksmengde])
 VAR Rangert =
     ADDCOLUMNS(
         Saksmengder,
-        "@Rang", RANKX(Saksmengder, [@Saksmengde], , ASC, DENSE)
+        "@Rang",
+            VAR x = [@Saksmengde]
+            RETURN
+                COUNTROWS(FILTER(Saksmengder, [@Saksmengde] < x))
+                + (COUNTROWS(FILTER(Saksmengder, [@Saksmengde] = x)) + 1) / 2
     )
 VAR VektetSum = SUMX(Rangert, [@Rang] * [@Saksmengde])
 RETURN
@@ -112,6 +121,14 @@ RETURN
         DIVIDE(2 * VektetSum, N * Total) - DIVIDE(N + 1, N)
     )
 ```
+
+Rangeringen bruker **gjennomsnittsrang** for like verdier (to personer på 3. og 4. plass
+med samme saksmengde får begge 3,5). Formelen `2·Σ(rang·x) / (N·Σx) − (N+1)/N` krever
+rangene 1..N; med gjennomsnittsrang er den eksakt også ved likhet. Den tidligere
+versjonen brukte `RANKX(..., ASC, DENSE)`, som gir like verdier samme lave rang og hopper
+over resten — Gini ble da negativ (f.eks. −0,75 for fire personer med 10 saker hver, i
+stedet for 0), og fargekoden ble aldri gul eller rød. Se `tests/test_gini_reference.py`
+for en numpy-kontroll av formelen.
 
 ```DAX
 Konsentrasjon fargekode =
@@ -144,6 +161,11 @@ SWITCH(
   indikator-innsats ikke er sammenlignbar og ikke finnes i dataene — å blande ville la
   konsentrasjon på en tyngre indikator gjemme seg bak (eller bli skjult av) en haug
   lettere indikatorer.
+- Høyeste mulige Gini for N personer er (N−1)/N (alt på én person): 0,67 for 3
+  personer, 0,92 for 12. Siden personer med 0 saker er filtrert bort, er den reelle
+  øvre grensen enda lavere i små team. Tersklene 0,3/0,5 er derfor strengere for et
+  lite team enn for et stort — les fargen sammen med
+  `[Antall saksbehandlere (aktiv saksmengde)]`.
 - Dette er et øyeblikksbilde, ikke en trend — en stigende/synkende konsentrasjon over tid
   kan ikke leses av dette målet alene. Hvis en trendvisning blir nødvendig igjen, se
   git-historikken for `Caseworker_Load_Concentration.py` og
