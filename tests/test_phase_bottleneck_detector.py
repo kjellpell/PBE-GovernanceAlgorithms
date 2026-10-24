@@ -126,7 +126,7 @@ class ScoringTests(unittest.TestCase):
         score, reasons = score_bottleneck(10, 0.0, 30, 20, True)
 
         self.assertEqual(reasons, ["NETTO_FLYT_POS", "UTGANGSGAP", "KO_VEKST"])
-        self.assertEqual(severity_label(score), "Hoy")
+        self.assertEqual(severity_label(score), "Høy")
 
     def test_everything_wrong_is_critical(self):
         score, _ = score_bottleneck(10, 0.4, 30, 20, True)

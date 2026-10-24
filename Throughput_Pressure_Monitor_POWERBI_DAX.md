@@ -36,7 +36,7 @@ og bare fortsatt åpne faser ga positiv netto flyt.
 
 ### 1) KPI-kort (øverst)
 - Antall enheter med `pressure_nivaa` = `Kritisk` (bare `tilstrekkelig_volum`, ikke `Ukjent`)
-- Antall enheter med `pressure_nivaa` i (`Hoy`, `Kritisk`) (samme filter)
+- Antall enheter med `pressure_nivaa` i (`Høy`, `Kritisk`) (samme filter)
 - Sum `netto_flyt` siste måned
 - Median `tidsbruk_avvik_pct` siste måned
 
@@ -105,7 +105,7 @@ Små team (`tilstrekkelig_volum = FALSE`) og faser uten registrert enhet (`Ukjen
 utenfor KPI-tellingene — de kan få høy poengsum av noen få saker. De står fortsatt i
 tabellen og kan vises i detaljlisten.
 
-### Antall høyt press (Hoy + Kritisk)
+### Antall høyt press (Høy + Kritisk)
 ```DAX
 Antall høyt press siste =
 CALCULATE(
@@ -113,7 +113,7 @@ CALCULATE(
     FILTER(
         gjennomstroemming_press_enhet,
         gjennomstroemming_press_enhet[analyse_dato] = [Siste analysedato]
-            && gjennomstroemming_press_enhet[pressure_nivaa] IN {"Hoy", "Kritisk"}
+            && gjennomstroemming_press_enhet[pressure_nivaa] IN {"Høy", "Kritisk"}
             && gjennomstroemming_press_enhet[tilstrekkelig_volum] = TRUE()
             && gjennomstroemming_press_enhet[enhet] <> "Ukjent"
     )
@@ -145,12 +145,15 @@ CALCULATE(
 ```
 
 ### Fargekode for pressnivå
+Nivåverdiene er norske: `Lav`/`Moderat`/`Høy`/`Kritisk`. Fram til oktober 2026 skrev
+skriptet `Hoy` uten ø — visualer, filtre eller mål som sammenligner med `"Hoy"` må
+oppdateres til `"Høy"`.
 ```DAX
 Pressnivå fargekode =
 SWITCH(
     MAX(gjennomstroemming_press_enhet[pressure_nivaa]),
     "Kritisk", "#B00020",
-    "Hoy", "#E65100",
+    "Høy", "#E65100",
     "Moderat", "#F9A825",
     "Lav", "#2E7D32",
     "#757575"

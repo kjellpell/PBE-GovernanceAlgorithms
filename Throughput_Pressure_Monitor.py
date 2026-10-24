@@ -315,7 +315,7 @@ def pressure_label(score):
     if score >= 4.0:
         return "Kritisk"
     if score >= 3.0:
-        return "Hoy"
+        return "Høy"
     if score >= 1.5:
         return "Moderat"
     return "Lav"
@@ -426,7 +426,7 @@ if not (phase_received.empty and phase_completed.empty) and not team_out.empty:
             phase_score += 1.5
         if pd.notna(phase_p90) and pd.notna(team_p90) and team_p90 > 0 and phase_p90 >= (team_p90 * 0.9):
             phase_score += 1.0
-        if row.get("pressure_nivaa") in ("Hoy", "Kritisk"):
+        if row.get("pressure_nivaa") in ("Høy", "Kritisk"):
             phase_score += 1.0
 
         phase_flag = bool(

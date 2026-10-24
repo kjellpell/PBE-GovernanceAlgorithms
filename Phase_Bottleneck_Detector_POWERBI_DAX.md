@@ -116,12 +116,15 @@ CALCULATE(
 ```
 
 ### Alvorlighet sortering
+Nivåverdiene er norske: `Lav`/`Moderat`/`Høy`/`Kritisk`. Fram til oktober 2026 skrev
+skriptet `Hoy` uten ø — visualer, filtre eller mål som sammenligner med `"Hoy"` må
+oppdateres til `"Høy"`.
 ```DAX
 Alvorlighet rang =
 SWITCH(
     MAX(fase_flaskehals_enhet[alvorlighet]),
     "Kritisk", 4,
-    "Hoy", 3,
+    "Høy", 3,
     "Moderat", 2,
     "Lav", 1,
     0
@@ -134,7 +137,7 @@ Flaskehals fargekode =
 SWITCH(
     MAX(fase_flaskehals_enhet[alvorlighet]),
     "Kritisk", "#B00020",
-    "Hoy", "#E65100",
+    "Høy", "#E65100",
     "Moderat", "#F9A825",
     "Lav", "#2E7D32",
     "#757575"

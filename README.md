@@ -180,7 +180,7 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
 
 Team-level (`enhet`) flow imbalance (received vs. completed) and processing-time
 deviation vs. a rolling baseline, combined into a `pressure_nivaa`
-(`Lav`/`Moderat`/`Hoy`/`Kritisk`).
+(`Lav`/`Moderat`/`Høy`/`Kritisk`).
 
 - **Output:** `gjennomstroemming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
 - **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`, `NETTO_FLYT_REL_TERSKEL` (0.10), `SEASONAL_BASELINE_YEARS` (3)
@@ -200,7 +200,7 @@ deviation vs. a rolling baseline, combined into a `pressure_nivaa`
 ### Phase_Bottleneck_Detector.py
 
 Same pattern one level down — phase-level (`fasetittel`) queue pressure and tidsbruk
-deviation, `alvorlighet` (`Lav`/`Moderat`/`Hoy`/`Kritisk`) with an `arsak_kode`/`arsak_tekst`
+deviation, `alvorlighet` (`Lav`/`Moderat`/`Høy`/`Kritisk`) with an `arsak_kode`/`arsak_tekst`
 explaining the flag.
 
 - **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)

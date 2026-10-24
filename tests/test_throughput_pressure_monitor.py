@@ -36,6 +36,7 @@ exec(compile(ast.Module(body=EXTRACTED, type_ignores=[]), str(SOURCE), "exec"), 
 combine_flow           = NAMESPACE["combine_flow"]
 seasonal_flow_baseline = NAMESPACE["seasonal_flow_baseline"]
 flow_pressure          = NAMESPACE["flow_pressure"]
+pressure_label         = NAMESPACE["pressure_label"]
 
 
 def team_months(mottatt, ferdigstilt, first_year=2020):
@@ -144,6 +145,14 @@ class FlowPressureTests(unittest.TestCase):
         out = flow_pressure(g)
 
         self.assertFalse(out["netto_flyt_press"].any())
+
+
+class PressureLabelTests(unittest.TestCase):
+    def test_norwegian_level_names(self):
+        self.assertEqual(
+            [pressure_label(x) for x in (0.0, 1.5, 3.0, 4.0)],
+            ["Lav", "Moderat", "Høy", "Kritisk"],
+        )
 
 
 class SeasonalFlowBaselineTests(unittest.TestCase):

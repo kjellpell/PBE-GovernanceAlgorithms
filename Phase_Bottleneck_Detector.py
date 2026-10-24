@@ -295,7 +295,7 @@ def severity_label(score):
     if score >= 4.0:
         return "Kritisk"
     if score >= 3.0:
-        return "Hoy"
+        return "Høy"
     if score >= 1.5:
         return "Moderat"
     return "Lav"
