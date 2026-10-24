@@ -851,14 +851,14 @@ else:
         *[field.name for field in spark.table("analyser.frist_prognose").schema]
     )
 
-    # Idempotent — delete current year rows before inserting
-    spark.sql(f"""
-            DELETE FROM analyser.frist_prognose
-            WHERE analyse_dato >= '{CURRENT_YEAR}-01-01'
-                AND analyse_dato <= '{CURRENT_YEAR}-12-31'
-    """)
-
-    results_spark.write.mode("append").saveAsTable("analyser.frist_prognose")
+    # Idempotent and atomic — replace the current year's rows in ONE Delta
+    # transaction. (A DELETE followed by a separate append left the current
+    # year empty in the report whenever the append failed.) Every row written
+    # is dated inside the current year, which replaceWhere requires.
+    results_spark.write.mode("overwrite").option(
+        "replaceWhere",
+        f"analyse_dato >= '{CURRENT_YEAR}-01-01' AND analyse_dato <= '{CURRENT_YEAR}-12-31'",
+    ).saveAsTable("analyser.frist_prognose")
 
     print(f"analyser.frist_prognose skrevet: {len(results)} rader")
 

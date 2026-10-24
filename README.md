@@ -169,7 +169,10 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
   month's real counts (not modelled) so the projection forks off the actual line exactly,
   then one row per remaining month carries that month's modelled counts (one row per
   month, not per day — the report's axis groups by month, so a finer grain bought nothing)
-- Idempotent — deletes and rewrites current-year rows on each run
+- Idempotent and atomic — replaces current-year rows in one Delta transaction
+  (`overwrite` + `replaceWhere`), so a failed run leaves last night's forecast in place
+  instead of an empty year. No forecast history is kept (a history table was considered
+  and not added — extra standing infrastructure)
 
 ## Flow and queue health
 
