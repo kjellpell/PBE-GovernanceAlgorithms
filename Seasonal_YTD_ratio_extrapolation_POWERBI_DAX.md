@@ -323,7 +323,7 @@ RETURN
   a few extra days barely move the level, and the model accounts for how far into the
   month the data reaches rather than treating a part-finished month as finished.
 
-## Åpenbar begrensning
+The nightly run replaces the whole current year in one transaction, so the table holds only the
 The nightly run deletes and rewrites the whole current year, so the table holds only the
 newest forecast. Forecast drift over time — "in June we projected 88%, now we project
 84%" — is not recoverable from it. That would be the genuinely interesting line chart
