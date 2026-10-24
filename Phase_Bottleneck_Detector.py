@@ -6,6 +6,13 @@
 #   Detect where queue pressure is forming inside process phases by combining
 #   net flow and deterioration in p90 phase time versus recent baseline.
 #
+# Flow definition:
+#   inngang (intake) is counted in the month of startmilepaeldato, utgang
+#   (output) in the month of sluttmilepaeldato, and netto_flyt = inngang -
+#   utgang per month. fase_ko_proxy is the real number of open faser at each
+#   month end: faser already open when the series starts plus cumulative
+#   netto_flyt since then.
+#
 # Output table:
 #   fase_flaskehals_enhet — enhet x fasetittel x indikator x month
 # Power BI/DAX guidance:
@@ -33,6 +40,7 @@ START_YEAR = 2015
 BASELINE_MONTHS = 12
 MIN_BASELINE_OBS = 6
 MIN_SEGMENT_OBS = 10
+KO_VEKST_TERSKEL = 0.10  # queue must be this much above its median over the last BASELINE_MONTHS
 
 
 # =============================================================================
@@ -63,54 +71,179 @@ CREATE TABLE IF NOT EXISTS analyser.fase_flaskehals_enhet (
     kjoere_id              STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Flaskehalsdeteksjon per team/fase/indikator. Kombinerer fase-nettoflyt, køproxy og p90-avvik mot historisk baseline.'
+COMMENT 'Flaskehalsdeteksjon per team/fase/indikator og måned. inngang_antall telles i startmåneden, utgang_antall i sluttmåneden, og netto_flyt = inngang - utgang. fase_ko_proxy er antall åpne faser ved månedsslutt (åpne ved seriestart + kumulativ netto flyt). Kombinerer netto flyt, køvekst og p90-avvik mot historisk baseline.'
 """)
 
 print("fase_flaskehals_enhet-tabellen er klar")
 
 
 # =============================================================================
-# CELL 2 — Load monthly phase aggregates
+# CELL 2 — Load monthly intake, output and opening stock
 # =============================================================================
 
-phase = spark.sql(f"""
+# Intake and output are counted in their OWN month: a fase enters in the month
+# of its startmilepaeldato and leaves in the month of its sluttmilepaeldato.
+# (An earlier version grouped both counts by COALESCE(slutt, start), so a
+# closed fase added +1 and -1 to the same month and netted to zero — the
+# "net flow" was really just the still-open faser by start month.)
+received = spark.sql(f"""
     SELECT
         pr.indikator,
         COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
         COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase') AS fasetittel,
-        (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100
-            + MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
-        COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END) AS inngang_antall,
-        COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS utgang_antall,
+        (YEAR(pr.startmilepaeldato) * 100 + MONTH(pr.startmilepaeldato)) AS period,
+        COUNT(1) AS inngang_antall
+    FROM saksbehandling.faser pr
+    INNER JOIN felles.indikator indikator
+        ON indikator.pk_indikator = pr.indikator
+    WHERE pr.startmilepaeldato IS NOT NULL
+      AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+      AND pr.indikator NOT LIKE '%avtalt%'
+      AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+    GROUP BY pr.indikator,
+             COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
+             COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase'),
+             YEAR(pr.startmilepaeldato), MONTH(pr.startmilepaeldato)
+""").toPandas()
+
+# Phase time percentiles come from completed faser only — an open fase has
+# no final tidsbruk yet. startmilepaeldato IS NOT NULL keeps a fase from
+# leaving a queue it never entered, so the queue below stays consistent.
+completed = spark.sql(f"""
+    SELECT
+        pr.indikator,
+        COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
+        COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase') AS fasetittel,
+        (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
+        COUNT(1) AS utgang_antall,
         percentile_approx(CAST(pr.tidsbruk AS DOUBLE), 0.5, 1000) AS median_fasetid,
         percentile_approx(CAST(pr.tidsbruk AS DOUBLE), 0.9, 1000) AS p90_fasetid
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikator
         ON indikator.pk_indikator = pr.indikator
-    WHERE indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+    WHERE pr.sluttmilepaeldato IS NOT NULL
+      AND pr.startmilepaeldato IS NOT NULL
+      AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
       AND pr.indikator NOT LIKE '%avtalt%'
-      AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
+      AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
     GROUP BY pr.indikator,
              COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
              COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase'),
-             YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-             MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
+             YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
-if phase.empty:
-    print("Ingen fase-data tilgjengelig.")
+# Faser already open when the series starts. Without this the queue would
+# start at zero on {START_YEAR}-01-01 and ignore everything already waiting.
+# With it, opening stock + cumulative (inngang - utgang) is the real number
+# of open faser at each month end.
+opening = spark.sql(f"""
+    SELECT
+        pr.indikator,
+        COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
+        COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase') AS fasetittel,
+        COUNT(1) AS aapne_ved_start
+    FROM saksbehandling.faser pr
+    INNER JOIN felles.indikator indikator
+        ON indikator.pk_indikator = pr.indikator
+    WHERE pr.startmilepaeldato < DATE'{START_YEAR}-01-01'
+      AND (pr.sluttmilepaeldato IS NULL OR pr.sluttmilepaeldato >= DATE'{START_YEAR}-01-01')
+      AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+      AND pr.indikator NOT LIKE '%avtalt%'
+    GROUP BY pr.indikator,
+             COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
+             COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase')
+""").toPandas()
 
-phase["period"] = pd.to_numeric(phase["period"], errors="coerce").astype("int64")
-phase["inngang_antall"] = pd.to_numeric(phase["inngang_antall"], errors="coerce").fillna(0).astype("int32")
-phase["utgang_antall"] = pd.to_numeric(phase["utgang_antall"], errors="coerce").fillna(0).astype("int32")
-phase["median_fasetid"] = pd.to_numeric(phase["median_fasetid"], errors="coerce").astype("float64")
-phase["p90_fasetid"] = pd.to_numeric(phase["p90_fasetid"], errors="coerce").astype("float64")
+for _df in (received, completed):
+    if not _df.empty:
+        _df["period"] = pd.to_numeric(_df["period"], errors="coerce").astype("int64")
+if not opening.empty:
+    opening["aapne_ved_start"] = pd.to_numeric(opening["aapne_ved_start"], errors="coerce").fillna(0).astype("int64")
 
-print(f"Fase-rader lastet: {len(phase):,}")
+print(f"Inngang-rader lastet:   {len(received):,}")
+print(f"Utgang-rader lastet:    {len(completed):,}")
+print(f"Åpne ved start lastet:  {len(opening):,}")
 
 
 # =============================================================================
-# CELL 3 — Compute bottlenecks
+# CELL 3 — Combine intake and output into one monthly flow table
+# =============================================================================
+
+PHASE_KEYS = ["indikator", "enhet", "fasetittel"]
+
+
+def _period_to_month_index(period):
+    period = int(period)
+    return (period // 100) * 12 + (period % 100 - 1)
+
+
+def _month_index_to_period(index):
+    index = int(index)
+    return (index // 12) * 100 + (index % 12 + 1)
+
+
+def fill_month_gaps(df, keys, zero_cols):
+    """Give every key group one row per calendar month between its first and
+    last period. A month with no intake and no output is a real month with
+    zero flow — dropping it would make a running count (queue, streak) skip
+    over it. zero_cols are filled with 0; other columns stay NaN."""
+    if df.empty:
+        return df
+    parts = []
+    for key_values, grp in df.groupby(keys, dropna=False, sort=False):
+        idx = grp["period"].map(_period_to_month_index)
+        full = pd.DataFrame({"period": [
+            _month_index_to_period(i) for i in range(int(idx.min()), int(idx.max()) + 1)
+        ]})
+        key_values = key_values if isinstance(key_values, tuple) else (key_values,)
+        for key, value in zip(keys, key_values):
+            full[key] = value
+        parts.append(full.merge(grp, on=keys + ["period"], how="left"))
+    out = pd.concat(parts, ignore_index=True)
+    for col in zero_cols:
+        out[col] = out[col].fillna(0)
+    return out
+
+
+def combine_flow(received_df, completed_df, keys=PHASE_KEYS):
+    """Outer-merge intake (by start month) and output (by end month) on the
+    key + period, fill missing counts with 0 and gap months with zero rows,
+    and compute netto_flyt = inngang - utgang for each month."""
+    merged = received_df.merge(completed_df, on=keys + ["period"], how="outer")
+    for col in ("inngang_antall", "utgang_antall"):
+        if col not in merged:
+            merged[col] = 0
+    merged = fill_month_gaps(merged, keys, ["inngang_antall", "utgang_antall"])
+    merged["inngang_antall"] = pd.to_numeric(merged["inngang_antall"], errors="coerce").fillna(0).astype("int64")
+    merged["utgang_antall"] = pd.to_numeric(merged["utgang_antall"], errors="coerce").fillna(0).astype("int64")
+    for col in ("median_fasetid", "p90_fasetid"):
+        if col not in merged:
+            merged[col] = np.nan
+        merged[col] = pd.to_numeric(merged[col], errors="coerce").astype("float64")
+    merged["netto_flyt"] = merged["inngang_antall"] - merged["utgang_antall"]
+    return merged.sort_values(keys + ["period"]).reset_index(drop=True)
+
+
+def queue_at_month_end(netto_flyt, opening_stock=0):
+    """Open faser at each month end: opening stock plus cumulative net flow.
+    Clipped at 0 — a negative queue only happens on bad milestone dates
+    (slutt before start), and is not a real stock."""
+    return (opening_stock + pd.Series(netto_flyt).cumsum()).clip(lower=0)
+
+
+if received.empty and completed.empty:
+    phase = pd.DataFrame(columns=PHASE_KEYS + [
+        "period", "inngang_antall", "utgang_antall", "median_fasetid", "p90_fasetid", "netto_flyt",
+    ])
+    print("Ingen fase-data tilgjengelig.")
+else:
+    phase = combine_flow(received, completed)
+
+print(f"Fase-rader etter sammenslåing: {len(phase):,}")
+
+
+# =============================================================================
+# CELL 4 — Compute bottlenecks
 # =============================================================================
 
 
@@ -120,11 +253,72 @@ def _month_end_from_period(period: int):
     return (pd.Timestamp(year, month, 1) + pd.offsets.MonthEnd(0)).date()
 
 
+def score_bottleneck(netto_flyt, avvik_p90_pct, inngang_antall, utgang_antall, ko_vekst):
+    """Score one enhet x fase x month. Returns (score, reason codes).
+    ko_vekst is True when the month-end queue is clearly above its own recent
+    level (see KO_VEKST_TERSKEL) — with a real queue in fase_ko_proxy, "queue
+    > 0" would be true almost every month and add nothing to NETTO_FLYT_POS."""
+    score = 0.0
+    reasons = []
+
+    if netto_flyt > 0:
+        score += 1.5
+        reasons.append("NETTO_FLYT_POS")
+
+    if pd.notna(avvik_p90_pct) and avvik_p90_pct > 0.15:
+        score += 1.5
+        reasons.append("P90_OPP")
+
+    if pd.notna(avvik_p90_pct) and avvik_p90_pct > 0.30:
+        score += 1.0
+        reasons.append("P90_OPP_STERK")
+
+    if inngang_antall > 0 and utgang_antall <= (inngang_antall * 0.8):
+        score += 1.0
+        reasons.append("UTGANGSGAP")
+
+    if ko_vekst:
+        score += 1.0
+        reasons.append("KO_VEKST")
+
+    return score, reasons
+
+
+def severity_label(score):
+    if score >= 4.0:
+        return "Kritisk"
+    if score >= 3.0:
+        return "Hoy"
+    if score >= 1.5:
+        return "Moderat"
+    return "Lav"
+
+
+if opening.empty:
+    opening_lookup = {}
+else:
+    opening_lookup = {
+        (r["indikator"], r["enhet"], r["fasetittel"]): int(r["aapne_ved_start"])
+        for _, r in opening.iterrows()
+    }
+
 rows = []
-for (indikator, enhet, fasetittel), grp in phase.groupby(["indikator", "enhet", "fasetittel"], dropna=False):
+for (indikator, enhet, fasetittel), grp in phase.groupby(PHASE_KEYS, dropna=False):
     g = grp.sort_values("period").copy()
-    g["netto_flyt"] = g["inngang_antall"] - g["utgang_antall"]
-    g["fase_ko_proxy"] = g["netto_flyt"].cumsum().clip(lower=0)
+    g["fase_ko_proxy"] = queue_at_month_end(
+        g["netto_flyt"].to_numpy(), opening_lookup.get((indikator, enhet, fasetittel), 0)
+    ).to_numpy()
+
+    g["baseline_ko"] = (
+        g["fase_ko_proxy"].shift(1)
+        .rolling(BASELINE_MONTHS, min_periods=MIN_BASELINE_OBS)
+        .median()
+    )
+    g["ko_vekst"] = (
+        g["baseline_ko"].notna()
+        & (g["fase_ko_proxy"] > g["baseline_ko"] * (1 + KO_VEKST_TERSKEL))
+        & (g["netto_flyt"] > 0)
+    )
 
     g["baseline_median"] = (
         g["median_fasetid"].shift(1)
@@ -154,37 +348,11 @@ for (indikator, enhet, fasetittel), grp in phase.groupby(["indikator", "enhet", 
     )
 
     for _, row in g.iterrows():
-        score = 0.0
-        reasons = []
-
-        if row["netto_flyt"] > 0:
-            score += 1.5
-            reasons.append("NETTO_FLYT_POS")
-
-        if pd.notna(row["avvik_p90_pct"]) and row["avvik_p90_pct"] > 0.15:
-            score += 1.5
-            reasons.append("P90_OPP")
-
-        if pd.notna(row["avvik_p90_pct"]) and row["avvik_p90_pct"] > 0.30:
-            score += 1.0
-            reasons.append("P90_OPP_STERK")
-
-        if row["inngang_antall"] > 0 and row["utgang_antall"] <= (row["inngang_antall"] * 0.8):
-            score += 1.0
-            reasons.append("UTGANGSGAP")
-
-        if row["fase_ko_proxy"] > 0 and row["netto_flyt"] > 0:
-            score += 1.0
-            reasons.append("KO_VEKST")
-
-        if score >= 4.0:
-            severity = "Kritisk"
-        elif score >= 3.0:
-            severity = "Hoy"
-        elif score >= 1.5:
-            severity = "Moderat"
-        else:
-            severity = "Lav"
+        score, reasons = score_bottleneck(
+            row["netto_flyt"], row["avvik_p90_pct"],
+            row["inngang_antall"], row["utgang_antall"], bool(row["ko_vekst"]),
+        )
+        severity = severity_label(score)
 
         bottleneck = bool(row["tilstrekkelig_volum"] and score >= 3.0)
         reason_code = "+".join(reasons) if reasons else "INGEN"
@@ -194,6 +362,8 @@ for (indikator, enhet, fasetittel), grp in phase.groupby(["indikator", "enhet", 
             reason_text = "Ingen tydelig faseflaskehals i perioden."
         elif "KO_VEKST" in reason_code and "P90_OPP" in reason_code:
             reason_text = "Kø vokser samtidig som fasevariasjon i p90 forverres."
+        elif "KO_VEKST" in reason_code:
+            reason_text = "Køen av åpne saker i fasen er tydelig høyere enn det siste året."
         elif "NETTO_FLYT_POS" in reason_code:
             reason_text = "Flere saker går inn i fasen enn ut i perioden."
         else:
@@ -227,7 +397,7 @@ print(f"Flaskehalsrader beregnet: {len(out_df):,}")
 
 
 # =============================================================================
-# CELL 4 — Write to Lakehouse
+# CELL 5 — Write to Lakehouse
 # =============================================================================
 
 SCHEMA = StructType([

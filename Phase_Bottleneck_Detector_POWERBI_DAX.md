@@ -12,6 +12,35 @@ Denne siden skal svare på:
 Datakilde:
 - `analyser.fase_flaskehals_enhet`
 
+## Hva tallene betyr
+- `inngang_antall` — faser som **startet** i måneden (etter `startmilepaeldato`).
+- `utgang_antall` — faser som **ble avsluttet** i måneden (etter `sluttmilepaeldato`).
+  `median_fasetid`/`p90_fasetid` er beregnet på disse avsluttede fasene.
+- `netto_flyt` = `inngang_antall - utgang_antall` for måneden. Positiv = køen vokste.
+- `fase_ko_proxy` — antall **åpne faser ved månedsslutt**: faser som allerede var åpne
+  ved seriestart (`START_YEAR`) pluss kumulativ netto flyt siden da.
+- `KO_VEKST` i `arsak_kode` betyr at køen ved månedsslutt er mer enn 10 %
+  (`KO_VEKST_TERSKEL`) over sin egen median for de siste 12 månedene, og at netto flyt
+  var positiv i måneden.
+- Måneder uten aktivitet i en fase får en rad med 0 inn og 0 ut, slik at køen og
+  baseline følger kalendermåneder.
+
+> **Endret oktober 2026:** tidligere ble både inngang og utgang talt i måneden for
+> `COALESCE(sluttmilepaeldato, startmilepaeldato)`. En avsluttet fase ga da +1 og −1 i
+> samme måned og ble null, så «netto flyt» var egentlig bare antall fortsatt åpne faser
+> etter startmåned — nær 0 i all historikk og positiv de siste 1–2 månedene. Det ga
+> mange falske `bottleneck_flagg` i de siste månedene.
+
+### Kontrollspørring etter utrulling (kjør i Fabric)
+```sql
+SELECT analyse_dato, COUNT_IF(bottleneck_flagg) AS antall_flaskehalser
+FROM analyser.fase_flaskehals_enhet
+GROUP BY 1
+ORDER BY 1 DESC
+```
+Antall flaskehalser skal **ikke** lenger hope seg opp i de to siste månedene; det skal
+ligge på omtrent samme nivå som tidligere måneder.
+
 ## Anbefalte visualer
 
 ### 1) KPI-kort
@@ -119,4 +148,7 @@ SWITCH(
 
 ## Tolkning
 - Høy `avvik_p90_pct` + `KO_VEKST` i `arsak_kode` indikerer sann prosessflaskehals.
+- `fase_ko_proxy` er et ekte antall åpne faser, men faser som har stått åpne svært
+  lenge (f.eks. glemte registreringer fra før 2015) er med. Et høyt, flatt nivå kan
+  være datakvalitet, ikke kø — se på `netto_flyt` og `KO_VEKST` for endringen.
 - `tilstrekkelig_volum = FALSE` bør ikke brukes som styrende tiltakssignal.

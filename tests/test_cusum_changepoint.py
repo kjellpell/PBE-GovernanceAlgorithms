@@ -9,7 +9,10 @@ import pandas as pd
 SOURCE = Path(__file__).parents[1] / "CUSUM_Changepoint.py"
 TREE = ast.parse(SOURCE.read_text())
 
-FUNCTION_NAMES = {"to_float_series", "run_cusum", "extract_changepoint_stats", "_periode_to_date", "_pelt_l2"}
+FUNCTION_NAMES = {
+    "to_float_series", "run_cusum", "extract_changepoint_stats", "_periode_to_date", "_pelt_l2",
+    "production_balance",
+}
 CONSTANT_NAMES = {
     "CUSUM_K", "CUSUM_H",
     "CUSUM_BASELINE_MONTHLY", "CUSUM_BASELINE_WEEKLY", "CUSUM_MIN_POST_BASELINE_OBS",
@@ -33,6 +36,7 @@ exec(compile(ast.Module(body=EXTRACTED, type_ignores=[]), str(SOURCE), "exec"), 
 run_cusum                   = NAMESPACE["run_cusum"]
 extract_changepoint_stats   = NAMESPACE["extract_changepoint_stats"]
 _pelt_l2                    = NAMESPACE["_pelt_l2"]
+production_balance          = NAMESPACE["production_balance"]
 CUSUM_BASELINE_MONTHLY      = NAMESPACE["CUSUM_BASELINE_MONTHLY"]
 CUSUM_MIN_POST_BASELINE_OBS = NAMESPACE["CUSUM_MIN_POST_BASELINE_OBS"]
 
@@ -104,6 +108,27 @@ class CusumBaselineTests(unittest.TestCase):
         result = run_cusum(series, k=0.5, h=5.0, baseline_obs=baseline_obs)
 
         self.assertIsNone(result)
+
+
+class ProductionBalanceTests(unittest.TestCase):
+    def test_started_and_ended_counted_in_their_own_periods(self):
+        # 6 faser start in 202403 and end in 202405. The old single query put
+        # both counts in 202405 and netted them to zero.
+        started = pd.DataFrame([{"indikator": "A", "period": 202403, "antall_startet": 6}])
+        ended = pd.DataFrame([{"indikator": "A", "period": 202405, "antall_avsluttet": 6}])
+
+        balance = production_balance(started, ended)
+
+        self.assertEqual(balance["period"].tolist(), [202403, 202405])
+        self.assertEqual(balance["verdi"].tolist(), [6.0, -6.0])
+
+    def test_period_with_both_sides(self):
+        started = pd.DataFrame([{"indikator": "A", "period": 202401, "antall_startet": 10}])
+        ended = pd.DataFrame([{"indikator": "A", "period": 202401, "antall_avsluttet": 8}])
+
+        balance = production_balance(started, ended)
+
+        self.assertEqual(balance["verdi"].tolist(), [2.0])
 
 
 class PeltL2FallbackTests(unittest.TestCase):

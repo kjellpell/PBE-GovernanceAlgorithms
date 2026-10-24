@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS analyser.gjennomstroemming_press_fase (
     kjoere_id                STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Fasenivå-støttetabell for team med throughput-press. Viser hvilke faser som bidrar mest til presset.'
+COMMENT 'Fasenivå-støttetabell for team med throughput-press. Viser hvilke faser som bidrar mest til presset. mottatt_antall telles i startmåneden, ferdigstilt_antall i sluttmåneden, netto_flyt = mottatt - ferdigstilt.'
 """)
 
 print("gjennomstroemming_press_enhet og gjennomstroemming_press_fase tabeller er klare")
@@ -129,38 +129,113 @@ completed = spark.sql(f"""
              YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
-phase = spark.sql(f"""
+# Fase level uses the same split as the team level above: intake by start
+# month, output (and tidsbruk percentiles) by end month. Grouping both counts
+# by COALESCE(slutt, start) — an earlier version — made every closed fase
+# net to zero in its end month.
+phase_received = spark.sql(f"""
     SELECT
         pr.indikator,
         COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
         COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase') AS fasetittel,
-        (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100
-            + MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
-        COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END) AS mottatt_antall,
-        COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS ferdigstilt_antall,
+        (YEAR(pr.startmilepaeldato) * 100 + MONTH(pr.startmilepaeldato)) AS period,
+        COUNT(1) AS mottatt_antall
+    FROM saksbehandling.faser pr
+    INNER JOIN felles.indikator indikator
+        ON indikator.pk_indikator = pr.indikator
+    WHERE pr.startmilepaeldato IS NOT NULL
+      AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+      AND pr.indikator NOT LIKE '%avtalt%'
+      AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+    GROUP BY pr.indikator,
+             COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
+             COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase'),
+             YEAR(pr.startmilepaeldato), MONTH(pr.startmilepaeldato)
+""").toPandas()
+
+phase_completed = spark.sql(f"""
+    SELECT
+        pr.indikator,
+        COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent') AS enhet,
+        COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase') AS fasetittel,
+        (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
+        COUNT(1) AS ferdigstilt_antall,
         percentile_approx(CAST(pr.tidsbruk AS DOUBLE), 0.5, 1000) AS median_tidsbruk,
         percentile_approx(CAST(pr.tidsbruk AS DOUBLE), 0.9, 1000) AS p90_tidsbruk
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikator
         ON indikator.pk_indikator = pr.indikator
-    WHERE indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+    WHERE pr.sluttmilepaeldato IS NOT NULL
+      AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
       AND pr.indikator NOT LIKE '%avtalt%'
-      AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
+      AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
     GROUP BY pr.indikator,
              COALESCE(NULLIF(TRIM(pr.enhet), ''), 'Ukjent'),
              COALESCE(NULLIF(TRIM(pr.fasetittel), ''), 'Ukjent fase'),
-             YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-             MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
+             YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
-for _df in (received, completed, phase):
+for _df in (received, completed, phase_received, phase_completed):
     if _df.empty:
         continue
     _df["period"] = pd.to_numeric(_df["period"], errors="coerce").astype("int64")
 
 print(f"Mottatt-rader:      {len(received):,}")
 print(f"Ferdigstilt-rader:  {len(completed):,}")
-print(f"Fase-rader:         {len(phase):,}")
+print(f"Fase mottatt-rader: {len(phase_received):,}")
+print(f"Fase ferdig-rader:  {len(phase_completed):,}")
+
+
+def _period_to_month_index(period):
+    period = int(period)
+    return (period // 100) * 12 + (period % 100 - 1)
+
+
+def _month_index_to_period(index):
+    index = int(index)
+    return (index // 12) * 100 + (index % 12 + 1)
+
+
+def fill_month_gaps(df, keys, zero_cols):
+    """Give every key group one row per calendar month between its first and
+    last period. A month with no intake and no output is a real month with
+    zero flow — dropping it would let a running count (the flow streak) run
+    straight across it. zero_cols are filled with 0; other columns stay NaN."""
+    if df.empty:
+        return df
+    parts = []
+    for key_values, grp in df.groupby(keys, dropna=False, sort=False):
+        idx = grp["period"].map(_period_to_month_index)
+        full = pd.DataFrame({"period": [
+            _month_index_to_period(i) for i in range(int(idx.min()), int(idx.max()) + 1)
+        ]})
+        key_values = key_values if isinstance(key_values, tuple) else (key_values,)
+        for key, value in zip(keys, key_values):
+            full[key] = value
+        parts.append(full.merge(grp, on=keys + ["period"], how="left"))
+    out = pd.concat(parts, ignore_index=True)
+    for col in zero_cols:
+        out[col] = out[col].fillna(0)
+    return out
+
+
+def combine_flow(received_df, completed_df, keys):
+    """Outer-merge intake (counted by start month) and output (counted by end
+    month) on key + period, fill missing counts and gap months with 0, and
+    compute netto_flyt = mottatt - ferdigstilt per month."""
+    merged = received_df.merge(completed_df, on=keys + ["period"], how="outer")
+    for col in ("mottatt_antall", "ferdigstilt_antall"):
+        if col not in merged:
+            merged[col] = 0
+    merged = fill_month_gaps(merged, keys, ["mottatt_antall", "ferdigstilt_antall"])
+    merged["mottatt_antall"] = pd.to_numeric(merged["mottatt_antall"], errors="coerce").fillna(0).astype("int64")
+    merged["ferdigstilt_antall"] = pd.to_numeric(merged["ferdigstilt_antall"], errors="coerce").fillna(0).astype("int64")
+    for col in ("median_tidsbruk", "p90_tidsbruk"):
+        if col not in merged:
+            merged[col] = np.nan
+        merged[col] = pd.to_numeric(merged[col], errors="coerce").astype("float64")
+    merged["netto_flyt"] = merged["mottatt_antall"] - merged["ferdigstilt_antall"]
+    return merged.sort_values(keys + ["period"]).reset_index(drop=True)
 
 
 # =============================================================================
@@ -271,13 +346,8 @@ print(f"Team-rader beregnet: {len(team_out):,}")
 # =============================================================================
 
 phase_rows = []
-if not phase.empty and not team_out.empty:
-    phase_df = phase.copy()
-    phase_df["mottatt_antall"] = pd.to_numeric(phase_df["mottatt_antall"], errors="coerce").fillna(0).astype("int32")
-    phase_df["ferdigstilt_antall"] = pd.to_numeric(phase_df["ferdigstilt_antall"], errors="coerce").fillna(0).astype("int32")
-    phase_df["netto_flyt"] = phase_df["mottatt_antall"] - phase_df["ferdigstilt_antall"]
-    phase_df["median_tidsbruk"] = pd.to_numeric(phase_df["median_tidsbruk"], errors="coerce").astype("float64")
-    phase_df["p90_tidsbruk"] = pd.to_numeric(phase_df["p90_tidsbruk"], errors="coerce").astype("float64")
+if not (phase_received.empty and phase_completed.empty) and not team_out.empty:
+    phase_df = combine_flow(phase_received, phase_completed, ["indikator", "enhet", "fasetittel"])
 
     team_join = team_out.copy()
     team_join["period"] = (

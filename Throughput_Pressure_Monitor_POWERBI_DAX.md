@@ -15,6 +15,12 @@ Datakilder:
 - `analyser.gjennomstroemming_press_enhet`
 - `analyser.gjennomstroemming_press_fase`
 
+`mottatt_antall` telles i måneden for `startmilepaeldato`, `ferdigstilt_antall` i måneden
+for `sluttmilepaeldato`, og `netto_flyt = mottatt_antall - ferdigstilt_antall` — både på
+enhetsnivå og (fra oktober 2026) på fasenivå i `gjennomstroemming_press_fase`. Før det ble
+fasetabellen gruppert på `COALESCE(slutt, start)`, slik at avsluttede faser nullet seg ut
+og bare fortsatt åpne faser ga positiv netto flyt.
+
 ## Anbefalte visualer
 
 ### 1) KPI-kort (øverst)

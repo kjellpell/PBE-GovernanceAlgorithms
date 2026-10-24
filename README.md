@@ -91,6 +91,8 @@ Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per in
 on both monthly and weekly series.
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
+  (`Produksjonsdifferanse` = faser started in the period by start date minus faser ended
+  in the period by end date)
 - **No install step, no external dependency.** PELT runs on a built-in pure-NumPy
   implementation with an L2 (mean-shift) cost (`_pelt_l2` in `CUSUM_Changepoint.py`) —
   detects a shift in the average, not a volatility change with the average unchanged.
@@ -148,6 +150,9 @@ deviation vs. a rolling baseline, combined into a `pressure_nivaa`
 
 - **Output:** `gjennomstroemming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
 - **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`
+- Flow is counted the same way everywhere: intake in the month of `startmilepaeldato`,
+  output in the month of `sluttmilepaeldato`, `netto_flyt` = intake − output (team level
+  and the fase support table alike)
 - `netto_flyt_streak` (consecutive positive-flow months) is exactly the kind of
   order-dependent running count DAX has no clean primitive for — a script, not a fancy
   measure
@@ -159,7 +164,13 @@ deviation, `alvorlighet` (`Lav`/`Moderat`/`Hoy`/`Kritisk`) with an `arsak_kode`/
 explaining the flag.
 
 - **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)
-- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`
+- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`, `KO_VEKST_TERSKEL`
+- `inngang_antall` by start month, `utgang_antall` (and the phase-time percentiles) by end
+  month; `fase_ko_proxy` is the real count of open faser at month end (open at series
+  start + cumulative net flow). `KO_VEKST` fires when that queue is >10 % above its own
+  12-month median. After deploying, run the sanity query in
+  `Phase_Bottleneck_Detector_POWERBI_DAX.md` — flags should no longer pile up in the
+  latest two months
 
 ## Workload
 

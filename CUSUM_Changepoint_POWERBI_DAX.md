@@ -16,6 +16,14 @@ Datakilder:
 - `analyser.pelt_analyse`
 - `analyser.pelt_analyse_detaljer`
 
+`Produksjonsdifferanse` = faser **startet** i perioden (etter `startmilepaeldato`) minus
+faser **avsluttet** i perioden (etter `sluttmilepaeldato`). Til og med september 2026 ble
+begge tellingene lagt i perioden for `COALESCE(slutt, start)`, så avsluttede faser nullet
+seg ut og serien var bare «fortsatt åpne faser etter startperiode» — den ga
+`Stigende`-signal av strukturelle grunner. En live DAX-verdi for samme måltall må bruke
+samme definisjon: tell starter mot startdato og avslutninger mot sluttdato (to
+`USERELATIONSHIP`-roller mot datotabellen), ikke én datokolonne.
+
 ## Visualforslag
 
 ### 1) CUSUM-linje (tidlig varsling)

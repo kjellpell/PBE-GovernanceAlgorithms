@@ -177,24 +177,39 @@ monthly_tid = spark.sql(f"""
         ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
-# Monthly production balance per indicator
-monthly_prod = spark.sql(f"""
+# Monthly production balance per indicator: faser started in the month (by
+# startmilepaeldato) minus faser ended in the month (by sluttmilepaeldato).
+# Two separate counts, merged in pandas — an earlier single query grouped
+# both by COALESCE(slutt, start), so every closed fase netted to zero in its
+# end month and the "balance" was really just still-open faser by start month.
+monthly_started = spark.sql(f"""
         SELECT
                 pr.indikator,
-                (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100 +
-                 MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
-                COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
-                - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
+                (YEAR(pr.startmilepaeldato) * 100 + MONTH(pr.startmilepaeldato)) AS period,
+                COUNT(1) AS antall_startet
         FROM saksbehandling.faser pr
         INNER JOIN felles.indikator indikator
             ON indikator.pk_indikator = pr.indikator
-        WHERE pr.indikator NOT LIKE '%avtalt%'
+        WHERE pr.startmilepaeldato IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-            AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
-        GROUP BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-                         MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
-        ORDER BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-                         MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
+            AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.startmilepaeldato), MONTH(pr.startmilepaeldato)
+""").toPandas()
+
+monthly_ended = spark.sql(f"""
+        SELECT
+                pr.indikator,
+                (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
+                COUNT(1) AS antall_avsluttet
+        FROM saksbehandling.faser pr
+        INNER JOIN felles.indikator indikator
+            ON indikator.pk_indikator = pr.indikator
+        WHERE pr.sluttmilepaeldato IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
 # Weekly frist% per indicator
@@ -223,25 +238,56 @@ weekly_frist = spark.sql(f"""
         ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
 """).toPandas()
 
-# Weekly production balance
-weekly_prod = spark.sql(f"""
+# Weekly production balance — same split as monthly_prod
+weekly_started = spark.sql(f"""
         SELECT
                 pr.indikator,
-                (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100 +
-                         WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
-                        COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
-                        - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
-                FROM saksbehandling.faser pr
-                INNER JOIN felles.indikator indikator
-                    ON indikator.pk_indikator = pr.indikator
-                WHERE pr.indikator NOT LIKE '%avtalt%'
-                    AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-                    AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
-                GROUP BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-                                 WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
-                ORDER BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-                                 WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
+                (YEAR(pr.startmilepaeldato) * 100
+                 + WEEKOFYEAR(pr.startmilepaeldato)) AS period,
+                COUNT(1) AS antall_startet
+        FROM saksbehandling.faser pr
+        INNER JOIN felles.indikator indikator
+            ON indikator.pk_indikator = pr.indikator
+        WHERE pr.startmilepaeldato IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+            AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.startmilepaeldato), WEEKOFYEAR(pr.startmilepaeldato)
 """).toPandas()
+
+weekly_ended = spark.sql(f"""
+        SELECT
+                pr.indikator,
+                (YEAR(pr.sluttmilepaeldato) * 100
+                 + WEEKOFYEAR(pr.sluttmilepaeldato)) AS period,
+                COUNT(1) AS antall_avsluttet
+        FROM saksbehandling.faser pr
+        INNER JOIN felles.indikator indikator
+            ON indikator.pk_indikator = pr.indikator
+        WHERE pr.sluttmilepaeldato IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
+""").toPandas()
+
+
+def production_balance(started, ended):
+    """Produksjonsdifferanse per indikator x period: faser started in the
+    period minus faser ended in the period. started/ended are counted by their
+    own date (start vs. slutt), outer-merged so a period with only starts or
+    only ends still gets a row, with the missing side as 0."""
+    merged = started.merge(ended, on=["indikator", "period"], how="outer")
+    for col in ("antall_startet", "antall_avsluttet"):
+        if col not in merged:
+            merged[col] = 0
+        merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
+    merged["verdi"] = merged["antall_startet"] - merged["antall_avsluttet"]
+    return merged[["indikator", "period", "verdi"]].sort_values(["indikator", "period"]).reset_index(drop=True)
+
+
+monthly_prod = production_balance(monthly_started, monthly_ended)
+weekly_prod  = production_balance(weekly_started, weekly_ended)
 
 # Spark DECIMAL columns (e.g. AVG(tidsbruk)) arrive as decimal.Decimal objects,
 # which cannot be mixed with floats in the CUSUM arithmetic.
@@ -438,26 +484,51 @@ METRIC_SQL = {
         "date_col":    "pr.sluttmilepaeldato",
         "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.tidsbruk IS NOT NULL",
     },
-    "Produksjonsdifferanse": {
-        "value_expr": """COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
-                          - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END)""",
-        "date_col":    "COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)",
-        "extra_where": "1=1",
-    },
 }
+# Produksjonsdifferanse has no single date column — starts are placed by
+# startmilepaeldato and ends by sluttmilepaeldato — so it gets its own query
+# branch in run_drilldown (_production_drilldown_sql), not a METRIC_SQL entry.
 
 
-def run_drilldown(indikator, maaltall, granularitet, breakpoint_dato, dimensjon):
+def _production_drilldown_sql(indikator_escaped, dimensjon, breakpoint_str):
+    """Starts (by start date) and ends (by end date) per segment on each side
+    of the breakpoint. verdi = started - ended, antall = started + ended."""
+    def side(date_col, startet, avsluttet):
+        return f"""
+            SELECT
+                pr.{dimensjon} AS segment,
+                CASE WHEN {date_col} < DATE'{breakpoint_str}' THEN 'foer' ELSE 'etter' END AS periode,
+                {startet} AS startet,
+                {avsluttet} AS avsluttet
+            FROM saksbehandling.faser pr
+            INNER JOIN felles.indikator indikator ON indikator.pk_indikator = pr.indikator
+            WHERE pr.indikator = '{indikator_escaped}'
+                AND pr.indikator NOT LIKE '%avtalt%'
+                AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+                AND {date_col} IS NOT NULL
+                AND YEAR({date_col}) >= {START_YEAR}
+                AND pr.{dimensjon} IS NOT NULL"""
+
+    return f"""
+        SELECT
+            segment,
+            periode,
+            SUM(startet) - SUM(avsluttet) AS verdi,
+            SUM(startet) + SUM(avsluttet) AS antall
+        FROM (
+            {side("pr.startmilepaeldato", 1, 0)}
+            UNION ALL
+            {side("pr.sluttmilepaeldato", 0, 1)}
+        ) hendelser
+        GROUP BY segment, periode
     """
-    Split the flagged indikator/maaltall shift by one dimension (enhet or
-    fasetittel), using the same før/etter boundary PELT already found.
-    Returns a list of row dicts, one per segment with enough data.
-    """
+
+
+def _metric_drilldown(indikator_escaped, maaltall, dimensjon, breakpoint_str):
+    """Fristprosent/Behandlingstid per segment on each side of the breakpoint
+    — both are placed by a single date column (METRIC_SQL)."""
     cfg = METRIC_SQL[maaltall]
-    breakpoint_str = breakpoint_dato.isoformat()
-    indikator_escaped = indikator.replace("'", "''")
-
-    segments = spark.sql(f"""
+    return spark.sql(f"""
         SELECT
             pr.{dimensjon} AS segment,
             CASE WHEN {cfg['date_col']} < DATE'{breakpoint_str}' THEN 'foer' ELSE 'etter' END AS periode,
@@ -475,11 +546,28 @@ def run_drilldown(indikator, maaltall, granularitet, breakpoint_dato, dimensjon)
             CASE WHEN {cfg['date_col']} < DATE'{breakpoint_str}' THEN 'foer' ELSE 'etter' END
     """).toPandas()
 
+
+def run_drilldown(indikator, maaltall, granularitet, breakpoint_dato, dimensjon):
+    """
+    Split the flagged indikator/maaltall shift by one dimension (enhet or
+    fasetittel), using the same før/etter boundary PELT already found.
+    Returns a list of row dicts, one per segment with enough data.
+    """
+    breakpoint_str = breakpoint_dato.isoformat()
+    indikator_escaped = indikator.replace("'", "''")
+
+    if maaltall == "Produksjonsdifferanse":
+        segments = spark.sql(
+            _production_drilldown_sql(indikator_escaped, dimensjon, breakpoint_str)
+        ).toPandas()
+    else:
+        segments = _metric_drilldown(indikator_escaped, maaltall, dimensjon, breakpoint_str)
+
     if segments.empty:
         return []
 
     segments["verdi"]  = pd.to_numeric(segments["verdi"], errors="coerce").astype("float64")
-    segments["antall"] = segments["antall"].astype("int64")
+    segments["antall"] = pd.to_numeric(segments["antall"], errors="coerce").fillna(0).astype("int64")
 
     pivot = segments.pivot(index="segment", columns="periode", values=["verdi", "antall"])
     pivot.columns = [f"{a}_{b}" for a, b in pivot.columns]
