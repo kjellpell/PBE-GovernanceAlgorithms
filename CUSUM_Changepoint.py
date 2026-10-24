@@ -32,7 +32,8 @@
 # external library, so no `%pip install` cell: on tenants with inline
 # library installation disabled, that magic command fails the whole
 # notebook run with MagicUsageError before any Python cell executes.
-# Minimum history: 24 monthly / 52 weekly observations per indicator.
+# Minimum history: 24 monthly / 52 weekly observations per indicator; CUSUM
+# output starts once a month/week has >= 2 prior years of the same position.
 # =============================================================================
 
 from pyspark.sql import SparkSession
@@ -52,14 +53,19 @@ CUSUM_K       = 0.5   # allowance parameter — half sigma is standard
 CUSUM_H       = 5.0   # decision threshold — 5 sigma cumulative
 START_YEAR    = 2015  # exclude data before this year — adjust if older data is reliable
 
-# Anchored baseline window — mu/sigma used to standardise each series are
-# computed from only the FIRST this-many observations, not the whole series.
-# Using the whole series lets a slow persistent drift get partially absorbed
-# into "normal", which dampens CUSUM's sensitivity to exactly the kind of
-# shift it exists to catch.
-CUSUM_BASELINE_MONTHLY      = 12
-CUSUM_BASELINE_WEEKLY       = 26
-CUSUM_MIN_POST_BASELINE_OBS = 4   # need at least this many points after the baseline to test anything
+# Seasonal baseline — each observation is standardised against the SAME
+# calendar month (monthly) or ISO week (weekly) in the preceding
+# CUSUM_BASELINE_YEARS years, never including its own year. That removes
+# seasonality (July is compared with earlier Julys, not with March), keeps the
+# reference recent (not "different from 2015"), and still can't absorb a
+# drift that builds up inside the current year. See standardise_seasonal().
+CUSUM_BASELINE_YEARS        = 3
+CUSUM_MIN_BASELINE_YEARS    = 2   # fewer prior years for a month/week -> no score for it
+CUSUM_MIN_POST_BASELINE_OBS = 4   # need at least this many standardised points to run CUSUM
+
+# tilstand (the persistent state a board card reads) returns to Stabil only
+# after this many consecutive quiet periods — see run_cusum().
+CUSUM_RECOVERY_PERIODS      = 3
 
 DRILLDOWN_DIMENSIONS     = ["enhet", "fasetittel"]  # confirmed against the Lakehouse schema
 MIN_SEGMENT_OBS          = 10   # segments below this are marked utilstrekkelig_volum, not tested
@@ -80,11 +86,12 @@ CREATE TABLE IF NOT EXISTS analyser.cusum_analyse (
     cusum_negativ    DOUBLE,
     signal           BOOLEAN     NOT NULL,
     signalretning    STRING,
+    tilstand         STRING,
     kjoert_tidspunkt TIMESTAMP   NOT NULL,
     kjoere_id        STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Stigende/Synkende/Stabil, slik at et bord-nivå mål kan lese denne kolonnen direkte uten oversettelse. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato (se CUSUM_Changepoint_POWERBI_DAX.md).'
+COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. Hver periode sammenlignes med samme måned/ISO-uke de tre foregående årene (sesongjustert, nylig baseline). signal=true og signalretning (Stigende/Synkende) markerer perioden akkumulatoren krysset terskelen (hendelse). tilstand (Stigende/Synkende/Stabil) er siste signalerte retning, holdt til motsatt signal eller tre rolige perioder på rad — det er denne et bord-nivå mål skal lese. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato (se CUSUM_Changepoint_POWERBI_DAX.md).'
 """)
 
 spark.sql("""
@@ -352,72 +359,127 @@ def to_float_series(series):
     return pd.to_numeric(series, errors="coerce").astype("float64")
 
 
-def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY):
+def standardise_seasonal(series, granularitet, years=CUSUM_BASELINE_YEARS,
+                         min_years=CUSUM_MIN_BASELINE_YEARS):
     """
-    Two-sided CUSUM on a standardised series.
+    Standardise a YYYYMM (Månedlig) or ISO YYYYWW (Ukentlig) series against
+    the same month/week in the preceding `years` years.
+
+    For an observation in year Y at position p (month or ISO week):
+      mu    = mean of position p in years Y-years .. Y-1 (needs >= min_years
+              of them; otherwise the observation gets NaN = no score)
+      sigma = pooled within-position standard deviation over those same
+              years: every baseline value minus its own position's mean,
+              squared, summed, divided by (values - positions). Pooling over
+              all months/weeks gives a stable sigma; a per-position sigma
+              from 2-3 values would not be.
+    The observation's own year is never in its baseline. Returns a float
+    Series on the same index, NaN where no baseline exists.
+    """
+    s = to_float_series(series).dropna()
+    out = pd.Series(np.nan, index=s.index, dtype="float64")
+    if s.empty:
+        return out
+
+    periods = np.asarray(s.index, dtype="int64")
+    df = pd.DataFrame(
+        {"aar": periods // 100, "pos": periods % 100, "verdi": s.to_numpy()},
+        index=s.index,
+    )
+
+    for aar in np.unique(df["aar"]):
+        base = df[(df["aar"] >= aar - years) & (df["aar"] < aar)]
+        if base.empty:
+            continue
+        stats = base.groupby("pos")["verdi"].agg(["mean", "count"])
+        stats = stats[stats["count"] >= min_years]
+        if stats.empty:
+            continue
+
+        used  = base[base["pos"].isin(stats.index)]
+        resid = used["verdi"] - used["pos"].map(stats["mean"])
+        dof   = len(resid) - len(stats)
+        if dof <= 0:
+            continue
+        sigma = float(np.sqrt(np.sum(resid ** 2) / dof))
+        if not np.isfinite(sigma) or sigma == 0:
+            continue
+
+        target = df[(df["aar"] == aar) & df["pos"].isin(stats.index)]
+        out.loc[target.index] = (target["verdi"] - target["pos"].map(stats["mean"])) / sigma
+
+    return out
+
+
+def run_cusum(series, granularitet="Månedlig", k=CUSUM_K, h=CUSUM_H,
+              years=CUSUM_BASELINE_YEARS, recovery_periods=CUSUM_RECOVERY_PERIODS):
+    """
+    Two-sided CUSUM on the seasonally standardised series (standardise_seasonal).
     k = allowance (typically 0.5 * expected shift in sigma units)
     h = decision threshold (typically 4-5)
-    baseline_obs = number of leading observations used to compute mu/sigma —
-        an anchored reference period, not the whole series. Otherwise a slow
-        persistent drift gets partially absorbed into "normal", dampening
-        the very sensitivity CUSUM is meant to provide. The full series
-        (including the baseline window itself) is standardised against this
-        fixed mu/sigma before running the CUSUM recursion.
 
-    The accumulator that crosses h is reset to 0 the same period it fires
-    (standard CUSUM/SPC practice) — otherwise it saturates permanently
-    after the first sustained shift and can never register a later
-    recovery or a second, separate shift; a board-level "how are we doing
-    now" signal must be able to move in both directions in this way.
+    Event vs. state:
+    - signal / signal_direction is the EVENT: True / Stigende / Synkende only
+      in the period an accumulator crosses h. That accumulator is then reset
+      to 0 (standard SPC practice — otherwise it saturates after the first
+      sustained shift and can't register a recovery or a second shift).
+    - tilstand is the STATE a board card should read: the last signalled
+      direction, held until an opposite signal fires or the matching side has
+      been quiet for `recovery_periods` consecutive periods. Quiet = the
+      accumulator is below h/2 AND that period's value did not push it up
+      (z - k <= 0 for Stigende, -z - k <= 0 for Synkende). Without the second
+      condition, the reset itself (accumulator back at 0, refilling slowly
+      under a small shift) looked like a recovery, and a sustained 1-sigma
+      decline read Synkende only about half the time.
 
-    Returns DataFrame with cusum_pos, cusum_neg, signal, signal_direction.
-    signal_direction is always one of Stigende/Synkende/Stabil, so a board-level
-    DAX measure can read this column directly instead of translating it (see
-    CUSUM_Changepoint_POWERBI_DAX.md).
+    Returns DataFrame with cusum_pos, cusum_neg, signal, signal_direction,
+    tilstand — indexed by the periods that had a baseline — or None when too
+    few periods could be standardised. Direction values are always
+    Stigende/Synkende/Stabil, so DAX can read them with no translation.
     """
-    if len(series) < 8:
+    z = standardise_seasonal(series, granularitet, years=years).dropna()
+    if len(z) < CUSUM_MIN_POST_BASELINE_OBS:
         return None
 
-    series = to_float_series(series)
-    values = series.dropna().values
-    if len(values) < 8:
-        return None
+    values    = z.to_numpy()
+    n         = len(values)
+    cusum_pos = np.zeros(n)
+    cusum_neg = np.zeros(n)
+    signal    = np.zeros(n, dtype=bool)
+    retning   = np.full(n, "Stabil", dtype=object)
+    tilstand  = np.full(n, "Stabil", dtype=object)
 
-    if len(values) < baseline_obs + CUSUM_MIN_POST_BASELINE_OBS:
-        return None
+    prev_pos = prev_neg = 0.0
+    state    = "Stabil"
+    quiet    = 0
+    for i in range(n):
+        pos = max(0.0, prev_pos + values[i] - k)
+        neg = max(0.0, prev_neg - values[i] - k)
 
-    baseline = values[:baseline_obs]
-    mu    = np.mean(baseline)
-    sigma = np.std(baseline)
-    if sigma == 0:
-        return None
+        if pos > h:
+            signal[i], retning[i], pos = True, "Stigende", 0.0
+        elif neg > h:
+            signal[i], retning[i], neg = True, "Synkende", 0.0
 
-    standardised = (values - mu) / sigma
+        if signal[i]:
+            state, quiet = retning[i], 0
+        elif state != "Stabil":
+            acc  = pos if state == "Stigende" else neg
+            push = (values[i] - k) if state == "Stigende" else (-values[i] - k)
+            quiet = quiet + 1 if (acc < h / 2 and push <= 0) else 0
+            if quiet >= recovery_periods:
+                state, quiet = "Stabil", 0
 
-    cusum_pos = np.zeros(len(standardised))
-    cusum_neg = np.zeros(len(standardised))
-    signal    = np.zeros(len(standardised), dtype=bool)
-    retning   = np.full(len(standardised), "Stabil", dtype=object)
-
-    for i in range(1, len(standardised)):
-        cusum_pos[i] = max(0, cusum_pos[i-1] + standardised[i] - k)
-        cusum_neg[i] = max(0, cusum_neg[i-1] - standardised[i] - k)
-
-        if cusum_pos[i] > h:
-            signal[i]    = True
-            retning[i]   = "Stigende"
-            cusum_pos[i] = 0.0
-        elif cusum_neg[i] > h:
-            signal[i]    = True
-            retning[i]   = "Synkende"
-            cusum_neg[i] = 0.0
+        cusum_pos[i], cusum_neg[i], tilstand[i] = pos, neg, state
+        prev_pos, prev_neg = pos, neg
 
     return pd.DataFrame({
-        "cusum_pos":       cusum_pos,
-        "cusum_neg":       cusum_neg,
-        "signal":          signal,
-        "signal_direction": retning
-    }, index=series.dropna().index)
+        "cusum_pos":        cusum_pos,
+        "cusum_neg":        cusum_neg,
+        "signal":           signal,
+        "signal_direction": retning,
+        "tilstand":         tilstand,
+    }, index=z.index)
 
 
 # =============================================================================
@@ -696,11 +758,6 @@ series_configs = [
     ("Produksjonsdifferanse",   weekly_prod,   "Ukentlig", MIN_WEEKLY),
 ]
 
-CUSUM_BASELINE_BY_GRANULARITET = {
-    "Månedlig": CUSUM_BASELINE_MONTHLY,
-    "Ukentlig": CUSUM_BASELINE_WEEKLY,
-}
-
 cusum_rows       = []
 changepoint_rows = []
 
@@ -717,8 +774,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
             continue
 
         # ── CUSUM ──────────────────────────────────────────────────
-        baseline_obs = CUSUM_BASELINE_BY_GRANULARITET[granularitet]
-        cusum = run_cusum(ind_data, baseline_obs=baseline_obs)
+        cusum = run_cusum(ind_data, granularitet)
         if cusum is not None:
             for idx, row in cusum.iterrows():
                 cusum_rows.append({
@@ -730,6 +786,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
                     "cusum_negativ":   round(float(row["cusum_neg"]), 4),
                     "signal":          bool(row["signal"]),
                     "signalretning":   row["signal_direction"],
+                    "tilstand":        row["tilstand"],
                     "kjoert_tidspunkt": datetime.now(),
                     "kjoere_id":       BATCH_ID,
                 })
@@ -796,6 +853,7 @@ CUSUM_SCHEMA = StructType([
     StructField("cusum_negativ",    DoubleType(),    True),
     StructField("signal",           BooleanType(),   False),
     StructField("signalretning",    StringType(),    True),
+    StructField("tilstand",         StringType(),    True),
     StructField("kjoert_tidspunkt", TimestampType(), False),
     StructField("kjoere_id",        StringType(),    False),
 ])
@@ -878,16 +936,21 @@ if drilldown_rows:
     drilldown_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.pelt_analyse_detaljer")
     print(f"pelt_analyse_detaljer skrevet: {len(drilldown_rows)} rader")
 
-# Summary — active signals
+# Summary — series whose current state (latest row) is not Stabil
 if cusum_rows:
     spark.sql(f"""
-                SELECT indikator, maaltall, granularitet,
-                             MAX(analyse_dato) AS siste_signaldato,
-                             MAX(signalretning) AS retning
-                FROM analyser.cusum_analyse
-                WHERE signal = TRUE
-                    AND kjoere_id = '{BATCH_ID}'
-                GROUP BY indikator, maaltall, granularitet
+                SELECT indikator, maaltall, granularitet, analyse_dato, tilstand
+                FROM (
+                    SELECT *,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY indikator, maaltall, granularitet
+                               ORDER BY analyse_dato DESC
+                           ) AS rn
+                    FROM analyser.cusum_analyse
+                    WHERE kjoere_id = '{BATCH_ID}'
+                ) siste
+                WHERE rn = 1
+                    AND tilstand <> 'Stabil'
                 ORDER BY maaltall, indikator
     """).show(50, truncate=False)
 

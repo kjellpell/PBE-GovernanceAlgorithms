@@ -41,7 +41,7 @@ self-explanatory labels with numbers that need a briefing:
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
-- `CUSUM_Changepoint` — why *this* month triggered, not last month, is an anchored-baseline judgment call
+- `CUSUM_Changepoint` — why *this* month triggered, not last month, depends on the same-month-prior-years baseline
 - `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
 - `Throughput_Pressure_Monitor` — `pressure_nivaa` reads fine; the five-factor weighted score behind it doesn't
 - `Caseworker_Load_Concentration` — a Gini coefficient teaches a leader nothing on sight the way a percentage or a day count does; the color band is doing all the communicating, so keep the raw number out of any leader-facing view entirely
@@ -101,18 +101,25 @@ on both monthly and weekly series.
   detects a shift in the average, not a volatility change with the average unchanged.
   Never add an inline `%pip install` cell for a changepoint library: it fails with
   `MagicUsageError` on tenants where inline installation is disabled, and isn't needed here
-- **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` (anchored baseline window for mu/sigma), `CUSUM_MIN_POST_BASELINE_OBS`
-- `signal` is boolean; `signalretning`/`endringsretning` use `Stigende`/`Synkende`/`Stabil` —
-  plain board vocabulary, so a board-level measure can read `cusum_analyse[signalretning]`
-  directly with no translation SWITCH (`endringsretning` in `pelt_analyse` is never
-  `Stabil` — a changepoint row only exists when a shift was actually detected)
-- mu/sigma come from a fixed, anchored baseline window (the series' first N observations), not the whole history — a slow persistent drift would otherwise get partially absorbed into "normal" and dampen detection
+- **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `CUSUM_BASELINE_YEARS` (3), `CUSUM_MIN_BASELINE_YEARS` (2), `CUSUM_MIN_POST_BASELINE_OBS`, `CUSUM_RECOVERY_PERIODS` (3)
+- Each observation is standardised against the **same calendar month (or ISO week) in the
+  three preceding years**, never its own year (`standardise_seasonal`): seasonally
+  adjusted, recent, and unable to absorb drift inside the current year. Sigma is pooled
+  over all positions in those years. No output for a month/week with fewer than two prior
+  years. A shift lasting several years becomes the new normal by design
+- `signal`/`signalretning` are the **event** (the period an accumulator crossed `h`, then
+  reset); `tilstand` is the **state** — the last signalled direction, held until an
+  opposite signal or `CUSUM_RECOVERY_PERIODS` quiet periods in a row (accumulator below
+  `h/2` and not pushing further). All use `Stigende`/`Synkende`/`Stabil`, so a board-level
+  measure reads `cusum_analyse[tilstand]` directly with no translation SWITCH
+  (`endringsretning` in `pelt_analyse` is never `Stabil` — a changepoint row only exists
+  when a shift was actually detected)
 - `cusum_analyse` stores only `cusum_positiv`/`cusum_negativ`/`signal` — the raw value is a
   live DAX measure against `Faser`, defined elsewhere in the model
 - Board/governance trend direction (`Stigende`/`Synkende`/`Stabil`) is `Trendretning (CUSUM)`
-  in `CUSUM_Changepoint_POWERBI_DAX.md` — the anchored-baseline CUSUM signal read directly,
-  not a separately-computed DAX slope; every indicator has 20+ years of history, more than
-  enough to build a CUSUM baseline from
+  in `CUSUM_Changepoint_POWERBI_DAX.md` — `tilstand` on the latest row, not a
+  separately-computed DAX slope. (It used to read `signalretning`, which is only non-`Stabil`
+  in the firing period, so a board card said "stable" every other month during a real decline)
 
 **`pelt_analyse_detaljer`** breaks the most recent changepoint down by `enhet`/`fasetittel`, reusing PELT's before/after window instead of re-running detection.
 - Only drills into changepoints within `RECENT_CHANGEPOINT_DAYS` (90) days old

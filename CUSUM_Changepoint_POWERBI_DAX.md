@@ -1,7 +1,7 @@
 # CUSUM_Changepoint.py — Power BI and DAX
 
 **Målgruppe:** Analytiker-rapport — hvorfor signalet utløste akkurat denne måneden, og
-ikke forrige, krever å forstå den ankrede baseline-metoden.
+ikke forrige, krever å forstå baseline-metoden (samme måned de tre foregående årene).
 
 ## Formål
 Skille mellom tidlig driftssignal (CUSUM) og bekreftet strukturelt skift (PELT), med drill-down for årsaksforklaring.
@@ -29,6 +29,28 @@ desember (30.12.2024 tilhører uke 1 i 2025). En datotabell som skal matche uker
 bruke ISO-år og ISO-uke (`WEEKNUM(dato, 21)` og ISO-året fra torsdagen i uken), ikke
 `YEAR(dato)`.
 
+## Baseline og tilstand (endret oktober 2026)
+
+**Baseline:** hver periode sammenlignes med **samme kalendermåned (eller ISO-uke) de tre
+foregående årene** — aldri med sitt eget år. Juli måles mot tidligere juli-måneder, så
+sommerfallet ser ikke ut som drift hvert år, og referansen er nylig, ikke 2015. Spredningen
+(sigma) er samlet over alle måneder i de tre årene. En måned/uke uten minst to tidligere
+år får ingen rad (derfor starter serien to år etter `START_YEAR`). Konsekvens: et skift
+som varer i flere år blir gradvis «ny normal» — det er riktig for et tidlig varsel, men
+betyr at et vedvarende skift tones ned i år 2–3.
+
+**Hendelse vs. tilstand:**
+- `signal` / `signalretning` er **hendelsen**: `TRUE` / `Stigende` / `Synkende` bare i
+  perioden akkumulatoren krysser terskelen (deretter nullstilles den).
+- `tilstand` er **tilstanden**: siste signalerte retning, holdt til et motsatt signal kommer
+  eller siden har vært rolig i tre perioder på rad (`CUSUM_RECOVERY_PERIODS`). Rolig betyr
+  at akkumulatoren er under halve terskelen **og** at perioden ikke trakk videre i samme
+  retning.
+
+Tidligere leste bordkortet `signalretning` på siste rad. Under en vedvarende nedgang viste
+det da `Synkende` bare i måneden signalet fyrte og `Stabil` ellers — i en simulering
+halvparten av månedene. Bruk `tilstand` på alle kort som skal svare på «hvordan går det nå».
+
 ## Visualforslag
 
 ### 1) CUSUM-linje (tidlig varsling)
@@ -40,8 +62,9 @@ bruke ISO-år og ISO-uke (`WEEKNUM(dato, 21)` og ISO-året fra torsdagen i uken)
 - Filter: `indikator`, `maaltall`, `granularitet`
 
 ### 2) Aktiv signal-tabell
-- Kolonner: `indikator`, `maaltall`, `granularitet`, `signalretning`, `analyse_dato`
-- Filter: `signal = TRUE`
+- Kolonner: `indikator`, `maaltall`, `granularitet`, `tilstand`, `analyse_dato`
+- Filter: siste `analyse_dato` per serie og `tilstand <> "Stabil"`
+- (Historikk over når signalene fyrte: filter `signal = TRUE`, kolonne `signalretning`.)
 
 ### 3) PELT-endringspunkter (bekreftede skift)
 - Kolonner: `indikator`, `maaltall`, `analyse_dato`, `gjennomsnitt_foer`, `gjennomsnitt_etter`, `endringsstoerrelse`, `endringsretning`
@@ -67,27 +90,31 @@ CALCULATE(
 ```
 
 ```DAX
+Trendretning (CUSUM) =
+CALCULATE(
+    SELECTEDVALUE(cusum_analyse[tilstand]),
+    cusum_analyse[analyse_dato] = [Siste CUSUM-dato]
+)
+```
+
+`tilstand` is written as `Stigende`/`Synkende`/`Stabil` — plain board vocabulary, so a
+board-level trend card reads it with no translation layer. This is the one to put on a
+board card instead of the CUSUM line chart: the statistically-tested signal (CUSUM
+against the same month in the three prior years), held as a state rather than flashing
+for one period, as one plain word — no chart, no `cusum_positiv`/`cusum_negativ` numbers.
+
+```DAX
 Har aktiv CUSUM signal =
+[Trendretning (CUSUM)] IN { "Stigende", "Synkende" }
+```
+
+```DAX
+Signal fyrte siste periode =
 CALCULATE(
     MAX(cusum_analyse[signal]),
     cusum_analyse[analyse_dato] = [Siste CUSUM-dato]
 ) = TRUE()
 ```
-
-`signalretning` is written as `Stigende`/`Synkende`/`Stabil` — plain board vocabulary,
-precisely so a board-level trend card can read it with no translation layer:
-
-```DAX
-Trendretning (CUSUM) =
-CALCULATE(
-    SELECTEDVALUE(cusum_analyse[signalretning]),
-    cusum_analyse[analyse_dato] = [Siste CUSUM-dato]
-)
-```
-
-This is the one to put on a board card instead of the CUSUM line chart: the real,
-statistically-tested signal (anchored-baseline CUSUM, not a rolling self-referential
-threshold), as one plain word — no chart, no `cusum_positiv`/`cusum_negativ` numbers.
 
 ```DAX
 Antall aktive signaler =
@@ -136,6 +163,7 @@ CALCULATE(
 ```
 
 ## Tolkning
-- CUSUM = tidlig driftssignal.
+- CUSUM = tidlig driftssignal. `tilstand` = gjeldende retning; `signal` = perioden den
+  ble bekreftet.
 - PELT = bekreftet skift med tidspunkt og størrelse.
 - `pelt_analyse_detaljer` svarer på hvor skiftet kommer fra (enhet/fasetittel).
