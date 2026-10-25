@@ -16,13 +16,15 @@ to own this.
 
 Every number on a leader page must answer a question a leader can act on. Statistically
 interesting but not actionable views (drift scores, changepoints, control charts, ranges)
-were tried and removed — see *Retired* below.
+were tried and removed — see *Retired* below. So was a year-end frist% forecast: frist% isn't
+seasonal, so any forecast was just an extrapolation of a past average. Leaders use
+year-to-date frist%, the 3-month trend arrow and the red/yellow open faser instead.
 
 ## What's here
 
 | File | Report | Answers |
 |---|---|---|
-| `Status_i_aar_POWERBI_DAX.md` | «Status i år» table, one row per indicator | Where does frist% end at year-end at today's pace? How much must we produce per month to reach the production target, and what do we produce now? |
+| `Status_i_aar_POWERBI_DAX.md` | «Status i år» table, one row per indicator | How much must we produce per month to reach the production target, and what do we produce now? |
 | `At_Risk_Open_Cases_POWERBI_DAX.md` (Del 1) | Product pages | Which open faser are red/yellow/green by time left to the deadline (the report's own colour code), with `Status` alongside? Today only |
 | `At_Risk_Open_Cases_POWERBI_DAX.md` (Del 2) | Product pages | Is the portfolio growing? Intake, completions, net flow and open faser per month back to 2015 |
 | `At_Risk_Open_Cases_POWERBI_DAX.md` (Del 3) | Product pages | Where is work getting slow? P90 phase time (`tidsbruk`, our time only) per phase against its last 12 months |
@@ -57,6 +59,6 @@ source, not an analysis; independent of the rule above.
 | `Throughput_Pressure_Monitor.py` | Five-factor point score leaders couldn't check | Del 2 flow measures |
 | `Phase_Bottleneck_Detector.py` | Point score on cells too small for a stable P90 | The report's net production + Del 3 P90 per phase |
 | `Pause_Reconstruction.py` (never deployed) | Rebuilt pause history from milestones covering only ~12 months; `tidsbruk` already gives today's clock | `tidsbruk` directly |
-| Control charts (`Fristprosent_Kontrollkort_POWERBI_DAX.md`) | Leaders found them not actionable | Production gap and year-end projection in «Status i år» |
+| Control charts (`Fristprosent_Kontrollkort_POWERBI_DAX.md`) | Leaders found them not actionable | Production gap in «Status i år» |
 | `PELT_Changepoint.py` (PELT changepoints + drill-down) | Retrospective (needs ~6 months after a shift), doesn't point to a decision, largest script to maintain. For evaluating a *known* organisational change, a one-off before/after analysis at the known date is better | — |
-| `Seasonal_YTD_ratio_extrapolation.py` (`frist_prognose`) | Frist% isn't seasonal, so the seasonal model in practice reproduced year-to-date; its range and projection line weren't used for decisions | `Status_i_aar_POWERBI_DAX.md`: year-end at today's pace, plain DAX |
+| `Seasonal_YTD_ratio_extrapolation.py` (`frist_prognose`) | Frist% isn't seasonal, so the forecast was in practice an extrapolation of year-to-date; not used for decisions | Nothing: year-to-date frist%, the trend arrow and red/yellow open faser cover it |
