@@ -36,7 +36,7 @@ first. Split into two Power BI reports along that line, rather than one report m
 self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
-- `Fristprosent` p-chart — each month against a shaded band of normal variation for its volume, red points where there's reason to react (below the band, or eight months in a row below normal), with a one-line reading guide; headline `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
+- Control charts for **production** and **frist%** — each month against a band of normal variation (same-month average of the last 3 years ± 0.5 SD), red dots where there's reason to react (below the band, or eight months in a row below normal), blue dots for unusually good months; headline `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
 - `At_Risk_Open_Cases` (Del 1) — open faser by the report's existing deadline colour code (red = past deadline, yellow = close to it, threshold per case type, green = the rest), with `Status` alongside: counts and shares, live DAX
 - `At_Risk_Open_Cases` (Del 2) — intake, completions and open cases per month back to 2015, live DAX
@@ -75,8 +75,8 @@ Three things that used to be here were retired:
   on a lagging closed-case measure it was slow (~9 months to see a sustained 1σ shift in
   monthly data) and, with a recent same-month baseline, raised frequent false alarms; a
   leader also couldn't see why the word on the card changed. Replaced by live DAX
-  (`Fristprosent_Kontrollkort_POWERBI_DAX.md`: rolling 12 months, change vs. last year,
-  p-chart) and by the leading indicators. PELT, which shared the script, stays on demand
+  (`Fristprosent_Kontrollkort_POWERBI_DAX.md`: control charts for production and frist%,
+  rolling 12 months, change vs. last year) and by the leading indicators. PELT, which shared the script, stays on demand
   as `PELT_Changepoint.py`. See git history for `CUSUM_Changepoint.py`.
 - `Throughput_Pressure_Monitor.py` (`gjennomstroemming_press_enhet`/`_fase`, retired
   October 2026) — its team-level flow (intake vs. completions, open queue) is now plain
@@ -100,17 +100,19 @@ role DAX has no clean primitive for, exactly the "possible but not simple" case 
 
 ## Closed-case trend, drift, and forecast
 
-### Fristprosent level: p-chart and rolling 12 months (live DAX)
+### Control charts: production and frist% (live DAX)
 
-`Fristprosent_Kontrollkort_POWERBI_DAX.md`, in the **leader** report. A monthly p-chart:
-the centre line is the same calendar month in the three prior years (pooled counts), and the
-band is ±3·√(p(1−p)/n), drawn as a shaded area. Points are grey (normal variation), red
-(below the band, or the eighth month in a row below the centre line) or blue (unusually
-good), with a one-line reading guide under the chart. It's for leaders because it guards
-against the two common mistakes — reacting to an ordinary bad month, and missing a slow
-decline — which a single number or trend word can't show. Headline card:
-`Fristprosent 12 mnd` with `Endring mot i fjor (pp)`. Both confirm that a shift has
-happened; they are not the early warning (see Leading indicator).
+`Fristprosent_Kontrollkort_POWERBI_DAX.md`, in the **leader** report. Two charts on one
+principle: each month's value against a centre line (same calendar month, last three years,
+because both measures are seasonal) and a band of ± 0.5 standard deviations of the monthly
+values (calibrated on this data; 1 SD was too wide because the SD includes seasonal swings).
+The production chart reuses the band the report already has; the frist% chart builds one
+the same way. Red dots mark a month below the band or the eighth month in a row below the
+centre line, blue dots a month above the band. The dots are separate series that only have
+a value where they apply, so they work in any Power BI version. Production usually drops
+before frist% does, so side by side the charts show cause and effect. Headline card:
+`Fristprosent 12 mnd` with `Endring mot i fjor (pp)`. Both charts confirm a shift after the
+fact; the early warning is the red/yellow open faser (see Leading indicator).
 
 ### PELT_Changepoint.py (on demand)
 

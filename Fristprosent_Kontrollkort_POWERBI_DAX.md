@@ -1,31 +1,33 @@
-# Fristprosent — p-kort og rullerende 12 måneder (Power BI and DAX)
+# Kontrollkort for produksjon og fristprosent (Power BI and DAX)
 
-**Målgruppe:** Leder-rapport.
-- **p-kortet** — hver måneds `Fristprosent` mot et skyggelagt bånd for normal variasjon,
-  med røde punkter der det er grunn til å reagere. Én linjes lesehjelp er nok.
-- **Overskriftstallet** — `Fristprosent 12 mnd` med `Endring mot i fjor (pp)`.
+**Målgruppe:** Leder-rapport. Tre ting på siden:
+1. **Overskriftstallet** — `Fristprosent 12 mnd` med `Endring mot i fjor (pp)`
+2. **Kontrollkort for produksjon** — produserte faser per måned mot båndet dere allerede har
+3. **Kontrollkort for fristprosent** — samme prinsipp, med et bånd bygget på samme måte
 
-Analytiker-rapporten kan bruke samme kort med grensene som tall og tolkningsnotatene nederst.
+De to kortene svarer på hvert sitt spørsmål. **Produksjon** viser om tempoet faller
+(kapasitet). **Fristprosent** viser om fristene glipper. Produksjonen faller som regel først,
+så side om side viser de både årsak og virkning.
 
 Erstatter CUSUM (`cusum_analyse`, `Trendretning (CUSUM)`), pensjonert i oktober 2026. CUSUM
-på en lukket-sak-måling var tregt (ca. 9 måneder før et vedvarende skift på 1 σ ble sett på
-månedsdata), og med en nylig baseline ga det hyppige falske signaler. Lederen kunne heller
-ikke se hvorfor ordet på kortet endret seg. p-kortet viser det samme — «har nivået endret
-seg?» — slik at leseren ser det selv. Alt er live DAX; ingen skript, ingen tabell.
+var tregt på månedsdata og ga hyppige falske signaler, og lederen kunne ikke se hvorfor
+ordet på kortet endret seg. Kontrollkortene viser det samme — «har nivået endret seg?» —
+slik at leseren ser det selv. Alt er live DAX; ingen skript, ingen tabell.
 
-**Hvorfor ledere skal ha det:** det beskytter mot de to vanligste feilene i
+**Hvorfor ledere skal ha dem:** de beskytter mot de to vanligste feilene i
 styringsrapportering: å reagere på en måned som ser dårlig ut, men er vanlig variasjon, og å
-overse en langsom nedgang der ingen enkeltmåned ser alarmerende ut. Et enkelt tall eller ord
-kan ikke vise noen av delene.
+overse en langsom nedgang der ingen enkeltmåned ser alarmerende ut.
 
-**Dette er ikke det tidlige varselet.** `Fristprosent` måles når fasene lukkes og kommer
-derfor etter. Det ledende signalet er de røde og gule åpne fasene i
-`At_Risk_Open_Cases_POWERBI_DAX.md`. Denne siden bekrefter at et skift har skjedd.
+**Dette er ikke det tidlige varselet.** Begge tallene måles når fasene lukkes. Det ledende
+signalet er de røde og gule åpne fasene i `At_Risk_Open_Cases_POWERBI_DAX.md`.
 
 ## Antagelser (rename to match your model)
-- `[Faser innen frist]`, `[Produserte faser]` og `[Faser innen frist %]` finnes allerede
-  (se `Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md`) — den offisielle definisjonen
-- `Kalender[Dato]` er datotabellen, relatert til fasens sluttdato
+- `[Produserte faser]`, `[Faser innen frist]` og `[Faser innen frist %]` finnes allerede
+  (se `Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md`) — de offisielle definisjonene
+- Produksjonsbåndet finnes allerede som mål. Navnene under — `[Produksjon snitt 3 år]`,
+  `[Produksjon nedre grense]`, `[Produksjon øvre grense]` — er plassholdere: **bytt til
+  deres egne**
+- `Kalender[Dato]` er datotabellen
 - Bare **hele måneder**: inneværende måned vises ikke (den er ikke ferdig)
 
 ## Del 1 — Overskriftstallet: rullerende 12 måneder
@@ -62,76 +64,36 @@ RETURN
 ```
 
 Vis som **KPI-kort**: `[Fristprosent 12 mnd]` med `[Endring mot i fjor (pp)]` som undertekst
-(«+1,8 pp mot i fjor»). Ikke farg kortet etter endringen alene. Om endringen er reell, er det
-p-kortet under som viser.
+(«+1,8 pp mot i fjor»).
 
-## Del 2 — p-kortet
+## Prinsippet for kontrollkortene
 
-Hver måned får et punkt og et bånd. **Midtlinjen** er normalen, og **båndet** er normal
-variasjon rundt den. Kortet bruker **båndet dere allerede har**: snittet for måneden de tre
-siste årene, ± 0,5 standardavvik. Det er kalibrert på deres data (1 standardavvik ga et for
-bredt bånd, fordi standardavviket også fanger sesong og forskjeller mellom år), og det ser
-likt ut som i rapportene ledere allerede kjenner.
+Hver måned er et punkt. **Midtlinjen** er normalen: snittet for **samme kalendermåned** de
+tre siste årene, siden begge tallene svinger med sesongen (juli måles mot tidligere
+juli-måneder). **Båndet** er ± 0,5 standardavvik av månedsverdiene de tre årene. Bredden er
+kalibrert på deres data: standardavviket fanger også sesongsvingningene, så 1 standardavvik
+ga et for bredt bånd.
 
-Koble målene under til de eksisterende formlene. **Bytt navnene i hakeparentes** til målene
-dere har:
+Punktene farges etter to regler:
+- **Rødt:** måneden er under båndet, **eller** den er den åttende måneden på rad under
+  midtlinjen (en langsom nedgang der ingen enkeltmåned ser alarmerende ut)
+- **Blått:** måneden er over båndet — uvanlig god, verdt å forstå
+- Resten er vanlig variasjon og får ingen ekstra markering
+
+Fargene legges på som **egne serier** som bare har verdi i måneder der fargen gjelder. Da
+vises de som prikker oppå linjen, og det virker i alle versjoner av Power BI.
+
+## Del 2 — Kontrollkort for produksjon
+
+Båndet finnes allerede. Disse målene kobler det til punktreglene:
 
 ```DAX
-p-kort verdi =
-IF(MAX(Kalender[Dato]) <= EOMONTH(TODAY(), -1), [Faser innen frist %])
+Produksjon verdi =
+IF(MAX(Kalender[Dato]) <= EOMONTH(TODAY(), -1), [Produserte faser])
 ```
 
 ```DAX
-p-kort senterlinje =
-[Snitt siste 3 år]                -- eksisterende mål: snittet for måneden de tre siste årene
-```
-
-```DAX
-p-kort øvre grense =
-[Øvre grense (0,5 SD)]            -- eksisterende mål
-```
-
-```DAX
-p-kort nedre grense =
-[Nedre grense (0,5 SD)]           -- eksisterende mål
-```
-
-**Sesong:** fristprosent svinger med årstiden (bekreftet). Midtlinjen bør derfor være
-snittet for **samme kalendermåned** de tre siste årene (juli mot tidligere juli-måneder),
-ikke snittet av alle måneder. Er den eksisterende midtlinjen snittet av alle måneder, vil de
-svake sesongmånedene jevnlig bli gule eller røde uten at noe er galt. Bytt da
-`p-kort senterlinje` til samme-måned-snittet under, og behold deres 0,5 SD-bånd rundt den:
-
-```DAX
-p-kort senterlinje (samme måned) =
-VAR D = MAX(Kalender[Dato])
-VAR M = MONTH(D)
-VAR Y = YEAR(D)
-RETURN
-    CALCULATE(
-        [Faser innen frist %],
-        FILTER(
-            ALL(Kalender),
-            MONTH(Kalender[Dato]) = M
-                && YEAR(Kalender[Dato]) >= Y - 3
-                && YEAR(Kalender[Dato]) <= Y - 1
-        )
-    )
-```
-
-Når midtlinjen følger sesongen, blir avvikene rundt den mindre, så 0,5 SD kan da bli et
-smalere bånd enn i dag. Kalibreringskontrollen under viser om det blir for smalt.
-
-Båndet må gjelde **fristprosent per måned**, samme tall som punktene. Gjelder de eksisterende
-formlene produksjonsvolum (antall saker), er det et annet kort — nyttig for kapasitet, men
-ikke dette.
-
-**Løpsregelen:** åtte måneder på rad under midtlinjen betyr et vedvarende skift nedover,
-selv om ingen av dem er under båndet. Dette er det CUSUM skulle fange. Målet ser på denne
-måneden og de sju før den:
-
-```DAX
-p-kort 8 under på rad =
+Produksjon 8 under på rad =
 VAR Slutt = EOMONTH(MAX(Kalender[Dato]), 0)
 VAR Maaneder =
     ADDCOLUMNS(
@@ -139,123 +101,139 @@ VAR Maaneder =
         "@Verdi",
             VAR Til = EOMONTH(Slutt, -[Value])
             VAR Fra = EOMONTH(Til, -1) + 1
-            RETURN
-                CALCULATE(
-                    [p-kort verdi],
-                    REMOVEFILTERS(Kalender),
-                    FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)
-                ),
+            RETURN CALCULATE([Produksjon verdi], REMOVEFILTERS(Kalender),
+                FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)),
         "@Senter",
             VAR Til = EOMONTH(Slutt, -[Value])
             VAR Fra = EOMONTH(Til, -1) + 1
-            RETURN
-                CALCULATE(
-                    [p-kort senterlinje],
-                    REMOVEFILTERS(Kalender),
-                    FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)
-                )
+            RETURN CALCULATE([Produksjon snitt 3 år], REMOVEFILTERS(Kalender),
+                FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til))
     )
 RETURN
-    COUNTROWS(
-        FILTER(Maaneder, NOT ISBLANK([@Verdi]) && NOT ISBLANK([@Senter]) && [@Verdi] < [@Senter])
-    ) = 8
+    COUNTROWS(FILTER(Maaneder,
+        NOT ISBLANK([@Verdi]) && NOT ISBLANK([@Senter]) && [@Verdi] < [@Senter])) = 8
 ```
 
-**Kalibreringskontroll:** hvor ofte har måneden ligget under båndet de siste 36
-månedene? Med et bånd som er justert på øyemål vet vi ikke det på forhånd, så kortet
-måler det selv, per indikator:
+```DAX
+Rødt punkt (produksjon) =
+VAR V = [Produksjon verdi]
+RETURN IF(NOT ISBLANK(V) && (V < [Produksjon nedre grense] || [Produksjon 8 under på rad]), V)
+```
 
 ```DAX
-p-kort andel under båndet (36 mnd) =
-VAR Slutt = EOMONTH(TODAY(), -1)
+Blått punkt (produksjon) =
+VAR V = [Produksjon verdi]
+RETURN IF(NOT ISBLANK(V) && V > [Produksjon øvre grense], V)
+```
+
+Er det eksisterende produksjonsbåndet bygget på snittet av **alle** måneder i stedet for
+samme kalendermåned, vil de svake sesongmånedene jevnlig bli røde. Da bør midtlinjen byttes
+til samme-måned-snittet, slik som `Frist snitt 3 år` i Del 3.
+
+## Del 3 — Kontrollkort for fristprosent
+
+Samme prinsipp. Båndet bygges her på samme måte som produksjonsbåndet:
+
+```DAX
+Frist verdi =
+IF(MAX(Kalender[Dato]) <= EOMONTH(TODAY(), -1), [Faser innen frist %])
+```
+
+```DAX
+Frist snitt 3 år =
+VAR D = MAX(Kalender[Dato])
+RETURN
+    CALCULATE(
+        [Faser innen frist %],
+        FILTER(ALL(Kalender),
+            MONTH(Kalender[Dato]) = MONTH(D)
+                && YEAR(Kalender[Dato]) >= YEAR(D) - 3
+                && YEAR(Kalender[Dato]) <= YEAR(D) - 1)
+    )
+```
+
+(Summerte tellinger for samme måned de tre årene, ikke snitt av tre andeler.)
+
+```DAX
+Frist SD 3 år =
+VAR Y = YEAR(MAX(Kalender[Dato]))
 VAR Maaneder =
     ADDCOLUMNS(
-        GENERATESERIES(0, 35, 1),
+        GENERATESERIES(1, 36, 1),
+        "@V",
+            VAR Til = EOMONTH(DATE(Y - 3, 1, 1), [Value] - 1)
+            VAR Fra = EOMONTH(Til, -1) + 1
+            RETURN CALCULATE([Faser innen frist %], REMOVEFILTERS(Kalender),
+                FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til))
+    )
+RETURN STDEVX.S(Maaneder, [@V])
+```
+
+```DAX
+Frist nedre grense = [Frist snitt 3 år] - 0.5 * [Frist SD 3 år]
+Frist øvre grense  = [Frist snitt 3 år] + 0.5 * [Frist SD 3 år]
+```
+
+```DAX
+Frist 8 under på rad =
+VAR Slutt = EOMONTH(MAX(Kalender[Dato]), 0)
+VAR Maaneder =
+    ADDCOLUMNS(
+        GENERATESERIES(0, 7, 1),
         "@Verdi",
             VAR Til = EOMONTH(Slutt, -[Value])
             VAR Fra = EOMONTH(Til, -1) + 1
-            RETURN
-                CALCULATE(
-                    [p-kort verdi],
-                    REMOVEFILTERS(Kalender),
-                    FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)
-                ),
-        "@Nedre",
+            RETURN CALCULATE([Frist verdi], REMOVEFILTERS(Kalender),
+                FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)),
+        "@Senter",
             VAR Til = EOMONTH(Slutt, -[Value])
             VAR Fra = EOMONTH(Til, -1) + 1
-            RETURN
-                CALCULATE(
-                    [p-kort nedre grense],
-                    REMOVEFILTERS(Kalender),
-                    FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)
-                )
+            RETURN CALCULATE([Frist snitt 3 år], REMOVEFILTERS(Kalender),
+                FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til))
     )
-VAR Med = FILTER(Maaneder, NOT ISBLANK([@Verdi]) && NOT ISBLANK([@Nedre]))
 RETURN
-    DIVIDE(COUNTROWS(FILTER(Med, [@Verdi] < [@Nedre])), COUNTROWS(Med))
-```
-
-- **Opptil ca. 10 %** (rundt én måned i året under båndet): et punkt under båndet er et
-  reelt varsel og vises **rødt**.
-- **Mer enn 10 %:** båndet er for smalt for den indikatoren til at hvert punkt under det
-  kan være et varsel. Da vises punktet **gult** («følg med»), og bare løpsregelen gir rødt.
-  Det skjer automatisk i punktfargen under.
-
-**Punktfargen** — det eneste leseren trenger å se etter:
-
-```DAX
-p-kort punktfarge =
-VAR V = [p-kort verdi]
-VAR Nedre = [p-kort nedre grense]
-VAR BaandHolder = [p-kort andel under båndet (36 mnd)] <= 0.10
-RETURN
-    SWITCH(
-        TRUE(),
-        ISBLANK(V) || ISBLANK(Nedre), BLANK(),
-        [p-kort 8 under på rad], "#B00020",              -- rød: vedvarende nedgang
-        V < Nedre && BaandHolder, "#B00020",             -- rød: uvanlig dårlig måned
-        V < Nedre, "#F9A825",                            -- gul: følg med
-        V > [p-kort øvre grense], "#1565C0",             -- blå: uvanlig god
-        "#9E9E9E"                                        -- grå: normal variasjon
-    )
+    COUNTROWS(FILTER(Maaneder,
+        NOT ISBLANK([@Verdi]) && NOT ISBLANK([@Senter]) && [@Verdi] < [@Senter])) = 8
 ```
 
 ```DAX
-p-kort signal =
-IF([p-kort punktfarge] = "#B00020", [p-kort verdi])
+Rødt punkt (frist) =
+VAR V = [Frist verdi]
+RETURN IF(NOT ISBLANK(V) && (V < [Frist nedre grense] || [Frist 8 under på rad]), V)
 ```
 
-### Slik bygges kortet for ledere
-1. **Linjediagram**, x-akse `Kalender[Dato]` på månedsnivå (kontinuerlig), siste 36
-   måneder. Én indikator om gangen: slicer på `indikator`, eller små multipler per indikator.
-   Ikke bland indikatorer med ulikt nivå i samme kort.
-2. **Linjer:** `[p-kort verdi]` (grå, med markører) og `[p-kort senterlinje]` (tynn,
-   stiplet).
-3. **Båndet:** under *Analyse → Feilfelt (error bars)* på `[p-kort senterlinje]`, sett øvre
-   grense til `[p-kort øvre grense]` og nedre til `[p-kort nedre grense]`, og velg skyggelagt
-   område i lys grå. Har ikke versjonen deres skyggelagt feilfelt, bruk to tynne, lyse
-   linjer.
-4. **Røde punkter:** sett markørfargen med betinget formatering (*fx*) på
-   `[p-kort punktfarge]`. Går ikke det i deres versjon, legg til `[p-kort signal]` som egen
-   serie: røde markører, ingen linje.
-5. **Skjul tallene** for grensene. Ledere trenger båndet, ikke formelen.
-6. **Lesehjelp** som tekst rett under kortet:
-   > *Det grå båndet viser normal variasjon de tre siste årene. Reager på røde punkter
-   > (uvanlig dårlig måned, eller åtte måneder på rad under midtlinjen); følg med på gule.*
+```DAX
+Blått punkt (frist) =
+VAR V = [Frist verdi]
+RETURN IF(NOT ISBLANK(V) && V > [Frist øvre grense], V)
+```
+
+## Slik bygges kortene
+1. **Linjediagram**, x-akse `Kalender[Dato]` på månedsnivå, siste 36 måneder. Én indikator
+   om gangen: slicer på `indikator`, eller små multipler. Ikke bland indikatorer med ulikt
+   nivå i samme kort.
+2. **Linjer:** verdien (`Produksjon verdi` / `Frist verdi`, grå med markører), midtlinjen
+   (tynn, stiplet) og båndet slik dere allerede tegner det for produksjon.
+3. **Prikker:** legg til `Rødt punkt (…)` og `Blått punkt (…)` som to ekstra serier. Sett
+   linjebredden til 0 under *Format → Linjer*, slå på markører, og farg dem rødt
+   (`#B00020`) og blått (`#1565C0`), litt større enn de vanlige punktene.
+4. **Lesehjelp** som tekst under kortene:
+   > *Båndet viser normal variasjon de tre siste årene for samme måned. Reager på røde
+   > punkter: en måned under båndet, eller åtte måneder på rad under midtlinjen. Blå punkter
+   > er uvanlig gode måneder.*
 
 ## Tolkning
-- **Grå punkter, også når de er lavere enn forrige måned:** normal variasjon. Ikke reager —
-  det er dette kortet er til for å unngå.
-- **Rødt punkt under båndet:** uvanlig dårlig måned. Se etter årsak.
-- **Gult punkt under båndet:** svakere enn normalt, men for den indikatoren skjer det for
-  ofte til at én måned alene er et varsel. Følg med; blir det åtte på rad under midtlinjen,
-  blir det rødt.
-- **Røde punkter fra løpsregelen:** nivået har sunket over tid. Det er en sak for
+- **Punkter uten farge, også når de er lavere enn forrige måned:** vanlig variasjon. Ikke
+  reager — det er dette kortene er til for å unngå.
+- **Rødt i produksjon, ikke ennå i fristprosent:** tempoet har falt; fristene vil som regel
+  følge etter. Sjekk de gule og røde åpne fasene.
+- **Rødt i fristprosent, produksjonen normal:** problemet er ikke tempoet, men hvilke saker
+  som blir liggende. Se på flaskehalser per fase.
+- **Røde punkter fra åttemånedersregelen:** nivået har sunket over tid. Det er en sak for
   styringsdialogen, ikke for én enkelt måned.
-- **Blått punkt:** uvanlig god måned. Verdt å forstå hva som skjedde.
-- **Alternativ for analytikere — binomiske grenser:** grensene kan også regnes fra antall
-  faser i måneden, ± 3·√(p(1−p)/n) rundt midtlinjen. Da blir båndet smalere i måneder med
-  mange saker og bredere i måneder med få. Det er standard p-kort, men undervurderer ofte
-  variasjonen når saker kommer i klumper; det empiriske båndet over gjør ikke det.
+- **Røde punkter svært ofte for én indikator** (mer enn ca. én gang i året i rolige
+  perioder): båndet er for smalt for den indikatoren. Vurder 0,75 eller 1 standardavvik for
+  den, eller les enkeltpunkter under båndet som «følg med» og reager bare på
+  åttemånedersregelen.
 - **Brudd i nivået uten forklaring:** kjør `PELT_Changepoint.py` for å tidfeste det og
   bryte det ned på enhet/fasetittel.
