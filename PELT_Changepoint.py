@@ -27,10 +27,9 @@
 # CUSUM drift detection used to live in this script (CUSUM_Changepoint.py,
 # table cusum_analyse). Retired October 2026: on a lagging, closed-case
 # measure it was slow (~9 months to see a 1-sigma monthly shift) and, with a
-# recent same-month baseline, raised frequent false alarms. Replaced by live
-# DAX (rolling 12-month Fristprosent and a p-chart, see
-# Fristprosent_Kontrollkort_POWERBI_DAX.md) and by the leading indicators in
-# At_Risk_Open_Cases_POWERBI_DAX.md. See git history if it is ever needed.
+# recent same-month baseline, raised frequent false alarms. Replaced by the
+# leading indicators in At_Risk_Open_Cases_POWERBI_DAX.md and the report's
+# own monthly frist% tables. See git history if it is ever needed.
 #
 # Requires: nothing to install. PELT runs on a built-in pure-NumPy
 # implementation with an L2 (mean-shift) cost — see _pelt_l2() below. No

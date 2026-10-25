@@ -19,8 +19,9 @@ Datakilder (overskrives hver natt):
 - `analyser.pelt_analyse_detaljer`
 
 CUSUM-driftdeteksjon (`cusum_analyse`, `Trendretning (CUSUM)`) lå tidligere i samme
-skript og ble pensjonert i oktober 2026 — se `README.md`. Erstatning: rullerende
-12-måneders `Fristprosent` og p-kort i `Fristprosent_Kontrollkort_POWERBI_DAX.md`.
+skript og ble pensjonert i oktober 2026 — se `README.md`. Erstatning: de ledende
+indikatorene i `At_Risk_Open_Cases_POWERBI_DAX.md` og rapportens egne månedstabeller for
+fristprosent.
 
 `Fristprosent` følger den **offisielle definisjonen** (samme som
 `Seasonal_YTD_ratio_extrapolation.py` og rapportens `[Produserte faser]`): nevner =
