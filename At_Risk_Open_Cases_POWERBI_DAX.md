@@ -166,3 +166,65 @@ som fristvarsel — det er fargekoden i Del 1.
 - **Linje:** `[Åpne ved periodeslutt]` per måned siden 2015
 - **Små multipler** per `enhet`: `[Netto flyt (periode)]` — flere måneder på rad over null
   betyr at køen vokser
+
+## Del 3 — Fasetid (P90) per fase
+
+Netto produksjon og åpne saker viser **om** køen vokser. P90 fasetid viser **hvor** arbeidet
+går tregt: hvor lang tid de tregeste 10 % av fasene bruker. Det er den trege halen som gir
+fristbrudd. Stiger P90 mens medianen er flat, er det noen saker som blir liggende, ikke alt
+som går tregere. Erstatter `Phase_Bottleneck_Detector` (pensjonert oktober 2026), sammen med
+deres eksisterende mål for netto produksjon og åpne saker.
+
+`tidsbruk` teller bare tid hos oss (ikke ventetid på søker), så P90 er vår egen fasetid.
+P90 er **ikke sesongavhengig** i disse dataene (lang fasetid sprer en sommerdupp over mange
+måneder), så normalen er de **siste 12 månedene**, ikke samme måned tidligere år.
+
+`Kalender` er relatert til fasens sluttdato, så en måned på aksen betyr faser som ble
+avsluttet den måneden.
+
+```DAX
+P90 fasetid =
+VAR Antall = CALCULATE(COUNTROWS(Faser), NOT ISBLANK(Faser[tidsbruk]))
+RETURN
+    IF(
+        Antall >= 30,      -- færre enn 30 avsluttede faser: for få til en P90
+        CALCULATE(PERCENTILE.INC(Faser[tidsbruk], 0.9), NOT ISBLANK(Faser[tidsbruk]))
+    )
+```
+
+```DAX
+P90 fasetid normal =
+VAR Slutt = EOMONTH(MAX(Kalender[Dato]), -1)       -- slutten av forrige måned
+VAR Start = EOMONTH(Slutt, -12) + 1                -- 12 måneder før det
+RETURN
+    CALCULATE(
+        PERCENTILE.INC(Faser[tidsbruk], 0.9),
+        NOT ISBLANK(Faser[tidsbruk]),
+        REMOVEFILTERS(Kalender),
+        FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Start && Kalender[Dato] <= Slutt)
+    )
+```
+
+```DAX
+Rødt punkt (P90) =
+VAR V = [P90 fasetid]
+RETURN IF(NOT ISBLANK(V) && V > [P90 fasetid normal] * 1.25, V)
+```
+
+Faktoren 1,25 («25 % over det siste året») er et utgangspunkt. En fast prosent er mer robust
+enn et standardavviksbånd her, fordi P90 av noen titalls saker hopper for mye til at et
+standardavvik blir stabilt. Juster når dere har sett nivået.
+
+### Visualforslag (fasetid)
+- **På samme tidslinje som netto produksjon og åpne saker:** `[P90 fasetid]` på sekundær
+  akse, med `[P90 fasetid normal]` stiplet og `[Rødt punkt (P90)]` som egen serie (bare
+  markører, rød)
+- **Per fase:** slicer eller små multipler på `fasetittel`. Slå sammen enhetene innenfor en
+  fase — splittes det på enhet × fase × indikator, blir det for få saker per måned
+- Vis eksisterende `Median fasetid` som tynn linje ved siden av P90
+
+### Tolkning (fasetid)
+- **Åpne saker vokser og P90 stiger i samme fase:** flaskehals. Arbeidet hoper seg opp der.
+- **Åpne saker vokser, P90 flat:** for mye inn, ikke tregere behandling. Kapasitet.
+- **P90 stiger, åpne saker flate:** noen saker blir liggende. Se på de røde og gule åpne
+  fasene i den fasen.

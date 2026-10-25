@@ -37,9 +37,9 @@ self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
 - Control charts for **production** and **frist%** — each month against a band of normal variation (same-month average of the last 3 years ± 0.5 SD), red dots where there's reason to react (below the band, or eight months in a row below normal), blue dots for unusually good months; headline `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
-- `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
 - `At_Risk_Open_Cases` (Del 1) — open faser by the report's existing deadline colour code (red = past deadline, yellow = close to it, threshold per case type, green = the rest), with `Status` alongside: counts and shares, live DAX
 - `At_Risk_Open_Cases` (Del 2) — intake, completions and open cases per month back to 2015, live DAX
+- `At_Risk_Open_Cases` (Del 3) — P90 phase time per phase against its last 12 months, red dot when 25 % above; on the same timeline as net production, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
@@ -52,13 +52,11 @@ step removed from the raw quantity, and needs someone who can defend the method:
 |---|---|---|
 | `PELT_Changepoint.py` | `pelt_analyse`, `pelt_analyse_detaljer` | PELT changepoints + drill-down — segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
-| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Phase-level queue pressure + phase-time deviation vs. baseline, with a plain-language reason |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
 `START_YEAR = 2015` is a top-of-file constant, not a shared config — it's duplicated as a
-literal in three scripts: `PELT_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
-`Phase_Bottleneck_Detector.py`. If the earliest reliable
-year in your Lakehouse changes, update it in all three — there's no single place that fixes
+literal in two scripts: `PELT_Changepoint.py` and `Seasonal_YTD_ratio_extrapolation.py`.
+If the earliest reliable year in your Lakehouse changes, update it in both — there's no single place that fixes
 it for every script. (`Kostra.py` pulls whatever SSB has.)
 
 Three things that used to be here were retired:
@@ -82,20 +80,22 @@ Three things that used to be here were retired:
   October 2026) — its team-level flow (intake vs. completions, open queue) is now plain
   live DAX back to 2015 (`At_Risk_Open_Cases_POWERBI_DAX.md`, Del 2), read directly instead
   of a five-factor score.
-  Its fase table duplicated `Phase_Bottleneck_Detector`. See git history.
+  See git history.
+- `Phase_Bottleneck_Detector.py` (`fase_flaskehals_enhet`, retired October 2026) — a
+  five-rule point score per team × phase × indicator × month, on cells often too small
+  (10–30 cases) for a stable P90. Replaced by the report's existing net production and
+  open-cases measures (is the queue growing?) plus live-DAX P90 phase time per phase
+  against its last 12 months (`At_Risk_Open_Cases_POWERBI_DAX.md`, Del 3: where is work
+  getting slow?). See git history.
 
 All (except `Kostra.py`) run nightly after the main data pipeline.
 
-`PELT_Changepoint` and `Phase_Bottleneck_Detector` score
+`PELT_Changepoint` scores
 only **complete** periods: the current calendar month (and the current ISO week for
 PELT's weekly series) is excluded in SQL (`MONTH_CUTOFF_SQL`/`WEEK_CUTOFF_SQL`), so a
 half-filled month never reads as a drop, and the DAX "siste analysedato" measures land on
 the last complete period. `Seasonal_YTD_ratio_extrapolation` is the exception on purpose —
 it handles the part-month itself and anchors on the last complete month.
-
-Phase_Bottleneck_Detector (and the retired Throughput_Pressure_Monitor) were briefly native
-DAX; reverted — the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
-role DAX has no clean primitive for, exactly the "possible but not simple" case above.
 
 ## Closed-case trend, drift, and forecast
 
@@ -182,23 +182,6 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
   instead of an empty year. No forecast history is kept (a history table was considered
   and not added — extra standing infrastructure)
 
-## Flow and queue health
-
-### Phase_Bottleneck_Detector.py
-
-Phase-level (`fasetittel`) queue pressure and tidsbruk
-deviation, `alvorlighet` (`Lav`/`Moderat`/`Høy`/`Kritisk`) with an `arsak_kode`/`arsak_tekst`
-explaining the flag.
-
-- **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)
-- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`, `KO_VEKST_TERSKEL`
-- `inngang_antall` by start month, `utgang_antall` (and the phase-time percentiles) by end
-  month; `fase_ko_proxy` is the real count of open faser at month end (open at series
-  start + cumulative net flow). `KO_VEKST` fires when that queue is >10 % above its own
-  12-month median. After deploying, run the sanity query in
-  `Phase_Bottleneck_Detector_POWERBI_DAX.md` — flags should no longer pile up in the
-  latest two months
-
 ## Leading indicator
 
 ### At-risk open faser (live DAX)
@@ -214,6 +197,15 @@ so the same measures answer "all open" and "only those with us". Entirely live D
 only (the colour depends on today's date). Earlier versions of this page (a 75 % threshold
 on `tidsbruk`, and the retired `Inflight_SLA_Risk_Monitor`) were dropped in favour of the
 existing code.
+
+### Phase time: P90 per phase (live DAX)
+
+Del 3 of the same doc. Net production and open cases show *whether* the queue grows; P90
+phase time (`tidsbruk`, our time only) shows *where* work gets slow, since the slow tail is
+what causes deadline misses. Normal = P90 over the previous 12 months (P90 is not seasonal
+in this data; long phase times smear a summer dip over many months). Red dot when 25 %
+above normal; blank below 30 closed faser. Phases are combined across teams so there are
+enough cases per month.
 
 ### Flow over time (live DAX)
 

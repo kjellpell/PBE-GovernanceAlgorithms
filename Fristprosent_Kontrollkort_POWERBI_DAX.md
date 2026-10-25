@@ -228,7 +228,7 @@ RETURN IF(NOT ISBLANK(V) && V > [Frist øvre grense], V)
 - **Rødt i produksjon, ikke ennå i fristprosent:** tempoet har falt; fristene vil som regel
   følge etter. Sjekk de gule og røde åpne fasene.
 - **Rødt i fristprosent, produksjonen normal:** problemet er ikke tempoet, men hvilke saker
-  som blir liggende. Se på flaskehalser per fase.
+  som blir liggende. Se på P90 fasetid per fase (`At_Risk_Open_Cases_POWERBI_DAX.md`, Del 3).
 - **Røde punkter fra åttemånedersregelen:** nivået har sunket over tid. Det er en sak for
   styringsdialogen, ikke for én enkelt måned.
 - **Røde punkter svært ofte for én indikator** (mer enn ca. én gang i året i rolige
