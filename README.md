@@ -36,7 +36,6 @@ first. Split into two Power BI reports along that line, rather than one report m
 self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
-- Control charts for **production** and **frist%** — each month against a band of normal variation (production: same-month 3-year average ± 0.5 SD, as it is seasonal; frist%: previous 12 months ± 2 SD, as it isn't), red dots where there's reason to react (below the band, or eight months in a row below normal), blue dots for unusually good months; headline `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `At_Risk_Open_Cases` (Del 1) — open faser by the report's existing deadline colour code (red = past deadline, yellow = close to it, threshold per case type, green = the rest), with `Status` alongside: counts and shares, live DAX
 - `At_Risk_Open_Cases` (Del 2) — intake, completions and open cases per month back to 2015, live DAX
 - `At_Risk_Open_Cases` (Del 3) — P90 phase time per phase against its last 12 months, red dot when 25 % above; on the same timeline as net production, live DAX
@@ -72,10 +71,14 @@ Three things that used to be here were retired:
 - CUSUM drift detection (`cusum_analyse`, `Trendretning (CUSUM)`, retired October 2026) —
   on a lagging closed-case measure it was slow (~9 months to see a sustained 1σ shift in
   monthly data) and, with a recent same-month baseline, raised frequent false alarms; a
-  leader also couldn't see why the word on the card changed. Replaced by live DAX
-  (`Fristprosent_Kontrollkort_POWERBI_DAX.md`: control charts for production and frist%,
-  rolling 12 months, change vs. last year) and by the leading indicators. PELT, which shared the script, stays
+  leader also couldn't see why the word on the card changed. Replaced by the leading
+  indicators and the report's own monthly frist% tables. PELT, which shared the script, stays
   as `PELT_Changepoint.py`. See git history for `CUSUM_Changepoint.py`.
+- Control charts for production and frist% (`Fristprosent_Kontrollkort_POWERBI_DAX.md`,
+  removed October 2026) — leaders found them not actionable: a red dot saying a month was
+  unusual doesn't point to a decision. The actionable versions are the gap to the annual
+  production target (required per month vs. the last 3 months' average) and the year-end
+  projection, both as columns per indicator in the report's year table. See git history.
 - `Throughput_Pressure_Monitor.py` (`gjennomstroemming_press_enhet`/`_fase`, retired
   October 2026) — its team-level flow (intake vs. completions, open queue) is now plain
   live DAX back to 2015 (`At_Risk_Open_Cases_POWERBI_DAX.md`, Del 2), read directly instead
@@ -98,21 +101,6 @@ the last complete period. `Seasonal_YTD_ratio_extrapolation` is the exception on
 it handles the part-month itself and anchors on the last complete month.
 
 ## Closed-case trend, drift, and forecast
-
-### Control charts: production and frist% (live DAX)
-
-`Fristprosent_Kontrollkort_POWERBI_DAX.md`, in the **leader** report. Two charts on one
-principle: each month's value against a centre line and a band of normal variation. Only
-volume is seasonal, so production uses the same calendar month over the last three years ±
-0.5 SD (the SD includes the seasonal swings; 1 SD was too wide), while frist% uses the
-previous 12 months ± 2 SD (no seasonal swings, so the SD is plain month-to-month noise).
-The production chart reuses the band the report already has; the frist% chart builds one
-the same way. Red dots mark a month below the band or the eighth month in a row below the
-centre line, blue dots a month above the band. The dots are separate series that only have
-a value where they apply, so they work in any Power BI version. Production usually drops
-before frist% does, so side by side the charts show cause and effect. Headline card:
-`Fristprosent 12 mnd` with `Endring mot i fjor (pp)`. Both charts confirm a shift after the
-fact; the early warning is the red/yellow open faser (see Leading indicator).
 
 ### PELT_Changepoint.py
 
