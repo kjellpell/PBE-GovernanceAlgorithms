@@ -38,15 +38,14 @@ self-explanatory labels with numbers that need a briefing:
 **Leder-rapport** — reads cold, no explanation needed:
 - `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` and `Trendretning (12 mnd)` — a percentage, a change in points and one word (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
-- `Pause_Reconstruction` weekly trend — with us, at risk and waiting on the applicant per week, and implied processing time vs. the deadline (`Pause_Reconstruction_POWERBI_DAX.md`)
-- `At_Risk_Open_Cases` — faser **with us** (`Status = "Under behandling"`) whose deadline clock (`tidsbruk`) has used ≥ 75 % of `frist_dager` or is past it, the share waiting on the applicant, and implied processing time (queue with us ÷ recent completions) vs. the deadline: plain counts, shares and days, live DAX
+- `At_Risk_Open_Cases` (Del 1) — faser **with us** (`Status = "Under behandling"`) whose deadline clock (`tidsbruk`) has used ≥ 75 % of `frist_dager` or is past it, the share waiting on the applicant, and implied processing time (queue with us ÷ recent completions) vs. the deadline: plain counts, shares and days, live DAX
+- `At_Risk_Open_Cases` (Del 2) — intake, completions and open cases per month back to 2015, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
 - `Fristprosent` p-chart — monthly value against control limits that depend on that month's volume (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `PELT_Changepoint` (on demand) — when an unexplained shift in the average happened and which team/phase it came from; always shown with its run date
 - `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
-- `Pause_Reconstruction` checks — days to first request per team, and how well the rebuilt clock matches the system's `tidsbruk`
 
 ## Scripts — the addon signal DAX can't produce
 
@@ -55,13 +54,12 @@ step removed from the raw quantity, and needs someone who can defend the method:
 | `PELT_Changepoint.py` | `pelt_analyse`, `pelt_analyse_detaljer` — **on demand, not scheduled** | PELT changepoints + drill-down — segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Phase-level queue pressure + phase-time deviation vs. baseline, with a plain-language reason |
-| `Pause_Reconstruction.py` | `fase_klokke`, `flyt_ukentlig` | Deadline clock per fase and weekly history of with-us / waiting / at-risk, rebuilt from completion milestones — interval algorithm |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
 `START_YEAR = 2015` is a top-of-file constant, not a shared config — it's duplicated as a
-literal in four scripts: `PELT_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
-`Phase_Bottleneck_Detector.py`, `Pause_Reconstruction.py`. If the earliest reliable
-year in your Lakehouse changes, update it in all four — there's no single place that fixes
+literal in three scripts: `PELT_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
+`Phase_Bottleneck_Detector.py`. If the earliest reliable
+year in your Lakehouse changes, update it in all three — there's no single place that fixes
 it for every script. (`Kostra.py` pulls whatever SSB has.)
 
 Three things that used to be here were retired:
@@ -82,15 +80,15 @@ Three things that used to be here were retired:
   p-chart) and by the leading indicators. PELT, which shared the script, stays on demand
   as `PELT_Changepoint.py`. See git history for `CUSUM_Changepoint.py`.
 - `Throughput_Pressure_Monitor.py` (`gjennomstroemming_press_enhet`/`_fase`, retired
-  October 2026) — its team-level flow (intake vs. completions, open queue) is now in
-  `Pause_Reconstruction.py`'s `flyt_ukentlig`, weekly and back to 2015, together with the
-  with-us/waiting/at-risk split a leader can read directly instead of a five-factor score.
+  October 2026) — its team-level flow (intake vs. completions, open queue) is now plain
+  live DAX back to 2015 (`At_Risk_Open_Cases_POWERBI_DAX.md`, Del 2), read directly instead
+  of a five-factor score.
   Its fase table duplicated `Phase_Bottleneck_Detector`. See git history.
 
 All (except `Kostra.py` and `PELT_Changepoint.py`) run nightly after the main data
 pipeline. `PELT_Changepoint.py` is run by hand when needed (e.g. quarterly).
 
-`PELT_Changepoint`, `Phase_Bottleneck_Detector` and `Pause_Reconstruction` score
+`PELT_Changepoint` and `Phase_Bottleneck_Detector` score
 only **complete** periods: the current calendar month (and the current ISO week for
 PELT's weekly series) is excluded in SQL (`MONTH_CUTOFF_SQL`/`WEEK_CUTOFF_SQL`), so a
 half-filled month never reads as a drop, and the DAX "siste analysedato" measures land on
@@ -215,39 +213,16 @@ risk. `Implisitt behandlingstid` (Little's law: queue with us ÷ completions in 
 days × 28) compared with the typical deadline is the earliest quantitative warning.
 Entirely live DAX. Same scope as the official `Fristprosent` (`%avtalt%` included).
 
-### Pause_Reconstruction.py — weekly history of the same
+### Flow over time (live DAX)
 
-The live page knows only "now". `Pause_Reconstruction.py` rebuilds the history weekly:
-
-- **Open in total, intake and completions** (same definition as `[Produserte faser]`) come
-  straight from start and end dates, so they go back to `START_YEAR`. This is the team-level
-  flow the retired `Throughput_Pressure_Monitor` used to give.
-- **The split — with us / waiting / at risk / past deadline — needs the milestones**
-  "Behov for/Anmodning om tilleggsdokumentasjon" (pause) and "Mottatt
-  tilleggsdokumentasjon"/"Komplett søknad" (resume). They only go back ~13 months, so the
-  split starts at the earliest milestone date (`HISTORIKK_FRA`, found from the data). Older
-  weeks are NULL, not zero. A fase already on hold when the window opens shows up as a
-  receipt without a request; if it started before the window, that is read as a pause from
-  the window start.
-- **History accumulates without a snapshot table.** Each run rewrites everything, but keeps
-  the split for weeks before the current window from the previous run. If the source
-  window rolls forward, nothing that was once visible is lost.
-
-- **Table, column and milestone names are constants at the top of the script**
-  (`MILEPEL_TABELL`, `MILEPEL_*_KOLONNE`, `PAUSE_MILEPELER`, `GJENOPPTA_MILEPELER`). They follow the repo's earlier milestone scripts. Cell 1 stops with
-  a message naming what to change, and lists candidate names, if the table, a column or the
-  milestones aren't found
-- **Validation printed every run:** reconstructed clock vs. the system's `tidsbruk`, pause
-  days vs. `bransjetid` (closed faser that started inside the window), and reconstructed state vs. `Status` (open faser).
-  High agreement means the weekly history can be trusted. Low agreement for an indikator
-  means its history is approximate (e.g. other milestone names, waiting on external parties,
-  a different clock rule). The live at-risk page is unaffected either way
-- Waiting on **external parties** (hearings, other agencies) isn't in these milestones, so
-  in the history it counts as with us. `Status` gets it right for today
-- Pure functions (`pair_pauses`, `phase_segments`, `crossing_day`, `weekly_table`, …) are
-  tested in `tests/test_pause_reconstruction.py`. That includes a simulated case system
-  whose clock the reconstruction must reproduce exactly, and stock–flow reconciliation is
-  checked on synthetic data
+Del 2 of the same doc: `Mottatt (periode)`, `Ferdigstilt (periode)`, `Netto flyt` and
+`Åpne ved periodeslutt` per month back to 2015, from start and end dates alone (`TREATAS`
+onto the right date column, so no inactive relationships are needed). The danger-zone
+counts are today only: `Status` and `tidsbruk` are current values, and no table keeps
+yesterday's. A trend for those would need a small nightly snapshot. That was considered and
+not added; reconstructing it from the completion milestones was tried and dropped
+(October 2026), because the milestones only cover ~12 months and the system's own
+`tidsbruk` already gives the clock for today.
 
 ## External ingestion (not a governance algorithm)
 

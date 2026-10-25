@@ -19,10 +19,10 @@ svarer på:
 
 Dette er et **ledende** signal. Det er ren live DAX mot `Faser`, uten skript: verdien
 avhenger av `TODAY()`, men et øyeblikksbilde trenger ingen historikk (se regelen i
-`README.md`). Siden viser «nå». **Trenden** — hvordan antallet hos oss, i faresonen og på
-vent har utviklet seg uke for uke, bakover til 2015 — kommer fra `analyser.flyt_ukentlig`,
-som `Pause_Reconstruction.py` bygger opp fra milepælene (se
-`Pause_Reconstruction_POWERBI_DAX.md`). Ingen voksende snapshot-tabell.
+`README.md`). Faresonen vises bare for **i dag**: `Status` og `tidsbruk` er dagens verdier,
+og ingen tabell tar vare på gårsdagens. **Flyten over tid** — åpne totalt, mottatt og
+ferdigstilt per måned tilbake til 2015 — er også ren DAX, i Del 2 nederst. Den trenger
+bare start- og sluttdatoer.
 
 ## Antagelser (rename to match your model)
 - `Faser` — `saksbehandling.faser`, med `startmilepaeldato`, `sluttmilepaeldato`,
@@ -34,8 +34,7 @@ som `Pause_Reconstruction.py` bygger opp fra milepælene (se
   `Faser[bransjetid]`). Derfor brukes `tidsbruk`, ikke kalenderdager siden start — en fase
   som har ventet en måned på tegninger er ikke en måned nærmere fristen. (Tidligere
   versjoner av denne siden, og det pensjonerte `Inflight_SLA_Risk_Monitor`, regnet
-  kalenderalder og overvarslet derfor.) `Pause_Reconstruction.py` kontrollerer hver natt at
-  `tidsbruk` stemmer med pausene i milepælene — se utskriften der
+  kalenderalder og overvarslet derfor.)
 - `frist_dager` og `tidsbruk` er **kalenderdager** (bekreftet)
 - Samme omfang som den offisielle `Fristprosent`: fagområde `Byggesak`/`Eiendomssak`/
   `Plansak` (filtrert i modellen), og `%avtalt%`-indikatorer er **med** — en avtalt frist
@@ -175,6 +174,84 @@ SWITCH(
 ```
 
 Tersklene 15 %/30 % er et utgangspunkt — juster dem når dere har sett nivået noen uker.
+
+## Del 2 — Flyt over tid (tilbake til 2015)
+
+Erstatter teamflyten i det pensjonerte `Throughput_Pressure_Monitor`. Tre tall per periode
+på `Kalender[Dato]`-aksen (måned eller uke), per enhet og indikator via vanlige slicere:
+hvor mange som kom inn, hvor mange som ble ferdige, og hvor mange som var åpne da perioden
+sluttet.
+
+Målene bruker `TREATAS` mot riktig datokolonne og fjerner filteret fra `Kalender` først.
+Da virker de uavhengig av hvilken datokolonne `Kalender` er relatert til i modellen, og det
+trengs ingen inaktive relasjoner. Forutsetning: datokolonnene i `Faser` er rene datoer
+(ikke dato+klokkeslett); er de det, lag en beregnet datokolonne og bruk den.
+
+```DAX
+Mottatt (periode) =
+CALCULATE(
+    COUNTROWS(Faser),
+    REMOVEFILTERS('Kalender'),
+    TREATAS(VALUES('Kalender'[Dato]), Faser[startmilepaeldato])
+)
+```
+
+```DAX
+Ferdigstilt (periode) =
+CALCULATE(
+    COUNTROWS(Faser),
+    REMOVEFILTERS('Kalender'),
+    NOT ISBLANK(Faser[startmilepaeldato]),
+    TREATAS(VALUES('Kalender'[Dato]), Faser[sluttmilepaeldato])
+)
+```
+
+(Samme populasjon som rapportens `[Produserte faser]`: start og slutt er satt.)
+
+```DAX
+Netto flyt (periode) =
+[Mottatt (periode)] - [Ferdigstilt (periode)]
+```
+
+```DAX
+Åpne ved periodeslutt =
+VAR Slutt = MIN(MAX('Kalender'[Dato]), TODAY())
+RETURN
+    CALCULATE(
+        COUNTROWS(Faser),
+        REMOVEFILTERS('Kalender'),
+        Faser[startmilepaeldato] <= Slutt,
+        OR(ISBLANK(Faser[sluttmilepaeldato]), Faser[sluttmilepaeldato] > Slutt)
+    )
+```
+
+`Åpne ved periodeslutt` er en **beholdning** — antall på en dato — og er riktig på alle
+nivåer: en måned på aksen viser antallet ved månedens slutt, et år ved årets slutt.
+
+```DAX
+Gjennomløpstid, implisitt (dager) =
+VAR Slutt = MIN(MAX('Kalender'[Dato]), TODAY())
+VAR Ferdig90 =
+    CALCULATE(
+        COUNTROWS(Faser),
+        REMOVEFILTERS('Kalender'),
+        NOT ISBLANK(Faser[startmilepaeldato]),
+        Faser[sluttmilepaeldato] > Slutt - 90,
+        Faser[sluttmilepaeldato] <= Slutt
+    )
+RETURN DIVIDE([Åpne ved periodeslutt], Ferdig90) * 90
+```
+
+Dette er Littles lov på **alle** åpne faser, også dem som venter på søker, så den måler
+søkerens ventetid og vår tid sammen. Den er ikke det samme tallet som
+`Implisitt behandlingstid (dager)` over, som bare teller køen hos oss. Bruk den til å se
+langsiktige endringer i nivå, ikke som fristvarsel.
+
+### Visualforslag (flyt)
+- **Stolper:** `[Mottatt (periode)]` og `[Ferdigstilt (periode)]` per måned, siste 3–5 år
+- **Linje:** `[Åpne ved periodeslutt]` per måned siden 2015
+- **Små multipler** per `enhet`: `[Netto flyt (periode)]` — flere måneder på rad over null
+  betyr at køen vokser
 
 ## Visualforslag
 - **KPI-kort:** `[Hos oss i faresonen, ikke over frist]` og `[Hos oss over frist]`,
