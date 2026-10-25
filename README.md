@@ -36,7 +36,7 @@ first. Split into two Power BI reports along that line, rather than one report m
 self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
-- Control charts for **production** and **frist%** — each month against a band of normal variation (same-month average of the last 3 years ± 0.5 SD), red dots where there's reason to react (below the band, or eight months in a row below normal), blue dots for unusually good months; headline `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
+- Control charts for **production** and **frist%** — each month against a band of normal variation (production: same-month 3-year average ± 0.5 SD, as it is seasonal; frist%: previous 12 months ± 2 SD, as it isn't), red dots where there's reason to react (below the band, or eight months in a row below normal), blue dots for unusually good months; headline `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `At_Risk_Open_Cases` (Del 1) — open faser by the report's existing deadline colour code (red = past deadline, yellow = close to it, threshold per case type, green = the rest), with `Status` alongside: counts and shares, live DAX
 - `At_Risk_Open_Cases` (Del 2) — intake, completions and open cases per month back to 2015, live DAX
 - `At_Risk_Open_Cases` (Del 3) — P90 phase time per phase against its last 12 months, red dot when 25 % above; on the same timeline as net production, live DAX
@@ -102,9 +102,10 @@ it handles the part-month itself and anchors on the last complete month.
 ### Control charts: production and frist% (live DAX)
 
 `Fristprosent_Kontrollkort_POWERBI_DAX.md`, in the **leader** report. Two charts on one
-principle: each month's value against a centre line (same calendar month, last three years,
-because both measures are seasonal) and a band of ± 0.5 standard deviations of the monthly
-values (calibrated on this data; 1 SD was too wide because the SD includes seasonal swings).
+principle: each month's value against a centre line and a band of normal variation. Only
+volume is seasonal, so production uses the same calendar month over the last three years ±
+0.5 SD (the SD includes the seasonal swings; 1 SD was too wide), while frist% uses the
+previous 12 months ± 2 SD (no seasonal swings, so the SD is plain month-to-month noise).
 The production chart reuses the band the report already has; the frist% chart builds one
 the same way. Red dots mark a month below the band or the eighth month in a row below the
 centre line, blue dots a month above the band. The dots are separate series that only have

@@ -68,11 +68,19 @@ Vis som **KPI-kort**: `[Fristprosent 12 mnd]` med `[Endring mot i fjor (pp)]` so
 
 ## Prinsippet for kontrollkortene
 
-Hver måned er et punkt. **Midtlinjen** er normalen: snittet for **samme kalendermåned** de
-tre siste årene, siden begge tallene svinger med sesongen (juli måles mot tidligere
-juli-måneder). **Båndet** er ± 0,5 standardavvik av månedsverdiene de tre årene. Bredden er
-kalibrert på deres data: standardavviket fanger også sesongsvingningene, så 1 standardavvik
-ga et for bredt bånd.
+Hver måned er et punkt mot en **midtlinje** (normalen) og et **bånd** (normal variasjon).
+Hvordan normalen regnes, avhenger av om tallet svinger med sesongen:
+
+| | Sesong? | Midtlinje | Bånd |
+|---|---|---|---|
+| **Produksjon** (volum) | Ja | Samme kalendermåned, snitt av de tre siste årene | ± 0,5 SD |
+| **Fristprosent** | Nei | De siste 12 månedene | ± 2 SD |
+
+Produksjonsbåndet er det dere allerede har. Standardavviket der fanger også
+sesongsvingningene, så 1 SD ga et for bredt bånd og 0,5 SD er kalibrert på deres data.
+Fristprosent har ingen sesong: standardavviket er bare vanlig variasjon fra måned til
+måned. Der ville ± 0,5 SD lagt over halvparten av helt normale måneder utenfor båndet; ± 2 SD
+gir omtrent én av tjue.
 
 Punktene farges etter to regler:
 - **Rødt:** måneden er under båndet, **eller** den er den åttende måneden på rad under
@@ -128,11 +136,12 @@ RETURN IF(NOT ISBLANK(V) && V > [Produksjon øvre grense], V)
 
 Er det eksisterende produksjonsbåndet bygget på snittet av **alle** måneder i stedet for
 samme kalendermåned, vil de svake sesongmånedene jevnlig bli røde. Da bør midtlinjen byttes
-til samme-måned-snittet, slik som `Frist snitt 3 år` i Del 3.
+til snittet for samme kalendermåned de tre siste årene.
 
 ## Del 3 — Kontrollkort for fristprosent
 
-Samme prinsipp. Båndet bygges her på samme måte som produksjonsbåndet:
+Samme prinsipp, men uten sesong: normalen er de **12 foregående månedene**, og båndet er
+± 2 standardavvik av månedsverdiene i de samme 12 månedene.
 
 ```DAX
 Frist verdi =
@@ -140,28 +149,27 @@ IF(MAX(Kalender[Dato]) <= EOMONTH(TODAY(), -1), [Faser innen frist %])
 ```
 
 ```DAX
-Frist snitt 3 år =
-VAR D = MAX(Kalender[Dato])
+Frist normal =
+VAR Slutt = EOMONTH(MAX(Kalender[Dato]), -1)       -- slutten av forrige måned
+VAR Start = EOMONTH(Slutt, -12) + 1                -- 12 måneder før det
 RETURN
     CALCULATE(
         [Faser innen frist %],
-        FILTER(ALL(Kalender),
-            MONTH(Kalender[Dato]) = MONTH(D)
-                && YEAR(Kalender[Dato]) >= YEAR(D) - 3
-                && YEAR(Kalender[Dato]) <= YEAR(D) - 1)
+        REMOVEFILTERS(Kalender),
+        FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Start && Kalender[Dato] <= Slutt)
     )
 ```
 
-(Summerte tellinger for samme måned de tre årene, ikke snitt av tre andeler.)
+(Summerte tellinger for de 12 månedene, ikke snitt av tolv andeler.)
 
 ```DAX
-Frist SD 3 år =
-VAR Y = YEAR(MAX(Kalender[Dato]))
+Frist SD 12 mnd =
+VAR Slutt = EOMONTH(MAX(Kalender[Dato]), -1)
 VAR Maaneder =
     ADDCOLUMNS(
-        GENERATESERIES(1, 36, 1),
+        GENERATESERIES(0, 11, 1),
         "@V",
-            VAR Til = EOMONTH(DATE(Y - 3, 1, 1), [Value] - 1)
+            VAR Til = EOMONTH(Slutt, -[Value])
             VAR Fra = EOMONTH(Til, -1) + 1
             RETURN CALCULATE([Faser innen frist %], REMOVEFILTERS(Kalender),
                 FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til))
@@ -170,9 +178,12 @@ RETURN STDEVX.S(Maaneder, [@V])
 ```
 
 ```DAX
-Frist nedre grense = [Frist snitt 3 år] - 0.5 * [Frist SD 3 år]
-Frist øvre grense  = [Frist snitt 3 år] + 0.5 * [Frist SD 3 år]
+Frist nedre grense = [Frist normal] - 2 * [Frist SD 12 mnd]
+Frist øvre grense  = [Frist normal] + 2 * [Frist SD 12 mnd]
 ```
+
+Normalen og båndet regnes fra månedene **før** den viste måneden, så en dårlig måned trekker
+ikke sin egen normal ned.
 
 ```DAX
 Frist 8 under på rad =
@@ -188,7 +199,7 @@ VAR Maaneder =
         "@Senter",
             VAR Til = EOMONTH(Slutt, -[Value])
             VAR Fra = EOMONTH(Til, -1) + 1
-            RETURN CALCULATE([Frist snitt 3 år], REMOVEFILTERS(Kalender),
+            RETURN CALCULATE([Frist normal], REMOVEFILTERS(Kalender),
                 FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til))
     )
 RETURN
@@ -218,9 +229,8 @@ RETURN IF(NOT ISBLANK(V) && V > [Frist øvre grense], V)
    linjebredden til 0 under *Format → Linjer*, slå på markører, og farg dem rødt
    (`#B00020`) og blått (`#1565C0`), litt større enn de vanlige punktene.
 4. **Lesehjelp** som tekst under kortene:
-   > *Båndet viser normal variasjon de tre siste årene for samme måned. Reager på røde
-   > punkter: en måned under båndet, eller åtte måneder på rad under midtlinjen. Blå punkter
-   > er uvanlig gode måneder.*
+   > *Båndet viser normal variasjon. Reager på røde punkter: en måned under båndet, eller
+   > åtte måneder på rad under midtlinjen. Blå punkter er uvanlig gode måneder.*
 
 ## Tolkning
 - **Punkter uten farge, også når de er lavere enn forrige måned:** vanlig variasjon. Ikke
