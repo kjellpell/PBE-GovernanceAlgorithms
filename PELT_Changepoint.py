@@ -1,32 +1,37 @@
 # =============================================================================
-# CUSUM drift detection and changepoint detection per indicator.
-# Runs nightly after main data pipeline.
+# PELT changepoint detection per indicator.
+# Runs nightly after the main data pipeline, so the report is always current
+# and can be looked at whenever someone asks "did something change?".
 #
-# CUSUM:
-#   Detects small persistent shifts in frist%, behandlingstid,
-#   and produksjonsdifferanse. More sensitive than threshold alerts
-#   for gradual deterioration. Runs on both monthly and weekly series.
+# It looks BACKWARDS: it finds structural shifts in the
+# average of Fristprosent, Behandlingstid and Produksjonsdifferanse that
+# nobody logged — a registration-practice change, a system migration, a rule
+# change. It is not an early warning (it needs ~6 periods after a break to see
+# it), and it is not the tool for evaluating a KNOWN organisational change —
+# for that, use an interrupted time series at the known date.
 #
 # Changepoint (PELT):
-#   Identifies the exact period where a structural shift occurred.
-#   Output marks the changepoint on the time series chart and shows
-#   before/after means. Runs on monthly series only for stability,
-#   weekly for early detection.
+#   Identifies the period where a structural shift occurred and the
+#   before/after means. Monthly and weekly series.
 #
 # Drill-down:
 #   For the most recent changepoint per indikator/maaltall/granularitet,
-#   breaks the shift down by enhet (team) and fasetittel (process step) so
-#   a signal can be pinpointed to a team or a step, not just a product group.
+#   breaks the shift down by enhet (team) and fasetittel (process step).
 #   Saksbehandler is deliberately excluded — too thin per-segment volume,
 #   and individual-level automated flagging is out of scope for this layer.
 #
-# Output tables (addon signal only — no raw value; that's a live DAX
-# measure against saksbehandling.faser, see CUSUM_Changepoint_POWERBI_DAX.md):
-#   cusum_analyse     — løpende CUSUM-verdier og signalflagg
-#   pelt_analyse      — oppdagede endringspunkter med gjennomsnitt før/etter
+# Output tables (overwritten nightly):
+#   pelt_analyse          — oppdagede endringspunkter med gjennomsnitt før/etter
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
 #
-# Schedule: nightly, after main data pipeline.
+# CUSUM drift detection used to live in this script (CUSUM_Changepoint.py,
+# table cusum_analyse). Retired October 2026: on a lagging, closed-case
+# measure it was slow (~9 months to see a 1-sigma monthly shift) and, with a
+# recent same-month baseline, raised frequent false alarms. Replaced by live
+# DAX (rolling 12-month Fristprosent and a p-chart, see
+# Fristprosent_Kontrollkort_POWERBI_DAX.md) and by the leading indicators in
+# At_Risk_Open_Cases_POWERBI_DAX.md. See git history if it is ever needed.
+#
 # Requires: nothing to install. PELT runs on a built-in pure-NumPy
 # implementation with an L2 (mean-shift) cost — see _pelt_l2() below. No
 # external library, so no `%pip install` cell: on tenants with inline
@@ -42,50 +47,34 @@ from pyspark.sql.types import (
 )
 import pandas as pd
 import numpy as np
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 spark = SparkSession.builder.getOrCreate()
 BATCH_ID      = datetime.now().strftime("%Y%m%dT%H%M%S")
 MIN_MONTHLY   = 24
 MIN_WEEKLY    = 52
-CUSUM_K       = 0.5   # allowance parameter — half sigma is standard
-CUSUM_H       = 5.0   # decision threshold — 5 sigma cumulative
 START_YEAR    = 2015  # exclude data before this year — adjust if older data is reliable
 
-# Anchored baseline window — mu/sigma used to standardise each series are
-# computed from only the FIRST this-many observations, not the whole series.
-# Using the whole series lets a slow persistent drift get partially absorbed
-# into "normal", which dampens CUSUM's sensitivity to exactly the kind of
-# shift it exists to catch.
-CUSUM_BASELINE_MONTHLY      = 12
-CUSUM_BASELINE_WEEKLY       = 26
-CUSUM_MIN_POST_BASELINE_OBS = 4   # need at least this many points after the baseline to test anything
+# Only complete periods are scored: the current calendar month (and, for the
+# weekly series, the current ISO week) is still filling up, so its counts and
+# rates would look like a drop every run. DAX "siste analysedato" measures pick
+# up the last complete period automatically as a result.
+MONTH_CUTOFF_SQL = "CAST(DATE_TRUNC('MONTH', CURRENT_DATE()) AS DATE)"
+WEEK_CUTOFF_SQL  = "CAST(DATE_TRUNC('WEEK', CURRENT_DATE()) AS DATE)"   # Monday of this ISO week
 
 DRILLDOWN_DIMENSIONS     = ["enhet", "fasetittel"]  # confirmed against the Lakehouse schema
 MIN_SEGMENT_OBS          = 10   # segments below this are marked utilstrekkelig_volum, not tested
-RECENT_CHANGEPOINT_DAYS  = 90   # only drill into changepoints still recent enough to be actionable
+# Only drill into changepoints still recent enough to be actionable. Per
+# granularity: PELT needs min_size=6 periods after a breakpoint, so the most
+# recent possible monthly changepoint is already ~6 months old — a 90-day
+# window could never admit one.
+RECENT_CHANGEPOINT_DAYS  = {"Månedlig": 240, "Ukentlig": 90}
+PELT_MIN_SIZE            = 6
 
 
 # =============================================================================
 # CELL 1 — Create output tables
 # =============================================================================
-
-spark.sql("""
-CREATE TABLE IF NOT EXISTS analyser.cusum_analyse (
-    indikator        STRING      NOT NULL,
-    maaltall         STRING      NOT NULL,
-    granularitet     STRING      NOT NULL,
-    analyse_dato     DATE        NOT NULL,
-    cusum_positiv    DOUBLE,
-    cusum_negativ    DOUBLE,
-    signal           BOOLEAN     NOT NULL,
-    signalretning    STRING,
-    kjoert_tidspunkt TIMESTAMP   NOT NULL,
-    kjoere_id        STRING      NOT NULL
-)
-USING DELTA
-COMMENT 'CUSUM-driftdeteksjon per indikator og måltall. signal=true angir statistisk signifikant vedvarende drift. signalretning er Stigende/Synkende/Stabil, slik at et bord-nivå mål kan lese denne kolonnen direkte uten oversettelse. Rå verdi (Fristprosent/Behandlingstid/Produksjonsdifferanse) er IKKE lagret her — den er en live DAX-mål mot saksbehandling.faser, join på indikator+maaltall+granularitet+analyse_dato (se CUSUM_Changepoint_POWERBI_DAX.md).'
-""")
 
 spark.sql("""
 CREATE TABLE IF NOT EXISTS analyser.pelt_analyse (
@@ -120,6 +109,8 @@ CREATE TABLE IF NOT EXISTS analyser.pelt_analyse_detaljer (
     gjennomsnitt_etter          DOUBLE,
     endringsstoerrelse          DOUBLE,
     bidrag_til_endring          DOUBLE,
+    bidrag_rate                 DOUBLE,
+    bidrag_miks                 DOUBLE,
     antall_observasjoner_foer   INT,
     antall_observasjoner_etter  INT,
     tilstrekkelig_volum         BOOLEAN     NOT NULL,
@@ -127,34 +118,58 @@ CREATE TABLE IF NOT EXISTS analyser.pelt_analyse_detaljer (
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Nedbryting av siste pelt_analyse-endringspunkt per indikator/maaltall, fordelt på enhet og fasetittel. endringspunkt_id er samme verdi som i pelt_analyse for raden dette bryter ned — bruk den som relasjonsnøkkel i den semantiske modellen (én-til-mange fra pelt_analyse). bidrag_til_endring er segmentets andel av det totale skiftet (summerer omtrent til pelt_analyse.endringsstoerrelse). tilstrekkelig_volum=false betyr for få observasjoner til å stole på tallene.'
+COMMENT 'Nedbryting av siste pelt_analyse-endringspunkt per indikator/maaltall, fordelt på enhet og fasetittel. endringspunkt_id er samme verdi som i pelt_analyse for raden dette bryter ned — bruk den som relasjonsnøkkel i den semantiske modellen (én-til-mange fra pelt_analyse). Før/etter-vinduet er det samme som PELT brukte (forrige til neste endringspunkt), delt ved første dag i endringsperioden. bidrag_til_endring er segmentets andel av det totale skiftet = bidrag_rate (segmentet ble bedre/verre: vekt etter × endring) + bidrag_miks (segmentet ble større/mindre: vektendring × verdi før). For Produksjonsdifferanse er verdiene per periode og bidrag_miks er 0. tilstrekkelig_volum=false betyr for få observasjoner til å stole på tallene.'
 """)
 
 print("Output tables ready")
+
+# =============================================================================
+# CELL 1B — ISO week key
+# =============================================================================
+
+def iso_week_sql(date_col):
+    """Spark SQL for a YYYYWW weekly key that uses the ISO year, not the
+    calendar year. WEEKOFYEAR is the ISO week, so it must be paired with the
+    ISO year — the year of that week's Thursday (Spark WEEKDAY: 0 = Monday).
+    YEAR(d) * 100 + WEEKOFYEAR(d) put 2024-12-30 (ISO 2025-W01) in 202401 and
+    2021-01-01 (ISO 2020-W53) in 202153, which does not exist and crashed
+    _periode_to_date."""
+    return (
+        f"(YEAR(DATE_ADD({date_col}, 3 - WEEKDAY({date_col}))) * 100"
+        f" + WEEKOFYEAR({date_col}))"
+    )
+
+
+def iso_week_key(d):
+    """Python mirror of iso_week_sql, for tests: ISO year * 100 + ISO week."""
+    thursday = d + timedelta(days=3 - d.weekday())
+    return thursday.year * 100 + d.isocalendar()[1]
+
 
 
 # =============================================================================
 # CELL 2 — Load data
 # =============================================================================
 
-# Monthly frist% per indicator
+# Monthly frist% per indicator — the official definition, identical to
+# Seasonal_YTD_ratio_extrapolation.py and the report's [Produserte faser]:
+# denominator = produced faser (both start and slutt set), numerator = those
+# with innenfor_frist = 1, %avtalt% indicators INCLUDED. (Until October 2026
+# this used frist_dager IS NOT NULL as the denominator and excluded %avtalt%,
+# so this script and the forecast measured two different Fristprosent.)
 monthly_frist = spark.sql(f"""
     SELECT
         pr.indikator,
         (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
-        CASE
-            WHEN COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END) = 0 THEN NULL
-            ELSE COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0
-                 / COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END)
-        END AS verdi
+        COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0 / COUNT(*) AS verdi
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikator
         ON indikator.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
-            AND pr.frist_dager IS NOT NULL
-            AND pr.indikator NOT LIKE '%avtalt%'
+            AND pr.startmilepaeldato IS NOT NULL
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
         ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
@@ -173,78 +188,119 @@ monthly_tid = spark.sql(f"""
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
         GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
         ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
 """).toPandas()
 
-# Monthly production balance per indicator
-monthly_prod = spark.sql(f"""
+# Monthly production balance per indicator: faser started in the month (by
+# startmilepaeldato) minus faser ended in the month (by sluttmilepaeldato).
+# Two separate counts, merged in pandas — an earlier single query grouped
+# both by COALESCE(slutt, start), so every closed fase netted to zero in its
+# end month and the "balance" was really just still-open faser by start month.
+monthly_started = spark.sql(f"""
         SELECT
                 pr.indikator,
-                (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100 +
-                 MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
-                COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
-                - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
+                (YEAR(pr.startmilepaeldato) * 100 + MONTH(pr.startmilepaeldato)) AS period,
+                COUNT(1) AS antall_startet
         FROM saksbehandling.faser pr
         INNER JOIN felles.indikator indikator
             ON indikator.pk_indikator = pr.indikator
-        WHERE pr.indikator NOT LIKE '%avtalt%'
+        WHERE pr.startmilepaeldato IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-            AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
-        GROUP BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-                         MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
-        ORDER BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-                         MONTH(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
+            AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+            AND pr.startmilepaeldato < {MONTH_CUTOFF_SQL}
+        GROUP BY pr.indikator, YEAR(pr.startmilepaeldato), MONTH(pr.startmilepaeldato)
 """).toPandas()
 
-# Weekly frist% per indicator
+monthly_ended = spark.sql(f"""
+        SELECT
+                pr.indikator,
+                (YEAR(pr.sluttmilepaeldato) * 100 + MONTH(pr.sluttmilepaeldato)) AS period,
+                COUNT(1) AS antall_avsluttet
+        FROM saksbehandling.faser pr
+        INNER JOIN felles.indikator indikator
+            ON indikator.pk_indikator = pr.indikator
+        WHERE pr.sluttmilepaeldato IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {MONTH_CUTOFF_SQL}
+        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), MONTH(pr.sluttmilepaeldato)
+""").toPandas()
+
+# Weekly frist% per indicator — same official definition as monthly_frist
 weekly_frist = spark.sql(f"""
     SELECT
         pr.indikator,
-        (YEAR(pr.sluttmilepaeldato) * 100
-         + WEEKOFYEAR(pr.sluttmilepaeldato))       AS period,
-        CASE
-            WHEN COUNT(CASE WHEN pr.frist_dager IS NOT NULL
-                            THEN 1 END) = 0 THEN NULL
-            ELSE COUNT(CASE WHEN pr.innenfor_frist = 1
-                            THEN 1 END) * 1.0
-                 / COUNT(CASE WHEN pr.frist_dager IS NOT NULL
-                              THEN 1 END)
-        END                                                         AS verdi
+        {iso_week_sql('pr.sluttmilepaeldato')} AS period,
+        COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0 / COUNT(*) AS verdi
     FROM saksbehandling.faser pr
     INNER JOIN felles.indikator indikator
         ON indikator.pk_indikator = pr.indikator
         WHERE pr.sluttmilepaeldato IS NOT NULL
-            AND pr.frist_dager IS NOT NULL
+            AND pr.startmilepaeldato IS NOT NULL
+            AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+            AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
+            AND pr.sluttmilepaeldato < {WEEK_CUTOFF_SQL}
+        GROUP BY pr.indikator, {iso_week_sql('pr.sluttmilepaeldato')}
+        ORDER BY pr.indikator, period
+""").toPandas()
+
+# Weekly production balance — same split as monthly_prod
+weekly_started = spark.sql(f"""
+        SELECT
+                pr.indikator,
+                {iso_week_sql('pr.startmilepaeldato')} AS period,
+                COUNT(1) AS antall_startet
+        FROM saksbehandling.faser pr
+        INNER JOIN felles.indikator indikator
+            ON indikator.pk_indikator = pr.indikator
+        WHERE pr.startmilepaeldato IS NOT NULL
+            AND pr.indikator NOT LIKE '%avtalt%'
+            AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+            AND YEAR(pr.startmilepaeldato) >= {START_YEAR}
+            AND pr.startmilepaeldato < {WEEK_CUTOFF_SQL}
+        GROUP BY pr.indikator, {iso_week_sql('pr.startmilepaeldato')}
+""").toPandas()
+
+weekly_ended = spark.sql(f"""
+        SELECT
+                pr.indikator,
+                {iso_week_sql('pr.sluttmilepaeldato')} AS period,
+                COUNT(1) AS antall_avsluttet
+        FROM saksbehandling.faser pr
+        INNER JOIN felles.indikator indikator
+            ON indikator.pk_indikator = pr.indikator
+        WHERE pr.sluttmilepaeldato IS NOT NULL
             AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
             AND YEAR(pr.sluttmilepaeldato) >= {START_YEAR}
-        GROUP BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
-        ORDER BY pr.indikator, YEAR(pr.sluttmilepaeldato), WEEKOFYEAR(pr.sluttmilepaeldato)
+            AND pr.sluttmilepaeldato < {WEEK_CUTOFF_SQL}
+        GROUP BY pr.indikator, {iso_week_sql('pr.sluttmilepaeldato')}
 """).toPandas()
 
-# Weekly production balance
-weekly_prod = spark.sql(f"""
-        SELECT
-                pr.indikator,
-                (YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) * 100 +
-                         WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))) AS period,
-                        COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
-                        - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END) AS verdi
-                FROM saksbehandling.faser pr
-                INNER JOIN felles.indikator indikator
-                    ON indikator.pk_indikator = pr.indikator
-                WHERE pr.indikator NOT LIKE '%avtalt%'
-                    AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-                    AND YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)) >= {START_YEAR}
-                GROUP BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-                                 WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
-                ORDER BY pr.indikator, YEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)),
-                                 WEEKOFYEAR(COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato))
-""").toPandas()
+
+def production_balance(started, ended):
+    """Produksjonsdifferanse per indikator x period: faser started in the
+    period minus faser ended in the period. started/ended are counted by their
+    own date (start vs. slutt), outer-merged so a period with only starts or
+    only ends still gets a row, with the missing side as 0."""
+    merged = started.merge(ended, on=["indikator", "period"], how="outer")
+    for col in ("antall_startet", "antall_avsluttet"):
+        if col not in merged:
+            merged[col] = 0
+        merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
+    merged["verdi"] = merged["antall_startet"] - merged["antall_avsluttet"]
+    return merged[["indikator", "period", "verdi"]].sort_values(["indikator", "period"]).reset_index(drop=True)
+
+
+monthly_prod = production_balance(monthly_started, monthly_ended)
+weekly_prod  = production_balance(weekly_started, weekly_ended)
 
 # Spark DECIMAL columns (e.g. AVG(tidsbruk)) arrive as decimal.Decimal objects,
-# which cannot be mixed with floats in the CUSUM arithmetic.
+# which cannot be mixed with floats in the PELT arithmetic.
 for _df in (monthly_frist, monthly_tid, monthly_prod, weekly_frist, weekly_prod):
     _df["verdi"]  = pd.to_numeric(_df["verdi"], errors="coerce").astype("float64")
     _df["period"] = pd.to_numeric(_df["period"], errors="coerce").astype("int64")
@@ -261,8 +317,24 @@ def _periode_to_date(period_int, granularitet):
     if granularitet == "Månedlig":
         return (pd.Timestamp(year, unit, 1) + pd.offsets.MonthEnd(0)).date()
     else:
-        # ISO week — return the Sunday (last day) of that week
-        return pd.Timestamp.fromisocalendar(year, unit, 7).date()
+        # ISO year + ISO week (see iso_week_sql) — return the Sunday (last
+        # day) of that week
+        try:
+            return pd.Timestamp.fromisocalendar(year, unit, 7).date()
+        except ValueError as exc:
+            raise ValueError(
+                f"Ugyldig ISO-uke {period_int}: {year} har ikke uke {unit}. "
+                "Ukenøkkelen må bygges med ISO-år (iso_week_sql), ikke kalenderår."
+            ) from exc
+
+
+def _periode_to_start_date(period_int, granularitet):
+    """First day of a YYYYMM month or the Monday of an ISO YYYYWW week."""
+    year = int(period_int) // 100
+    unit = int(period_int) % 100
+    if granularitet == "Månedlig":
+        return date(year, unit, 1)
+    return pd.Timestamp.fromisocalendar(year, unit, 1).date()
 
 
 def make_endringspunkt_id(indikator, maaltall, granularitet, analyse_dato):
@@ -277,74 +349,6 @@ def to_float_series(series):
     """Spark DECIMAL columns arrive as decimal.Decimal, which cannot be mixed
     with floats in the arithmetic below."""
     return pd.to_numeric(series, errors="coerce").astype("float64")
-
-
-def run_cusum(series, k=CUSUM_K, h=CUSUM_H, baseline_obs=CUSUM_BASELINE_MONTHLY):
-    """
-    Two-sided CUSUM on a standardised series.
-    k = allowance (typically 0.5 * expected shift in sigma units)
-    h = decision threshold (typically 4-5)
-    baseline_obs = number of leading observations used to compute mu/sigma —
-        an anchored reference period, not the whole series. Otherwise a slow
-        persistent drift gets partially absorbed into "normal", dampening
-        the very sensitivity CUSUM is meant to provide. The full series
-        (including the baseline window itself) is standardised against this
-        fixed mu/sigma before running the CUSUM recursion.
-
-    The accumulator that crosses h is reset to 0 the same period it fires
-    (standard CUSUM/SPC practice) — otherwise it saturates permanently
-    after the first sustained shift and can never register a later
-    recovery or a second, separate shift; a board-level "how are we doing
-    now" signal must be able to move in both directions in this way.
-
-    Returns DataFrame with cusum_pos, cusum_neg, signal, signal_direction.
-    signal_direction is always one of Stigende/Synkende/Stabil, so a board-level
-    DAX measure can read this column directly instead of translating it (see
-    CUSUM_Changepoint_POWERBI_DAX.md).
-    """
-    if len(series) < 8:
-        return None
-
-    series = to_float_series(series)
-    values = series.dropna().values
-    if len(values) < 8:
-        return None
-
-    if len(values) < baseline_obs + CUSUM_MIN_POST_BASELINE_OBS:
-        return None
-
-    baseline = values[:baseline_obs]
-    mu    = np.mean(baseline)
-    sigma = np.std(baseline)
-    if sigma == 0:
-        return None
-
-    standardised = (values - mu) / sigma
-
-    cusum_pos = np.zeros(len(standardised))
-    cusum_neg = np.zeros(len(standardised))
-    signal    = np.zeros(len(standardised), dtype=bool)
-    retning   = np.full(len(standardised), "Stabil", dtype=object)
-
-    for i in range(1, len(standardised)):
-        cusum_pos[i] = max(0, cusum_pos[i-1] + standardised[i] - k)
-        cusum_neg[i] = max(0, cusum_neg[i-1] - standardised[i] - k)
-
-        if cusum_pos[i] > h:
-            signal[i]    = True
-            retning[i]   = "Stigende"
-            cusum_pos[i] = 0.0
-        elif cusum_neg[i] > h:
-            signal[i]    = True
-            retning[i]   = "Synkende"
-            cusum_neg[i] = 0.0
-
-    return pd.DataFrame({
-        "cusum_pos":       cusum_pos,
-        "cusum_neg":       cusum_neg,
-        "signal":          signal,
-        "signal_direction": retning
-    }, index=series.dropna().index)
 
 
 # =============================================================================
@@ -406,6 +410,27 @@ def _pelt_l2(values, min_size, penalty):
     return sorted(breakpoints)
 
 
+def _pelt_penalty(values):
+    """BIC-style penalty for a mean-shift (L2) cost: 2 * sigma^2 * log(n),
+    the standard calibration (Yao, 1988). sigma is the NOISE level, estimated
+    robustly from first differences: 1.4826 * MAD(diff) / sqrt(2). The plain
+    np.std(values) of the whole series also counts the shifts themselves as
+    noise, which inflates the penalty and hides exactly the changes PELT is
+    looking for. Returns None for a constant series (nothing to detect)."""
+    values = np.asarray(values, dtype="float64")
+    diffs  = np.diff(values)
+    if len(diffs) == 0:
+        return None
+    sigma = 1.4826 * np.median(np.abs(diffs - np.median(diffs))) / np.sqrt(2)
+    if not np.isfinite(sigma) or sigma == 0:
+        # MAD is 0 when most differences are identical (e.g. small integer
+        # counts); fall back to the plain std of the differences.
+        sigma = np.std(diffs) / np.sqrt(2)
+    if not np.isfinite(sigma) or sigma == 0:
+        return None
+    return 2 * np.log(len(values)) * sigma ** 2
+
+
 def run_changepoint(series, granularitet):
     """
     PELT changepoint detection (_pelt_l2). Returns list of changepoint
@@ -417,111 +442,208 @@ def run_changepoint(series, granularitet):
     if len(values) < min_obs:
         return []
 
-    # BIC-style penalty for a mean-shift (L2) cost — 2*sigma^2*log(n) is the
-    # standard calibration (Yao, 1988) for this cost.
-    penalty = 2 * np.log(len(values)) * np.std(values) ** 2
-    return _pelt_l2(values, min_size=6, penalty=penalty)
+    penalty = _pelt_penalty(values)
+    if penalty is None:
+        return []
+    return _pelt_l2(values, min_size=PELT_MIN_SIZE, penalty=penalty)
 
 
 # Per-måltall value expression and date column, reused by the drilldown
 # queries below — mirrors the aggregation logic in CELL 2.
 METRIC_SQL = {
+    # Official Fristprosent: produced faser, %avtalt% included (see monthly_frist)
     "Fristprosent": {
-        "value_expr": """CASE WHEN COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END) = 0 THEN NULL
-                          ELSE COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0
-                               / COUNT(CASE WHEN pr.frist_dager IS NOT NULL THEN 1 END) END""",
+        "value_expr":  "COUNT(CASE WHEN pr.innenfor_frist = 1 THEN 1 END) * 1.0 / COUNT(*)",
         "date_col":    "pr.sluttmilepaeldato",
-        "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.frist_dager IS NOT NULL",
+        "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.startmilepaeldato IS NOT NULL",
     },
     "Behandlingstid": {
         "value_expr":  "AVG(pr.tidsbruk)",
         "date_col":    "pr.sluttmilepaeldato",
-        "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.tidsbruk IS NOT NULL",
-    },
-    "Produksjonsdifferanse": {
-        "value_expr": """COUNT(CASE WHEN pr.startmilepaeldato IS NOT NULL THEN 1 END)
-                          - COUNT(CASE WHEN pr.sluttmilepaeldato IS NOT NULL THEN 1 END)""",
-        "date_col":    "COALESCE(pr.sluttmilepaeldato, pr.startmilepaeldato)",
-        "extra_where": "1=1",
+        "extra_where": "pr.sluttmilepaeldato IS NOT NULL AND pr.tidsbruk IS NOT NULL"
+                       " AND pr.indikator NOT LIKE '%avtalt%'",
     },
 }
+# Produksjonsdifferanse has no single date column — starts are placed by
+# startmilepaeldato and ends by sluttmilepaeldato — so it gets its own query
+# branch in run_drilldown (_production_drilldown_sql), not a METRIC_SQL entry.
 
 
-def run_drilldown(indikator, maaltall, granularitet, breakpoint_dato, dimensjon):
+def _production_drilldown_sql(indikator_escaped, dimensjon, window):
+    """Starts (by start date) and ends (by end date) per segment on each side
+    of the breakpoint, inside PELT's before/after window.
+    verdi = started - ended (a total for the side), antall = started + ended."""
+    def side(date_col, startet, avsluttet):
+        return f"""
+            SELECT
+                pr.{dimensjon} AS segment,
+                CASE WHEN {date_col} < DATE'{window["split"]}' THEN 'foer' ELSE 'etter' END AS periode,
+                {startet} AS startet,
+                {avsluttet} AS avsluttet
+            FROM saksbehandling.faser pr
+            INNER JOIN felles.indikator indikator ON indikator.pk_indikator = pr.indikator
+            WHERE pr.indikator = '{indikator_escaped}'
+                AND pr.indikator NOT LIKE '%avtalt%'
+                AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
+                AND {date_col} >= DATE'{window["start"]}'
+                AND {date_col} <= DATE'{window["end"]}'
+                AND pr.{dimensjon} IS NOT NULL"""
+
+    return f"""
+        SELECT
+            segment,
+            periode,
+            SUM(startet) - SUM(avsluttet) AS verdi,
+            SUM(startet) + SUM(avsluttet) AS antall
+        FROM (
+            {side("pr.startmilepaeldato", 1, 0)}
+            UNION ALL
+            {side("pr.sluttmilepaeldato", 0, 1)}
+        ) hendelser
+        GROUP BY segment, periode
     """
-    Split the flagged indikator/maaltall shift by one dimension (enhet or
-    fasetittel), using the same før/etter boundary PELT already found.
-    Returns a list of row dicts, one per segment with enough data.
-    """
+
+
+def _metric_drilldown(indikator_escaped, maaltall, dimensjon, window):
+    """Fristprosent/Behandlingstid per segment on each side of the breakpoint,
+    inside PELT's before/after window — both are placed by a single date
+    column (METRIC_SQL)."""
     cfg = METRIC_SQL[maaltall]
-    breakpoint_str = breakpoint_dato.isoformat()
-    indikator_escaped = indikator.replace("'", "''")
-
-    segments = spark.sql(f"""
+    return spark.sql(f"""
         SELECT
             pr.{dimensjon} AS segment,
-            CASE WHEN {cfg['date_col']} < DATE'{breakpoint_str}' THEN 'foer' ELSE 'etter' END AS periode,
+            CASE WHEN {cfg['date_col']} < DATE'{window["split"]}' THEN 'foer' ELSE 'etter' END AS periode,
             {cfg['value_expr']} AS verdi,
             COUNT(*) AS antall
         FROM saksbehandling.faser pr
         INNER JOIN felles.indikator indikator ON indikator.pk_indikator = pr.indikator
         WHERE pr.indikator = '{indikator_escaped}'
-            AND pr.indikator NOT LIKE '%avtalt%'
             AND indikator.fagomraade IN ('Byggesak', 'Eiendomssak', 'Plansak')
-            AND YEAR({cfg['date_col']}) >= {START_YEAR}
+            AND {cfg['date_col']} >= DATE'{window["start"]}'
+            AND {cfg['date_col']} <= DATE'{window["end"]}'
             AND {cfg['extra_where']}
             AND pr.{dimensjon} IS NOT NULL
         GROUP BY pr.{dimensjon},
-            CASE WHEN {cfg['date_col']} < DATE'{breakpoint_str}' THEN 'foer' ELSE 'etter' END
+            CASE WHEN {cfg['date_col']} < DATE'{window["split"]}' THEN 'foer' ELSE 'etter' END
     """).toPandas()
 
+
+def decompose_segments(segments, additive, perioder_foer=1, perioder_etter=1):
+    """
+    Per-segment before/after values and each segment's contribution to the
+    aggregate shift, from rows (segment, periode in {foer, etter}, verdi,
+    antall).
+
+    Mean/ratio måltall (Fristprosent, Behandlingstid): the aggregate is the
+    volume-weighted mean of the segments, w = segment antall / total antall.
+    Its shift splits exactly into, per segment,
+        bidrag_rate = w_etter * (v_etter - v_foer)   (the segment got better/worse)
+        bidrag_miks = (w_etter - w_foer) * v_foer    (the segment got bigger/smaller)
+    and bidrag_til_endring = bidrag_rate + bidrag_miks. Summed over segments
+    that equals the aggregate's after-minus-before.
+
+    Additive måltall (Produksjonsdifferanse): verdi is a total for the side, so
+    it is divided by that side's number of periods to give a per-period value
+    comparable with pelt_analyse; the aggregate is the plain sum of segments,
+    so there are no weights: bidrag_rate is the segment's own change and
+    bidrag_miks is 0. A segment missing on one side had 0 there.
+
+    Returns a DataFrame indexed by segment.
+    """
+    cols = ["verdi_foer", "verdi_etter", "antall_foer", "antall_etter",
+            "endring", "bidrag_rate", "bidrag_miks", "bidrag_til_endring",
+            "tilstrekkelig_volum"]
     if segments.empty:
-        return []
+        return pd.DataFrame(columns=cols)
 
-    segments["verdi"]  = pd.to_numeric(segments["verdi"], errors="coerce").astype("float64")
-    segments["antall"] = segments["antall"].astype("int64")
+    seg = segments.copy()
+    seg["verdi"]  = pd.to_numeric(seg["verdi"], errors="coerce").astype("float64")
+    seg["antall"] = pd.to_numeric(seg["antall"], errors="coerce").fillna(0).astype("int64")
 
-    pivot = segments.pivot(index="segment", columns="periode", values=["verdi", "antall"])
+    pivot = seg.pivot(index="segment", columns="periode", values=["verdi", "antall"])
     pivot.columns = [f"{a}_{b}" for a, b in pivot.columns]
     pivot = pivot.reindex(columns=["verdi_foer", "verdi_etter", "antall_foer", "antall_etter"])
+    pivot[["antall_foer", "antall_etter"]] = pivot[["antall_foer", "antall_etter"]].fillna(0)
 
-    total_antall_foer  = pivot["antall_foer"].sum()
-    total_antall_etter = pivot["antall_etter"].sum()
+    if additive:
+        pivot["verdi_foer"]  = pivot["verdi_foer"].fillna(0) / max(perioder_foer, 1)
+        pivot["verdi_etter"] = pivot["verdi_etter"].fillna(0) / max(perioder_etter, 1)
+        pivot["bidrag_rate"] = pivot["verdi_etter"] - pivot["verdi_foer"]
+        pivot["bidrag_miks"] = 0.0
+    else:
+        pivot = pivot.dropna(subset=["verdi_foer", "verdi_etter"])
+        total_foer  = pivot["antall_foer"].sum()
+        total_etter = pivot["antall_etter"].sum()
+        if total_foer and total_etter:
+            w_foer  = pivot["antall_foer"] / total_foer
+            w_etter = pivot["antall_etter"] / total_etter
+            pivot["bidrag_rate"] = w_etter * (pivot["verdi_etter"] - pivot["verdi_foer"])
+            pivot["bidrag_miks"] = (w_etter - w_foer) * pivot["verdi_foer"]
+        else:
+            pivot["bidrag_rate"] = np.nan
+            pivot["bidrag_miks"] = np.nan
+
+    pivot["endring"] = pivot["verdi_etter"] - pivot["verdi_foer"]
+    pivot["bidrag_til_endring"] = pivot["bidrag_rate"] + pivot["bidrag_miks"]
+    pivot["tilstrekkelig_volum"] = (
+        (pivot["antall_foer"] >= MIN_SEGMENT_OBS) & (pivot["antall_etter"] >= MIN_SEGMENT_OBS)
+    )
+    return pivot[cols]
+
+
+def run_drilldown(indikator, maaltall, granularitet, cp, dimensjon):
+    """
+    Split the flagged indikator/maaltall shift by one dimension (enhet or
+    fasetittel), on exactly PELT's before/after window: from the start of the
+    before-segment (cp["segment_start"]) to the end of the after-segment
+    (cp["segment_end"]), split at the first day of the breakpoint period
+    (cp["endringspunkt_start"]). Returns a list of row dicts, one per segment.
+    """
+    indikator_escaped = indikator.replace("'", "''")
+    window = {
+        "start": cp["segment_start"].isoformat(),
+        "split": cp["endringspunkt_start"].isoformat(),
+        "end":   cp["segment_end"].isoformat(),
+    }
+    additive = maaltall == "Produksjonsdifferanse"
+
+    if additive:
+        segments = spark.sql(
+            _production_drilldown_sql(indikator_escaped, dimensjon, window)
+        ).toPandas()
+    else:
+        segments = _metric_drilldown(indikator_escaped, maaltall, dimensjon, window)
+
+    parts = decompose_segments(
+        segments, additive,
+        perioder_foer=int(cp["antall_observasjoner_foer"]),
+        perioder_etter=int(cp["antall_observasjoner_etter"]),
+    )
+
+    def _r(v):
+        return round(float(v), 4) if pd.notna(v) else None
 
     rows = []
-    for segment, r in pivot.iterrows():
-        if pd.isna(r["verdi_foer"]) or pd.isna(r["verdi_etter"]):
-            continue
-
-        tilstrekkelig_volum = (r["antall_foer"] >= MIN_SEGMENT_OBS) and (r["antall_etter"] >= MIN_SEGMENT_OBS)
-
-        # weighted contribution — exact decomposition of the aggregate shift for
-        # mean/ratio måltall; for Produksjonsdifferanse (already additive) the
-        # volume weights cancel out to the raw segment delta.
-        bidrag = None
-        if total_antall_foer and total_antall_etter:
-            bidrag = (
-                (r["antall_etter"] / total_antall_etter) * r["verdi_etter"]
-                - (r["antall_foer"] / total_antall_foer) * r["verdi_foer"]
-            )
-
+    for segment, r in parts.iterrows():
         rows.append({
             "indikator":                  indikator,
             "maaltall":                   maaltall,
             "granularitet":               granularitet,
             "dimensjon":                  dimensjon,
             "dimensjonsverdi":            str(segment),
-            "analyse_dato":               breakpoint_dato,
+            "analyse_dato":               cp["analyse_dato"],
             "endringspunkt_id":           make_endringspunkt_id(
-                indikator, maaltall, granularitet, breakpoint_dato
+                indikator, maaltall, granularitet, cp["analyse_dato"]
             ),
-            "gjennomsnitt_foer":          round(float(r["verdi_foer"]), 4),
-            "gjennomsnitt_etter":         round(float(r["verdi_etter"]), 4),
-            "endringsstoerrelse":         round(float(r["verdi_etter"] - r["verdi_foer"]), 4),
-            "bidrag_til_endring":         round(float(bidrag), 4) if bidrag is not None else None,
+            "gjennomsnitt_foer":          _r(r["verdi_foer"]),
+            "gjennomsnitt_etter":         _r(r["verdi_etter"]),
+            "endringsstoerrelse":         _r(r["endring"]),
+            "bidrag_til_endring":         _r(r["bidrag_til_endring"]),
+            "bidrag_rate":                _r(r["bidrag_rate"]),
+            "bidrag_miks":                _r(r["bidrag_miks"]),
             "antall_observasjoner_foer":  int(r["antall_foer"]),
             "antall_observasjoner_etter": int(r["antall_etter"]),
-            "tilstrekkelig_volum":        bool(tilstrekkelig_volum),
+            "tilstrekkelig_volum":        bool(r["tilstrekkelig_volum"]),
             "kjoert_tidspunkt":           datetime.now(),
             "kjoere_id":                  BATCH_ID,
         })
@@ -555,6 +677,12 @@ def extract_changepoint_stats(series, breakpoints, granularitet):
 
         results.append({
             "analyse_dato":                _periode_to_date(periods[bp], granularitet) if bp < len(periods) else None,
+            # PELT's before/after window, reused by the drill-down: first day of
+            # the before-segment, first day of the breakpoint period (the split),
+            # last day of the after-segment.
+            "segment_start":               _periode_to_start_date(periods[prev], granularitet),
+            "endringspunkt_start":         _periode_to_start_date(periods[bp], granularitet),
+            "segment_end":                 _periode_to_date(periods[next_bp - 1], granularitet),
             "gjennomsnitt_foer":           round(mean_before, 4),
             "gjennomsnitt_etter":          round(mean_after, 4),
             "endringsstoerrelse":          round(shift, 4),
@@ -581,12 +709,6 @@ series_configs = [
     ("Produksjonsdifferanse",   weekly_prod,   "Ukentlig", MIN_WEEKLY),
 ]
 
-CUSUM_BASELINE_BY_GRANULARITET = {
-    "Månedlig": CUSUM_BASELINE_MONTHLY,
-    "Ukentlig": CUSUM_BASELINE_WEEKLY,
-}
-
-cusum_rows       = []
 changepoint_rows = []
 
 for metrikk, df, granularitet, min_obs in series_configs:
@@ -601,25 +723,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
         if len(ind_data.dropna()) < min_obs:
             continue
 
-        # ── CUSUM ──────────────────────────────────────────────────
-        baseline_obs = CUSUM_BASELINE_BY_GRANULARITET[granularitet]
-        cusum = run_cusum(ind_data, baseline_obs=baseline_obs)
-        if cusum is not None:
-            for idx, row in cusum.iterrows():
-                cusum_rows.append({
-                    "indikator":       indikator,
-                    "maaltall":        metrikk,
-                    "granularitet":    granularitet,
-                    "analyse_dato":    _periode_to_date(idx, granularitet),
-                    "cusum_positiv":   round(float(row["cusum_pos"]), 4),
-                    "cusum_negativ":   round(float(row["cusum_neg"]), 4),
-                    "signal":          bool(row["signal"]),
-                    "signalretning":   row["signal_direction"],
-                    "kjoert_tidspunkt": datetime.now(),
-                    "kjoere_id":       BATCH_ID,
-                })
-
-        # ── Changepoint (monthly and weekly — see PELT header note) ─
+        # ── Changepoint (monthly and weekly) ─────────────────────
         breakpoints = run_changepoint(ind_data, granularitet)
         for cp in extract_changepoint_stats(ind_data, breakpoints, granularitet):
             changepoint_rows.append({
@@ -634,11 +738,7 @@ for metrikk, df, granularitet, min_obs in series_configs:
                 "kjoere_id":    BATCH_ID,
             })
 
-print(f"CUSUM rows computed:       {len(cusum_rows)}")
 print(f"Changepoint rows computed: {len(changepoint_rows)}")
-print(f"Active CUSUM signals:      "
-      f"{sum(1 for r in cusum_rows if r['signal'])}")
-
 
 # =============================================================================
 # CELL 5B — Drill down the most recent changepoint per series by enhet/fasetittel
@@ -653,14 +753,17 @@ if changepoint_rows:
         .groupby(["indikator", "maaltall", "granularitet"])
         .tail(1)
     )
-    cutoff = pd.Timestamp.now().date() - pd.Timedelta(days=RECENT_CHANGEPOINT_DAYS)
-    latest_cp = latest_cp[latest_cp["analyse_dato"] >= cutoff]
+    today = pd.Timestamp.now().date()
+    is_recent = [
+        r["analyse_dato"] >= today - pd.Timedelta(days=RECENT_CHANGEPOINT_DAYS[r["granularitet"]])
+        for _, r in latest_cp.iterrows()
+    ]
+    latest_cp = latest_cp[is_recent]
 
     for _, cp in latest_cp.iterrows():
         for dimensjon in DRILLDOWN_DIMENSIONS:
             drilldown_rows += run_drilldown(
-                cp["indikator"], cp["maaltall"], cp["granularitet"],
-                cp["analyse_dato"], dimensjon,
+                cp["indikator"], cp["maaltall"], cp["granularitet"], cp, dimensjon,
             )
 
 print(f"Drilldown rows computed:   {len(drilldown_rows)}")
@@ -672,19 +775,6 @@ print(f"Drilldown rows computed:   {len(drilldown_rows)}")
 
 # Explicit schemas — pandas infers int64/object, which does not match the
 # INT/DOUBLE columns in the Delta tables and breaks the overwrite merge.
-CUSUM_SCHEMA = StructType([
-    StructField("indikator",        StringType(),    False),
-    StructField("maaltall",         StringType(),    False),
-    StructField("granularitet",     StringType(),    False),
-    StructField("analyse_dato",     DateType(),      False),
-    StructField("cusum_positiv",    DoubleType(),    True),
-    StructField("cusum_negativ",    DoubleType(),    True),
-    StructField("signal",           BooleanType(),   False),
-    StructField("signalretning",    StringType(),    True),
-    StructField("kjoert_tidspunkt", TimestampType(), False),
-    StructField("kjoere_id",        StringType(),    False),
-])
-
 PELT_SCHEMA = StructType([
     StructField("indikator",                  StringType(),    False),
     StructField("maaltall",                   StringType(),    False),
@@ -713,6 +803,8 @@ DRILLDOWN_SCHEMA = StructType([
     StructField("gjennomsnitt_etter",         DoubleType(),    True),
     StructField("endringsstoerrelse",         DoubleType(),    True),
     StructField("bidrag_til_endring",         DoubleType(),    True),
+    StructField("bidrag_rate",                DoubleType(),    True),
+    StructField("bidrag_miks",                DoubleType(),    True),
     StructField("antall_observasjoner_foer",  IntegerType(),   True),
     StructField("antall_observasjoner_etter", IntegerType(),   True),
     StructField("tilstrekkelig_volum",        BooleanType(),   False),
@@ -742,13 +834,6 @@ def to_records(rows, schema):
     return out
 
 
-if cusum_rows:
-    cusum_spark = spark.createDataFrame(
-        to_records(cusum_rows, CUSUM_SCHEMA), schema=CUSUM_SCHEMA
-    )
-    cusum_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.cusum_analyse")
-    print(f"cusum_analyse skrevet: {len(cusum_rows)} rader")
-
 if changepoint_rows:
     cp_spark = spark.createDataFrame(
         to_records(changepoint_rows, PELT_SCHEMA), schema=PELT_SCHEMA
@@ -762,19 +847,6 @@ if drilldown_rows:
     )
     drilldown_spark.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable("analyser.pelt_analyse_detaljer")
     print(f"pelt_analyse_detaljer skrevet: {len(drilldown_rows)} rader")
-
-# Summary — active signals
-if cusum_rows:
-    spark.sql(f"""
-                SELECT indikator, maaltall, granularitet,
-                             MAX(analyse_dato) AS siste_signaldato,
-                             MAX(signalretning) AS retning
-                FROM analyser.cusum_analyse
-                WHERE signal = TRUE
-                    AND kjoere_id = '{BATCH_ID}'
-                GROUP BY indikator, maaltall, granularitet
-                ORDER BY maaltall, indikator
-    """).show(50, truncate=False)
 
 if changepoint_rows:
     spark.sql(f"""
@@ -803,6 +875,6 @@ if drilldown_rows:
 
 # =============================================================================
 # Power BI/DAX guidance moved to separate documentation:
-#   see CUSUM_Changepoint_POWERBI_DAX.md
+#   see PELT_Changepoint_POWERBI_DAX.md
 # =============================================================================
 

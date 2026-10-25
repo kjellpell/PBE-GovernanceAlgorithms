@@ -41,6 +41,18 @@
 #   `oevre_aarsslutt`, is the year-end YTD estimate and its interval, repeated
 #   on every row for the KPI cards — that one IS cumulative, and is the
 #   governance number. It is not the last point of the line.
+#
+#   Pace scenario ("med dagens tempo"): the seasonal model above is, in
+#   practice, "the year ends near where year-to-date is now" — it does not see
+#   whether the last few months have been better or worse than the start of
+#   the year. So every row also carries `innenfor_tempo`: the same month's
+#   modelled volume x the frist% of the last TEMPO_MAANEDER complete months
+#   (the anchor row: its real count). DIVIDE(SUM(innenfor_tempo),
+#   SUM(produserte_prognose)) draws a second line, and
+#   `prognose_aarsslutt_tempo` is the year-end YTD at that pace. Two endpoints
+#   close together: the projection holds. Clearly apart: the recent pace is
+#   changing the picture. Added as columns, not rows, so existing measures
+#   that SUM every row are unaffected.
 #   See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
 #
 # Schedule: nightly, after main data pipeline.
@@ -68,6 +80,7 @@ CURRENT_MONTH = TODAY.month
 MIN_YEARS     = 3    # minimum history for reliable seasonal pattern
 TRIM_N        = 1    # drop N best and N worst years per seasonal position
 START_YEAR    = 2015 # exclude data before this year — adjust if older data is reliable
+TEMPO_MAANEDER = 3   # pace scenario: frist% of the last this-many complete months
 
 
 # =============================================================================
@@ -87,11 +100,13 @@ CREATE TABLE IF NOT EXISTS analyser.frist_prognose (
     prognose_aarsslutt          DOUBLE,
     nedre_aarsslutt             DOUBLE,
     oevre_aarsslutt             DOUBLE,
+    innenfor_tempo              DOUBLE,
+    prognose_aarsslutt_tempo    DOUBLE,
     kjoert_tidspunkt            TIMESTAMP   NOT NULL,
     kjoere_id                   STRING      NOT NULL
 )
 USING DELTA
-COMMENT 'Prognose for fristprosent per indikator. verdi er en PERIODERATE — prognosert frist% for måneden, ikke kumulativ hittil-i-år — fordi det er det rapportens Faser innen frist % viser. innenfor_prognose og produserte_prognose er modellerte faser-tellinger for samme rad; summer disse og divider (som rapportens egen DIVIDE(SUM,SUM)-mål) for et resultat som stemmer på tvers av indikatorer og perioder — et gjennomsnitt av verdi gjør det ikke. Ett ankerpunkt ved slutten av siste komplette måned (type Anker, faktiske tellinger og faktisk rate) og én rad per gjenstående måned (type Prognose), hver med sin måneds modellerte tellinger. Faktiske rater før ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og gjelder radens egen verdi. prognose_aarsslutt med nedre_aarsslutt og oevre_aarsslutt er årssluttprognosen for kumulativ YTD med 90 prosent intervall, gjentatt på alle rader.'
+COMMENT 'Prognose for fristprosent per indikator. verdi er en PERIODERATE — prognosert frist% for måneden, ikke kumulativ hittil-i-år — fordi det er det rapportens Faser innen frist % viser. innenfor_prognose og produserte_prognose er modellerte faser-tellinger for samme rad; summer disse og divider (som rapportens egen DIVIDE(SUM,SUM)-mål) for et resultat som stemmer på tvers av indikatorer og perioder — et gjennomsnitt av verdi gjør det ikke. Ett ankerpunkt ved slutten av siste komplette måned (type Anker, faktiske tellinger og faktisk rate) og én rad per gjenstående måned (type Prognose), hver med sin måneds modellerte tellinger. Faktiske rater før ankeret er en live DAX-måling mot saksbehandling.faser, ikke lagret her. Konfidensgrensene er 90 prosent og gjelder radens egen verdi. prognose_aarsslutt med nedre_aarsslutt og oevre_aarsslutt er årssluttprognosen for kumulativ YTD med 90 prosent intervall, gjentatt på alle rader. innenfor_tempo er radens modellerte antall innenfor frist hvis resten av året går som de siste tre hele månedene (ankerraden: faktisk antall); DIVIDE(SUM(innenfor_tempo), SUM(produserte_prognose)) gir tempo-linjen. prognose_aarsslutt_tempo er årsslutt for kumulativ YTD med dagens tempo, gjentatt på alle rader.'
 """)
 
 # A table created by an earlier run predates columns added since, and
@@ -108,6 +123,10 @@ NEW_COLUMNS = (
      "Modellert antall faser innenfor frist for raden, til bruk i DIVIDE(SUM,SUM)"),
     ("produserte_prognose", "DOUBLE",
      "Modellert antall produserte faser for raden, til bruk i DIVIDE(SUM,SUM)"),
+    ("innenfor_tempo", "DOUBLE",
+     "Modellert antall innenfor frist med dagens tempo (siste tre hele maaneder)"),
+    ("prognose_aarsslutt_tempo", "DOUBLE",
+     "Arsslutt for kumulativ YTD hvis resten av aaret gaar som de siste tre hele maanedene"),
 )
 
 existing_columns = {
@@ -536,10 +555,47 @@ def seasonal_ratio_on(ratios, on_date):
     return {"mean_ratio": float(mean), "std_ratio": float(std), "n_years": current["n_years"]}
 
 
+def recent_pace(df, indikator, year, last_complete_month, n=TEMPO_MAANEDER):
+    """
+    frist% over the last `n` complete months (summed counts, not an average
+    of rates), walking back across the year boundary when needed — in
+    February the last three complete months are Nov, Dec and Jan.
+
+    Returns the rate, or None if those months produced nothing.
+    """
+    innenfor = total = 0
+    for k in range(n):
+        m, y = last_complete_month - k, year
+        while m <= 0:
+            m, y = m + 12, y - 1
+        counts = monthly_counts(df, indikator, y).get(m)
+        if counts:
+            innenfor += counts[0]
+            total += counts[1]
+    return innenfor / total if total > 0 else None
+
+
+def project_year_end_at_pace(current_counts, last_complete_month, month_volumes, pace):
+    """
+    Year-end cumulative frist% if every remaining month runs at `pace`:
+    complete months so far as observed, plus each remaining month's projected
+    volume at the pace rate. Returns None if pace or volume is missing.
+    """
+    if pace is None or not month_volumes:
+        return None
+    innenfor = sum(current_counts[m][0] for m in range(1, last_complete_month + 1) if m in current_counts)
+    total = sum(current_counts[m][1] for m in range(1, last_complete_month + 1) if m in current_counts)
+    rest = sum(month_volumes.values())
+    if total + rest <= 0:
+        return None
+    return round(float((innenfor + pace * rest) / (total + rest)), 4)
+
+
 def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volumes,
                         year_end_est, ci_lower, ci_upper,
                         kjoert_tidspunkt, kjoere_id,
-                        anchor_date=None, anchor_innenfor=None, anchor_total=None):
+                        anchor_date=None, anchor_innenfor=None, anchor_total=None,
+                        pace=None, year_end_pace=None):
     """
     Continue the monthly frist% line from the last complete month to
     31 December, one row per remaining month.
@@ -569,11 +625,16 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
     current month is projected rather than anchored on: part of a month is
     not a month, and its running rate is the least stable number on the
     chart.
+
+    `pace` / `year_end_pace` add the pace scenario as columns on the same
+    rows: `innenfor_tempo` = volume x pace (the anchor: its real count), so
+    DIVIDE(SUM(innenfor_tempo), SUM(produserte_prognose)) draws the second
+    line from the same fork point. None when no pace could be computed.
     """
     if year_end_est is None or first_forecast_date.month > 12:
         return []
 
-    def make_row(analyse_dato, type_, verdi, lower, upper, innenfor, total):
+    def make_row(analyse_dato, type_, verdi, lower, upper, innenfor, total, innenfor_tempo):
         return {
             "indikator":             indikator,
             "analyse_dato":          analyse_dato,
@@ -586,6 +647,8 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
             "prognose_aarsslutt":    year_end_est,
             "nedre_aarsslutt":       ci_lower,
             "oevre_aarsslutt":       ci_upper,
+            "innenfor_tempo":        None if innenfor_tempo is None else round(float(innenfor_tempo), 4),
+            "prognose_aarsslutt_tempo": year_end_pace,
             "kjoert_tidspunkt":      kjoert_tidspunkt,
             "kjoere_id":             kjoere_id,
         }
@@ -600,7 +663,7 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
         # modelled ones, so this row reproduces the live measure exactly.
         rows.append(make_row(
             anchor_date, "Anker", anchor_rate, anchor_rate, anchor_rate,
-            anchor_innenfor, anchor_total
+            anchor_innenfor, anchor_total, anchor_innenfor if pace is not None else None
         ))
 
     for mnd in range(first_forecast_date.month, 13):
@@ -614,7 +677,7 @@ def build_forecast_rows(indikator, first_forecast_date, month_ratios, month_volu
             continue
         rows.append(make_row(
             month_end(mnd), "Prognose", estimate, lower, upper,
-            estimate * volume, volume
+            estimate * volume, volume, None if pace is None else pace * volume
         ))
 
     # An anchor on its own is not a forecast.
@@ -633,6 +696,8 @@ OUTPUT_COLUMNS = {
     "prognose_aarsslutt",
     "nedre_aarsslutt",
     "oevre_aarsslutt",
+    "innenfor_tempo",
+    "prognose_aarsslutt_tempo",
     "kjoert_tidspunkt",
     "kjoere_id",
 }
@@ -646,7 +711,7 @@ def validate_results(results):
                 f"Result row {row_number} has unexpected columns: "
                 f"{sorted(set(row) ^ OUTPUT_COLUMNS)}"
             )
-        for column in ("verdi", "prognose_aarsslutt"):
+        for column in ("verdi", "prognose_aarsslutt", "prognose_aarsslutt_tempo"):
             value = row[column]
             if value is not None and (not np.isfinite(value) or not 0 <= value <= 1):
                 raise ValueError(f"{column} out of bounds in row {row_number}: {value}")
@@ -688,6 +753,9 @@ def validate_results(results):
                 raise ValueError(
                     f"innenfor_prognose exceeds produserte_prognose in row {row_number}"
                 )
+            tempo = row["innenfor_tempo"]
+            if tempo is not None and not 0 <= tempo <= produserte + 1e-6:
+                raise ValueError(f"innenfor_tempo outside 0..produserte_prognose in row {row_number}")
             if produserte > 0 and verdi is not None:
                 implied_rate = innenfor / produserte
                 if abs(implied_rate - verdi) > 0.01:
@@ -796,12 +864,19 @@ for indikator in indicators:
     # its real counts, not modelled ones — so the projection has the actual
     # line to leave from.
     # See Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md.
+    # Pace scenario: the rest of the year at the last few complete months' rate.
+    pace = recent_pace(monthly, indikator, CURRENT_YEAR, last_complete_month)
+    year_end_pace = project_year_end_at_pace(
+        current_counts, last_complete_month, month_volumes, pace
+    )
+
     indicator_rows = build_forecast_rows(
         indikator, date(CURRENT_YEAR, last_complete_month + 1, 1),
         month_ratios, month_volumes,
         year_end_est, ci_lo, ci_hi,
         datetime.now(), BATCH_ID,
-        anchor_date=anchor_date, anchor_innenfor=anchor_innenfor, anchor_total=anchor_total
+        anchor_date=anchor_date, anchor_innenfor=anchor_innenfor, anchor_total=anchor_total,
+        pace=pace, year_end_pace=year_end_pace,
     )
 
     if not indicator_rows:
@@ -834,6 +909,8 @@ else:
         StructField("prognose_aarsslutt", DoubleType(), True),
         StructField("nedre_aarsslutt", DoubleType(), True),
         StructField("oevre_aarsslutt", DoubleType(), True),
+        StructField("innenfor_tempo", DoubleType(), True),
+        StructField("prognose_aarsslutt_tempo", DoubleType(), True),
         StructField("kjoert_tidspunkt", TimestampType(), False),
         StructField("kjoere_id", StringType(), False),
     ])
@@ -851,14 +928,14 @@ else:
         *[field.name for field in spark.table("analyser.frist_prognose").schema]
     )
 
-    # Idempotent — delete current year rows before inserting
-    spark.sql(f"""
-            DELETE FROM analyser.frist_prognose
-            WHERE analyse_dato >= '{CURRENT_YEAR}-01-01'
-                AND analyse_dato <= '{CURRENT_YEAR}-12-31'
-    """)
-
-    results_spark.write.mode("append").saveAsTable("analyser.frist_prognose")
+    # Idempotent and atomic — replace the current year's rows in ONE Delta
+    # transaction. (A DELETE followed by a separate append left the current
+    # year empty in the report whenever the append failed.) Every row written
+    # is dated inside the current year, which replaceWhere requires.
+    results_spark.write.mode("overwrite").option(
+        "replaceWhere",
+        f"analyse_dato >= '{CURRENT_YEAR}-01-01' AND analyse_dato <= '{CURRENT_YEAR}-12-31'",
+    ).saveAsTable("analyser.frist_prognose")
 
     print(f"analyser.frist_prognose skrevet: {len(results)} rader")
 
@@ -869,6 +946,7 @@ else:
         SELECT
             indikator,
             MAX(prognose_aarsslutt)                             AS prognose_aarsslutt,
+            MAX(prognose_aarsslutt_tempo)                       AS med_dagens_tempo,
             MIN(CASE WHEN type = 'Prognose' THEN verdi END)     AS laveste_maanedsrate,
             MAX(CASE WHEN type = 'Prognose' THEN verdi END)     AS hoeyeste_maanedsrate
         FROM analyser.frist_prognose

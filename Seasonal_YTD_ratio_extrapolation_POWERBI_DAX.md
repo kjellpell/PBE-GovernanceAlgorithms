@@ -156,6 +156,10 @@ than drifting towards a single number.
   `Anker` row carries the last complete month's *real* counts, so this series reproduces
   the actual measure exactly at that one point, and the dashed line starts *on* the solid
   one — the fork marks exactly where projection begins.
+- **Serie 3 (stiplet, annen farge):** `[Tempo rate]` — «med dagens tempo»: the rest of
+  the year at the frist% of the last three complete months. It starts at the same `Anker`
+  point as series 2. Close to series 2: the projection holds. Clearly apart: the recent
+  pace is changing the picture — that is the moment to act.
 - **Bånd:** `[Prognose nedre]` and `[Prognose oevre]`. Power BI's core line chart has no
   band primitive — either two thin dashed lines, or a band-capable visual underneath.
 - **Mållinje:** constant line at `alert_config[terskel_amber]`.
@@ -168,6 +172,7 @@ band on a monthly rate would mean the model is hiding variation it has actually 
 #### 2) KPI-kort med intervall
 - Stor verdi: `[Prognose årslutt]` — cumulative year-end frist%, not a month
 - Undertekst: `[Prognose intervalltekst]` — "90 % KI: 79–89 %"
+- Andre linje: `[Prognose årslutt (tempo)]` — «med dagens tempo: 81 %»
 - Farge: `[Prognose RAG]` mot `alert_config`
 
 **Sett tallformatet på `[Prognose årslutt]` til Percentage (0 %) i visualet, ellers viser
@@ -215,6 +220,20 @@ Do not filter `frist_prognose[type]` on this visual. The `Anker` row is what joi
 dashed line to the solid one; excluding it puts the gap back.
 
 ```DAX
+Tempo rate =
+DIVIDE(
+    SUM(frist_prognose[innenfor_tempo]),
+    SUM(frist_prognose[produserte_prognose])
+)
+```
+
+The pace scenario, same `DIVIDE(SUM, SUM)` shape and the same rows as `[Prognose rate]`:
+`innenfor_tempo` is each remaining month's projected volume × the frist% of the last three
+complete months, and on the `Anker` row it is that month's real count, so the line forks
+from the same point. It lives in extra columns, not extra rows, so `[Prognose rate]` and
+every other measure that sums the table are unaffected. Blank if no pace could be computed.
+
+```DAX
 Prognose nedre = AVERAGE(frist_prognose[nedre_konfidensgrense])
 ```
 
@@ -237,6 +256,18 @@ CALCULATE(
     REMOVEFILTERS(frist_prognose[analyse_dato])
 )
 ```
+
+```DAX
+Prognose årslutt (tempo) =
+CALCULATE(
+    MAX(frist_prognose[prognose_aarsslutt_tempo]),
+    REMOVEFILTERS(Kalender),
+    REMOVEFILTERS(frist_prognose[analyse_dato])
+)
+```
+
+Year-end cumulative frist% if the rest of the year runs at the last three months' pace.
+Show it next to `[Prognose årslutt]`: the gap between the two is the signal.
 
 ```DAX
 Prognose CI lower =
@@ -323,7 +354,7 @@ RETURN
   a few extra days barely move the level, and the model accounts for how far into the
   month the data reaches rather than treating a part-finished month as finished.
 
-## Åpenbar begrensning
+The nightly run replaces the whole current year in one transaction, so the table holds only the
 The nightly run deletes and rewrites the whole current year, so the table holds only the
 newest forecast. Forecast drift over time — "in June we projected 88%, now we project
 84%" — is not recoverable from it. That would be the genuinely interesting line chart

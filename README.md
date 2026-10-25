@@ -1,7 +1,7 @@
 # PBE-GovernanceAlgorithms
 
 One system for monitoring case-processing indicators (`Fristprosent`, `Behandlingstid`,
-`Produksjonsdifferanse`) from several angles: trend, drift, forecast, flow, workload. All views read the same fact table
+`Produksjonsdifferanse`) from several angles: trend, drift, forecast, flow. All views read the same fact table
 (`saksbehandling.faser`, `pk_indikator` from `felles.indikator`), all output values in
 Norwegian, DAX measure names in Norwegian.
 
@@ -36,83 +36,125 @@ first. Split into two Power BI reports along that line, rather than one report m
 self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
-- `Trendretning` — `Stigende`/`Synkende`/`Stabil` is just a word
-- `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
+- Control charts for **production** and **frist%** — each month against a band of normal variation (production: same-month 3-year average ± 0.5 SD, as it is seasonal; frist%: previous 12 months ± 2 SD, as it isn't), red dots where there's reason to react (below the band, or eight months in a row below normal), blue dots for unusually good months; headline `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
+- `At_Risk_Open_Cases` (Del 1) — open faser by the report's existing deadline colour code (red = past deadline, yellow = close to it, threshold per case type, green = the rest), with `Status` alongside: counts and shares, live DAX
+- `At_Risk_Open_Cases` (Del 2) — intake, completions and open cases per month back to 2015, live DAX
+- `At_Risk_Open_Cases` (Del 3) — P90 phase time per phase against its last 12 months, red dot when 25 % above; on the same timeline as net production, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
-- `CUSUM_Changepoint` — why *this* month triggered, not last month, is an anchored-baseline judgment call
+- `PELT_Changepoint` — when an unexplained shift in the average happened and which team/phase it came from; look at it when needed
 - `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
-- `Throughput_Pressure_Monitor` — `pressure_nivaa` reads fine; the five-factor weighted score behind it doesn't
-- `Caseworker_Load_Concentration` — a Gini coefficient teaches a leader nothing on sight the way a percentage or a day count does; the color band is doing all the communicating, so keep the raw number out of any leader-facing view entirely
-
-Note the asymmetry between the two flow/queue pages: `Phase_Bottleneck_Detector` earns
-leader-report placement specifically because of `arsak_tekst` — its sibling
-`Throughput_Pressure_Monitor` has no equivalent plain-language field, only the composite
-score, so it stays in the analyst report despite being the same pattern one grain up.
-That's a real difference in what the two tables expose, not an inconsistency to fix.
 
 ## Scripts — the addon signal DAX can't produce
 
 | File | Output table(s) | What it computes |
 |---|---|---|
-| `CUSUM_Changepoint.py` | `cusum_analyse`, `pelt_analyse`, `pelt_analyse_detaljer` | CUSUM drift score + PELT changepoints — recursive/segmentation math |
+| `PELT_Changepoint.py` | `pelt_analyse`, `pelt_analyse_detaljer` | PELT changepoints + drill-down — segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
-| `Throughput_Pressure_Monitor.py` | `gjennomstroemming_press_enhet`, `gjennomstroemming_press_fase` | Team-level flow imbalance + tidsbruk deviation vs. baseline — composite score, flow streak |
-| `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Same, one level down at the phase grain |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
 
 `START_YEAR = 2015` is a top-of-file constant, not a shared config — it's duplicated as a
-literal in four scripts: `CUSUM_Changepoint.py`, `Seasonal_YTD_ratio_extrapolation.py`,
-`Throughput_Pressure_Monitor.py`, `Phase_Bottleneck_Detector.py`. If the earliest reliable
-year in your Lakehouse changes, update it in all four — there's no single place that fixes
+literal in two scripts: `PELT_Changepoint.py` and `Seasonal_YTD_ratio_extrapolation.py`.
+If the earliest reliable year in your Lakehouse changes, update it in both — there's no single place that fixes
 it for every script. (`Kostra.py` pulls whatever SSB has.)
 
-Two things that used to be scripts here — daily-open-case age buckets and a persisted
-Gini-concentration trend — were retired: a nightly pipeline plus an ever-growing table was
-too much standing infrastructure for a future maintainer without a coding background to
-keep running, for signals that don't need day-by-day history. See git history for
-`Backlog_Aging_Distribution.py`/`sak_alder_fordeling` if that view is ever needed again;
-`Caseworker_Load_Concentration` survived as a live DAX measure instead (see
-`Caseworker_Load_Concentration_POWERBI_DAX.md`) since it's still worth having as a current
-signal, just not a trend.
+Three things that used to be here were retired:
+- daily-open-case age buckets and a persisted Gini-concentration trend (scripts) — a
+  nightly pipeline plus an ever-growing table was too much standing infrastructure for a
+  future maintainer without a coding background to keep running. See git history for
+  `Backlog_Aging_Distribution.py`/`sak_alder_fordeling`.
+- the live-DAX caseworker Gini page (`Caseworker_Load_Concentration_POWERBI_DAX.md`,
+  retired October 2026) — hard for leaders to read, muddied by part-time and leave,
+  individual-level monitoring that needs a separate employee-representative process, and
+  not an early-warning signal. Team-level at-risk counts answer the operational question
+  without naming individuals. See git history if it is ever needed again.
+- CUSUM drift detection (`cusum_analyse`, `Trendretning (CUSUM)`, retired October 2026) —
+  on a lagging closed-case measure it was slow (~9 months to see a sustained 1σ shift in
+  monthly data) and, with a recent same-month baseline, raised frequent false alarms; a
+  leader also couldn't see why the word on the card changed. Replaced by live DAX
+  (`Fristprosent_Kontrollkort_POWERBI_DAX.md`: control charts for production and frist%,
+  rolling 12 months, change vs. last year) and by the leading indicators. PELT, which shared the script, stays
+  as `PELT_Changepoint.py`. See git history for `CUSUM_Changepoint.py`.
+- `Throughput_Pressure_Monitor.py` (`gjennomstroemming_press_enhet`/`_fase`, retired
+  October 2026) — its team-level flow (intake vs. completions, open queue) is now plain
+  live DAX back to 2015 (`At_Risk_Open_Cases_POWERBI_DAX.md`, Del 2), read directly instead
+  of a five-factor score.
+  See git history.
+- `Phase_Bottleneck_Detector.py` (`fase_flaskehals_enhet`, retired October 2026) — a
+  five-rule point score per team × phase × indicator × month, on cells often too small
+  (10–30 cases) for a stable P90. Replaced by the report's existing net production and
+  open-cases measures (is the queue growing?) plus live-DAX P90 phase time per phase
+  against its last 12 months (`At_Risk_Open_Cases_POWERBI_DAX.md`, Del 3: where is work
+  getting slow?). See git history.
 
 All (except `Kostra.py`) run nightly after the main data pipeline.
 
-Throughput_Pressure_Monitor and Phase_Bottleneck_Detector were briefly native DAX; reverted
-— the flow-streak/queue-proxy measures needed an iterative window-scan and a third date
-role DAX has no clean primitive for, exactly the "possible but not simple" case above.
+`PELT_Changepoint` scores
+only **complete** periods: the current calendar month (and the current ISO week for
+PELT's weekly series) is excluded in SQL (`MONTH_CUTOFF_SQL`/`WEEK_CUTOFF_SQL`), so a
+half-filled month never reads as a drop, and the DAX "siste analysedato" measures land on
+the last complete period. `Seasonal_YTD_ratio_extrapolation` is the exception on purpose —
+it handles the part-month itself and anchors on the last complete month.
 
 ## Closed-case trend, drift, and forecast
 
-### CUSUM_Changepoint.py
+### Control charts: production and frist% (live DAX)
 
-Detects small persistent shifts (CUSUM) and structural breakpoints (PELT) per indicator,
-on both monthly and weekly series.
+`Fristprosent_Kontrollkort_POWERBI_DAX.md`, in the **leader** report. Two charts on one
+principle: each month's value against a centre line and a band of normal variation. Only
+volume is seasonal, so production uses the same calendar month over the last three years ±
+0.5 SD (the SD includes the seasonal swings; 1 SD was too wide), while frist% uses the
+previous 12 months ± 2 SD (no seasonal swings, so the SD is plain month-to-month noise).
+The production chart reuses the band the report already has; the frist% chart builds one
+the same way. Red dots mark a month below the band or the eighth month in a row below the
+centre line, blue dots a month above the band. The dots are separate series that only have
+a value where they apply, so they work in any Power BI version. Production usually drops
+before frist% does, so side by side the charts show cause and effect. Headline card:
+`Fristprosent 12 mnd` with `Endring mot i fjor (pp)`. Both charts confirm a shift after the
+fact; the early warning is the red/yellow open faser (see Leading indicator).
+
+### PELT_Changepoint.py
+
+Finds structural breakpoints (PELT) in the average of each indicator's series, monthly and
+weekly, and breaks the latest one down by team and phase. Runs nightly; look at it when
+needed (e.g. quarterly). It looks backwards: it finds breaks nobody logged (registration practice,
+system migration, rule change) and needs ~6 periods after a break to see it, so it is not
+an early warning. To evaluate a *known* organisational change, use an interrupted time
+series at the known date, not PELT.
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
+- `Fristprosent` has one official definition across the repo: produced faser (start and
+  slutt both set) as denominator, `innenfor_frist = 1` as numerator, `%avtalt%`
+  indicators included — the same as `Seasonal_YTD_ratio_extrapolation.py` and the
+  report's `[Produserte faser]`. The other two måltall still exclude `%avtalt%`
+  (`Produksjonsdifferanse` = faser started in the period by start date minus faser ended
+  in the period by end date)
+- Weekly series are keyed `ISO year * 100 + ISO week` (`iso_week_sql`), so 30 Dec 2024
+  is week 202501, not 202401. Mixing calendar year with ISO week mis-placed New Year
+  days and would crash the nightly run on a date like 1 Jan 2021 (`202153` does not exist)
 - **No install step, no external dependency.** PELT runs on a built-in pure-NumPy
-  implementation with an L2 (mean-shift) cost (`_pelt_l2` in `CUSUM_Changepoint.py`) —
+  implementation with an L2 (mean-shift) cost (`_pelt_l2` in `PELT_Changepoint.py`) —
   detects a shift in the average, not a volatility change with the average unchanged.
   Never add an inline `%pip install` cell for a changepoint library: it fails with
   `MagicUsageError` on tenants where inline installation is disabled, and isn't needed here
-- **Key constants:** `CUSUM_K` (allowance), `CUSUM_H` (threshold), `CUSUM_BASELINE_MONTHLY`/`CUSUM_BASELINE_WEEKLY` (anchored baseline window for mu/sigma), `CUSUM_MIN_POST_BASELINE_OBS`
-- `signal` is boolean; `signalretning`/`endringsretning` use `Stigende`/`Synkende`/`Stabil` —
-  plain board vocabulary, so a board-level measure can read `cusum_analyse[signalretning]`
-  directly with no translation SWITCH (`endringsretning` in `pelt_analyse` is never
-  `Stabil` — a changepoint row only exists when a shift was actually detected)
-- mu/sigma come from a fixed, anchored baseline window (the series' first N observations), not the whole history — a slow persistent drift would otherwise get partially absorbed into "normal" and dampen detection
-- `cusum_analyse` stores only `cusum_positiv`/`cusum_negativ`/`signal` — the raw value is a
-  live DAX measure against `Faser`, defined elsewhere in the model
-- Board/governance trend direction (`Stigende`/`Synkende`/`Stabil`) is `Trendretning (CUSUM)`
-  in `CUSUM_Changepoint_POWERBI_DAX.md` — the anchored-baseline CUSUM signal read directly,
-  not a separately-computed DAX slope; every indicator has 20+ years of history, more than
-  enough to build a CUSUM baseline from
+- **Key constants:** `PELT_MIN_SIZE` (6), `MIN_SEGMENT_OBS` (10), `RECENT_CHANGEPOINT_DAYS`
+- `endringsretning` in `pelt_analyse` is `Stigende`/`Synkende`, never `Stabil` — a
+  changepoint row only exists when a shift was actually detected
+- PELT's penalty uses a robust noise estimate, `1.4826 · MAD(diff(values)) / √2`, not
+  `np.std(values)` — real shifts inflate the plain std, and a large old shift could hide
+  a moderate recent one entirely
 
 **`pelt_analyse_detaljer`** breaks the most recent changepoint down by `enhet`/`fasetittel`, reusing PELT's before/after window instead of re-running detection.
-- Only drills into changepoints within `RECENT_CHANGEPOINT_DAYS` (90) days old
+- The window is PELT's own segment: from the previous breakpoint (or series start) to the
+  next one (or the last complete period), split at the first day of the breakpoint period
+- Only drills into changepoints recent enough to act on: `RECENT_CHANGEPOINT_DAYS` is 240
+  days for monthly, 90 for weekly (a monthly changepoint is always ≥ ~6 months old, since
+  PELT needs 6 periods after it)
 - Saksbehandler is excluded — too thin per-segment volume, and individual-level flagging is out of scope
-- `bidrag_til_endring` is each segment's volume-weighted share of the aggregate shift
+- `bidrag_til_endring` is each segment's volume-weighted share of the aggregate shift, split
+  into `bidrag_rate` (the segment got better/worse) + `bidrag_miks` (the segment got
+  bigger/smaller). For `Produksjonsdifferanse` values are per period and the mix part is 0
 - `tilstrekkelig_volum = FALSE` marks segments below `MIN_SEGMENT_OBS` (10) — don't trust these
 
 ### Seasonal_YTD_ratio_extrapolation.py
@@ -136,49 +178,52 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
   month's real counts (not modelled) so the projection forks off the actual line exactly,
   then one row per remaining month carries that month's modelled counts (one row per
   month, not per day — the report's axis groups by month, so a finer grain bought nothing)
-- Idempotent — deletes and rewrites current-year rows on each run
+- **Pace scenario («med dagens tempo»):** since frist% isn't seasonal, the model in practice
+  says "the year ends near where year-to-date is now", and doesn't see whether the last few
+  months were better or worse. So each row also carries `innenfor_tempo` (remaining months'
+  projected volume × the frist% of the last `TEMPO_MAANEDER` = 3 complete months) and
+  `prognose_aarsslutt_tempo`, drawn as a second dashed line from the same fork. Two
+  endpoints close together: the projection holds; clearly apart: the recent pace is
+  changing the picture. Added as columns, not rows, so existing measures are unaffected
+- Idempotent and atomic — replaces current-year rows in one Delta transaction
+  (`overwrite` + `replaceWhere`), so a failed run leaves last night's forecast in place
+  instead of an empty year. No forecast history is kept (a history table was considered
+  and not added — extra standing infrastructure)
 
-## Flow and queue health
+## Leading indicator
 
-### Throughput_Pressure_Monitor.py
+### At-risk open faser (live DAX)
 
-Team-level (`enhet`) flow imbalance (received vs. completed) and processing-time
-deviation vs. a rolling baseline, combined into a `pressure_nivaa`
-(`Lav`/`Moderat`/`Hoy`/`Kritisk`).
+Every other signal here is computed on **closed** faser, so it lags: a fase that will
+breach its deadline only shows up when it closes. `At_Risk_Open_Cases_POWERBI_DAX.md`
+(Del 1) counts **open** faser by the colour code the case overview already uses for time
+left to the deadline: red = past it, yellow = within a threshold that depends on the case
+type (1–4 weeks before a 3- or 12-week deadline), green = the rest. It reuses that rule
+rather than inventing a new "danger zone", so the numbers match what caseworkers and leaders
+already see. The colour ignores `Status` by design; `Status` is a slicer/column next to it,
+so the same measures answer "all open" and "only those with us". Entirely live DAX; today
+only (the colour depends on today's date). Earlier versions of this page (a 75 % threshold
+on `tidsbruk`, and the retired `Inflight_SLA_Risk_Monitor`) were dropped in favour of the
+existing code.
 
-- **Output:** `gjennomstroemming_press_enhet` (team × indikator × month), `gjennomstroemming_press_fase` (fase-level support table)
-- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_TEAM_VOLUME`, `POSITIVE_FLOW_STREAK`
-- `netto_flyt_streak` (consecutive positive-flow months) is exactly the kind of
-  order-dependent running count DAX has no clean primitive for — a script, not a fancy
-  measure
+### Phase time: P90 per phase (live DAX)
 
-### Phase_Bottleneck_Detector.py
+Del 3 of the same doc. Net production and open cases show *whether* the queue grows; P90
+phase time (`tidsbruk`, our time only) shows *where* work gets slow, since the slow tail is
+what causes deadline misses. Normal = P90 over the previous 12 months (P90 is not seasonal
+in this data; long phase times smear a summer dip over many months). Red dot when 25 %
+above normal; blank below 30 closed faser. Phases are combined across teams so there are
+enough cases per month.
 
-Same pattern one level down — phase-level (`fasetittel`) queue pressure and tidsbruk
-deviation, `alvorlighet` (`Lav`/`Moderat`/`Hoy`/`Kritisk`) with an `arsak_kode`/`arsak_tekst`
-explaining the flag.
+### Flow over time (live DAX)
 
-- **Output:** `fase_flaskehals_enhet` (enhet × fasetittel × indikator × month)
-- **Key constants:** `BASELINE_MONTHS`, `MIN_BASELINE_OBS`, `MIN_SEGMENT_OBS`
-
-## Workload
-
-### Caseworker load concentration
-
-Is active caseload concentrating on a few caseworkers within a team, even while the
-team's aggregate numbers look fine? Entirely live DAX, no script — per-person
-counts/shares (`Faser[saksansvarlig]` is already in the model) and the
-Gini coefficient itself, via a `RANKX`/`SUMX` iterator over the current enhet x indikator
-context, not a persisted trend table. See `Caseworker_Load_Concentration_POWERBI_DAX.md`
-for the full measure set and the tradeoff (current signal only, no day-by-day history).
-
-- Gini is scoped to enhet x indikator, never blended across an enhet's indicators (indicator
-  effort/complexity isn't comparable and isn't in the data — blending could mask
-  concentration on a heavier indicator behind a pile of lighter ones) and never broken down
-  per person — individual-level flagging is out of scope for this layer, same reasoning as
-  `CUSUM_Changepoint.py`'s drilldown exclusion.
-- Gini on 1-2 people is meaningless — gated to enhet x indikator combinations with 3+ active
-  caseworkers.
+Del 2 of the same doc: `Mottatt (periode)`, `Ferdigstilt (periode)`, `Netto flyt` and
+`Åpne ved periodeslutt` per month back to 2015, from start and end dates alone (`TREATAS`
+onto the right date column, so no inactive relationships are needed). The colour
+counts are today only: the colour depends on today's date, and no table keeps yesterday's. A trend for those would need a small nightly snapshot. That was considered and
+not added; reconstructing it from the completion milestones was tried and dropped
+(October 2026), because the milestones only cover ~12 months and the system's own
+`tidsbruk` already gives the clock for today.
 
 ## External ingestion (not a governance algorithm)
 
