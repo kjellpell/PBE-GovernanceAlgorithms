@@ -23,8 +23,10 @@ FUNCTION_NAMES = {
     "seasonal_ratio_on",
     "build_forecast_rows",
     "validate_results",
+    "recent_pace",
+    "project_year_end_at_pace",
 }
-CONSTANT_NAMES = {"OUTPUT_COLUMNS"}
+CONSTANT_NAMES = {"OUTPUT_COLUMNS", "TEMPO_MAANEDER"}
 
 EXTRACTED = []
 for node in TREE.body:
@@ -53,6 +55,8 @@ project_month_rate = NAMESPACE["project_month_rate"]
 seasonal_ratio_on = NAMESPACE["seasonal_ratio_on"]
 build_forecast_rows = NAMESPACE["build_forecast_rows"]
 validate_results = NAMESPACE["validate_results"]
+recent_pace = NAMESPACE["recent_pace"]
+project_year_end_at_pace = NAMESPACE["project_year_end_at_pace"]
 
 
 def monthly_rows(years, missing_months=None, year_end_rate=0.8):
@@ -397,6 +401,8 @@ class SeasonalForecastTests(unittest.TestCase):
             "prognose_aarsslutt": 0.75,
             "nedre_aarsslutt": 0.72,
             "oevre_aarsslutt": 0.78,
+            "innenfor_tempo": None,
+            "prognose_aarsslutt_tempo": None,
             "kjoert_tidspunkt": pd.Timestamp("2025-06-30").to_pydatetime(),
             "kjoere_id": "batch",
         }
@@ -420,12 +426,82 @@ class SeasonalForecastTests(unittest.TestCase):
             "prognose_aarsslutt": 0.75,
             "nedre_aarsslutt": 0.72,
             "oevre_aarsslutt": 0.78,
+            "innenfor_tempo": None,
+            "prognose_aarsslutt_tempo": None,
             "kjoert_tidspunkt": pd.Timestamp("2025-06-30").to_pydatetime(),
             "kjoere_id": "batch",
         }
 
         with self.assertRaises(ValueError):
             validate_results([row])
+
+
+class PaceScenarioTests(unittest.TestCase):
+    def frame(self):
+        # 2024: Oct-Dec at 60 %; 2025: Jan-Aug at 90 %, then Jun-Aug drop to 70 %.
+        rows = []
+        for m in (10, 11, 12):
+            rows.append({"indikator": "A", "aar": 2024, "mnd": m, "innenfor": 60, "total": 100})
+        for m in range(1, 9):
+            within = 70 if m >= 6 else 90
+            rows.append({"indikator": "A", "aar": 2025, "mnd": m, "innenfor": within, "total": 100})
+        return pd.DataFrame(rows)
+
+    def test_pace_is_pooled_over_the_last_three_complete_months(self):
+        self.assertAlmostEqual(recent_pace(self.frame(), "A", 2025, 8), 0.70)
+
+    def test_pace_walks_back_across_the_year_boundary(self):
+        # In February the last three complete months are Nov, Dec and Jan.
+        self.assertAlmostEqual(recent_pace(self.frame(), "A", 2025, 1), (60 + 60 + 90) / 300)
+
+    def test_no_pace_without_production(self):
+        self.assertIsNone(recent_pace(self.frame(), "B", 2025, 8))
+
+    def test_year_end_at_pace_combines_observed_months_with_pace_on_remaining_volume(self):
+        counts = monthly_counts(self.frame(), "A", 2025)
+        volumes = {9: 100.0, 10: 100.0, 11: 100.0, 12: 100.0}
+        # Jan-Aug: 5 x 90 + 3 x 70 = 660 of 800; rest 400 at 70 % = 280.
+        self.assertAlmostEqual(project_year_end_at_pace(counts, 8, volumes, 0.70), (660 + 280) / 1200, places=4)
+
+    def test_year_end_at_pace_needs_pace_and_volume(self):
+        counts = monthly_counts(self.frame(), "A", 2025)
+        self.assertIsNone(project_year_end_at_pace(counts, 8, {}, 0.7))
+        self.assertIsNone(project_year_end_at_pace(counts, 8, {9: 100.0}, None))
+
+    def test_pace_line_forks_from_the_anchor_and_runs_at_the_pace(self):
+        rows = build_forecast_rows(
+            "A", date(2025, 9, 1), MONTH_RATIOS, MONTH_VOLUMES, 0.84, 0.79, 0.89,
+            pd.Timestamp("2025-09-05").to_pydatetime(), "batch",
+            anchor_date=date(2025, 8, 31), anchor_innenfor=82, anchor_total=100,
+            pace=0.70, year_end_pace=0.80,
+        )
+        anchor = [r for r in rows if r["type"] == "Anker"][0]
+        self.assertEqual(anchor["innenfor_tempo"], 82)          # real count: same fork point
+        for r in rows:
+            self.assertEqual(r["prognose_aarsslutt_tempo"], 0.80)
+            if r["type"] == "Prognose":
+                self.assertAlmostEqual(r["innenfor_tempo"] / r["produserte_prognose"], 0.70, places=3)
+        validate_results(rows)
+
+    def test_existing_prognose_columns_are_unchanged_by_the_pace(self):
+        kwargs = dict(anchor_date=date(2025, 8, 31), anchor_innenfor=82, anchor_total=100)
+        args = ("A", date(2025, 9, 1), MONTH_RATIOS, MONTH_VOLUMES, 0.84, 0.79, 0.89,
+                pd.Timestamp("2025-09-05").to_pydatetime(), "batch")
+        without = build_forecast_rows(*args, **kwargs)
+        with_pace = build_forecast_rows(*args, **kwargs, pace=0.70, year_end_pace=0.80)
+        keep = ["verdi", "innenfor_prognose", "produserte_prognose", "prognose_aarsslutt"]
+        self.assertEqual([{k: r[k] for k in keep} for r in without],
+                         [{k: r[k] for k in keep} for r in with_pace])
+        self.assertTrue(all(r["innenfor_tempo"] is None for r in without))
+
+    def test_validation_rejects_pace_count_above_volume(self):
+        rows = build_forecast_rows(
+            "A", date(2025, 9, 1), MONTH_RATIOS, MONTH_VOLUMES, 0.84, 0.79, 0.89,
+            pd.Timestamp("2025-09-05").to_pydatetime(), "batch", pace=0.70, year_end_pace=0.80,
+        )
+        rows[0]["innenfor_tempo"] = rows[0]["produserte_prognose"] + 5
+        with self.assertRaises(ValueError):
+            validate_results(rows)
 
 
 if __name__ == "__main__":

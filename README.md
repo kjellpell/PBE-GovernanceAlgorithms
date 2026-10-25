@@ -178,6 +178,13 @@ confidence band. (Actuals are the report's own `Faser innen frist %` measure.)
   month's real counts (not modelled) so the projection forks off the actual line exactly,
   then one row per remaining month carries that month's modelled counts (one row per
   month, not per day — the report's axis groups by month, so a finer grain bought nothing)
+- **Pace scenario («med dagens tempo»):** since frist% isn't seasonal, the model in practice
+  says "the year ends near where year-to-date is now", and doesn't see whether the last few
+  months were better or worse. So each row also carries `innenfor_tempo` (remaining months'
+  projected volume × the frist% of the last `TEMPO_MAANEDER` = 3 complete months) and
+  `prognose_aarsslutt_tempo`, drawn as a second dashed line from the same fork. Two
+  endpoints close together: the projection holds; clearly apart: the recent pace is
+  changing the picture. Added as columns, not rows, so existing measures are unaffected
 - Idempotent and atomic — replaces current-year rows in one Delta transaction
   (`overwrite` + `replaceWhere`), so a failed run leaves last night's forecast in place
   instead of an empty year. No forecast history is kept (a history table was considered
