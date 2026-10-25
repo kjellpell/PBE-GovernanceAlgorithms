@@ -36,14 +36,13 @@ first. Split into two Power BI reports along that line, rather than one report m
 self-explanatory labels with numbers that need a briefing:
 
 **Leder-rapport** — reads cold, no explanation needed:
-- `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` and `Trendretning (12 mnd)` — a percentage, a change in points and one word (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
+- `Fristprosent` p-chart — each month against a shaded band of normal variation for its volume, red points where there's reason to react (below the band, or eight months in a row below normal), with a one-line reading guide; headline `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
 - `At_Risk_Open_Cases` (Del 1) — open faser by the report's existing deadline colour code (red = past deadline, yellow = close to it, threshold per case type, green = the rest), with `Status` alongside: counts and shares, live DAX
 - `At_Risk_Open_Cases` (Del 2) — intake, completions and open cases per month back to 2015, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
-- `Fristprosent` p-chart — monthly value against control limits that depend on that month's volume (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `PELT_Changepoint` (on demand) — when an unexplained shift in the average happened and which team/phase it came from; always shown with its run date
 - `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
 
@@ -101,13 +100,17 @@ role DAX has no clean primitive for, exactly the "possible but not simple" case 
 
 ## Closed-case trend, drift, and forecast
 
-### Fristprosent level: rolling 12 months and p-chart (live DAX)
+### Fristprosent level: p-chart and rolling 12 months (live DAX)
 
-`Fristprosent_Kontrollkort_POWERBI_DAX.md`. Leader report: `Fristprosent 12 mnd`,
-`Endring mot i fjor (pp)` and `Trendretning (12 mnd)` (±2 points, hidden below 100
-produced faser a year). Analyst report: a monthly p-chart, with the centre line = the same
-calendar month in the three prior years (pooled counts) and limits ±3·√(p(1−p)/n). These
-confirm that a shift has happened; they are not the early warning (see Leading indicator).
+`Fristprosent_Kontrollkort_POWERBI_DAX.md`, in the **leader** report. A monthly p-chart:
+the centre line is the same calendar month in the three prior years (pooled counts), and the
+band is ±3·√(p(1−p)/n), drawn as a shaded area. Points are grey (normal variation), red
+(below the band, or the eighth month in a row below the centre line) or blue (unusually
+good), with a one-line reading guide under the chart. It's for leaders because it guards
+against the two common mistakes — reacting to an ordinary bad month, and missing a slow
+decline — which a single number or trend word can't show. Headline card:
+`Fristprosent 12 mnd` with `Endring mot i fjor (pp)`. Both confirm that a shift has
+happened; they are not the early warning (see Leading indicator).
 
 ### PELT_Changepoint.py (on demand)
 

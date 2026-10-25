@@ -1,29 +1,34 @@
-# Fristprosent — rullerende 12 måneder og p-kort (Power BI and DAX)
+# Fristprosent — p-kort og rullerende 12 måneder (Power BI and DAX)
 
-**Målgruppe:**
-- **Leder-rapport:** `Fristprosent 12 mnd`, `Endring mot i fjor (pp)` og
-  `Trendretning (12 mnd)` leser kaldt — et prosenttall, en endring i prosentpoeng og ett ord.
-- **Analytiker-rapport:** p-kortet (kontrollgrenser per måned).
+**Målgruppe:** Leder-rapport.
+- **p-kortet** — hver måneds `Fristprosent` mot et skyggelagt bånd for normal variasjon,
+  med røde punkter der det er grunn til å reagere. Én linjes lesehjelp er nok.
+- **Overskriftstallet** — `Fristprosent 12 mnd` med `Endring mot i fjor (pp)`.
+
+Analytiker-rapporten kan bruke samme kort med grensene som tall og tolkningsnotatene nederst.
 
 Erstatter CUSUM (`cusum_analyse`, `Trendretning (CUSUM)`), pensjonert i oktober 2026. CUSUM
-på en lukket-sak-måling var tregt (ca. 9 måneder før et vedvarende skift på 1 σ ble sett
-på månedsdata), og med en nylig baseline ga det hyppige falske signaler. Lederen kunne
-heller ikke se hvorfor ordet på kortet endret seg. Disse målene svarer på det samme
-spørsmålet — «har nivået endret seg?» — med tall leseren kan kontrollere selv. Alt er live
-DAX; ingen skript, ingen tabell.
+på en lukket-sak-måling var tregt (ca. 9 måneder før et vedvarende skift på 1 σ ble sett på
+månedsdata), og med en nylig baseline ga det hyppige falske signaler. Lederen kunne heller
+ikke se hvorfor ordet på kortet endret seg. p-kortet viser det samme — «har nivået endret
+seg?» — slik at leseren ser det selv. Alt er live DAX; ingen skript, ingen tabell.
+
+**Hvorfor ledere skal ha det:** det beskytter mot de to vanligste feilene i
+styringsrapportering: å reagere på en måned som ser dårlig ut, men er vanlig variasjon, og å
+overse en langsom nedgang der ingen enkeltmåned ser alarmerende ut. Et enkelt tall eller ord
+kan ikke vise noen av delene.
 
 **Dette er ikke det tidlige varselet.** `Fristprosent` måles når fasene lukkes og kommer
-derfor etter. De ledende signalene står i `At_Risk_Open_Cases_POWERBI_DAX.md` (faser hos oss
-i faresonen, implisitt behandlingstid, andel som venter). Denne siden bekrefter at et skift
-har skjedd.
+derfor etter. Det ledende signalet er de røde og gule åpne fasene i
+`At_Risk_Open_Cases_POWERBI_DAX.md`. Denne siden bekrefter at et skift har skjedd.
 
 ## Antagelser (rename to match your model)
 - `[Faser innen frist]`, `[Produserte faser]` og `[Faser innen frist %]` finnes allerede
   (se `Seasonal_YTD_ratio_extrapolation_POWERBI_DAX.md`) — den offisielle definisjonen
 - `Kalender[Dato]` er datotabellen, relatert til fasens sluttdato
-- Bare **hele måneder**: alle mål under ankres på siste hele måned, `EOMONTH(TODAY(), -1)`
+- Bare **hele måneder**: inneværende måned vises ikke (den er ikke ferdig)
 
-## Del 1 — Rullerende 12 måneder (leder-rapport)
+## Del 1 — Overskriftstallet: rullerende 12 måneder
 
 Tolv måneder i én verdi er sesongnøytral: hver måned er med én gang, uansett når man ser.
 
@@ -56,46 +61,23 @@ RETURN
     IF(NOT ISBLANK(Naa) && NOT ISBLANK(IFjor), (Naa - IFjor) * 100)
 ```
 
-```DAX
-Produserte faser 12 mnd =
-CALCULATE(
-    [Produserte faser],
-    DATESINPERIOD(Kalender[Dato], [Siste hele måned], -12, MONTH)
-)
-```
+Vis som **KPI-kort**: `[Fristprosent 12 mnd]` med `[Endring mot i fjor (pp)]` som undertekst
+(«+1,8 pp mot i fjor»). Ikke farg kortet etter endringen alene. Om endringen er reell, er det
+p-kortet under som viser.
+
+## Del 2 — p-kortet
+
+Hver måned får et punkt og et bånd. **Midtlinjen** er normalen for den kalendermåneden:
+samme måned de tre foregående årene (summerte tellinger, ikke snitt av andeler), så juli
+måles mot tidligere juli-måneder. **Båndet** er hvor langt måneden kan avvike fra normalen
+bare på grunn av tilfeldigheter, gitt hvor mange faser den hadde. En måned med 25 faser kan
+svinge mye; en med 400 nesten ikke. Derfor er båndet bredt for små indikatorer og smalt for
+store.
 
 ```DAX
-Trendretning (12 mnd) =
-VAR E = [Endring mot i fjor (pp)]
-RETURN
-    SWITCH(
-        TRUE(),
-        ISBLANK(E) || [Produserte faser 12 mnd] < 100, BLANK(),
-        E >= 2, "Stigende",
-        E <= -2, "Synkende",
-        "Stabil"
-    )
+p-kort verdi =
+IF(MAX(Kalender[Dato]) <= EOMONTH(TODAY(), -1), [Faser innen frist %])
 ```
-
-Grensen på ±2 prosentpoeng og minimumsvolumet på 100 produserte faser er et utgangspunkt.
-Under ca. 100 faser per år er tilfeldig variasjon i en andel større enn 2 pp, og ordet ville
-skifte uten grunn — da vises ingenting. Juster når dere har sett nivået.
-
-Til en linje per måned (i stedet for et kort): bytt `[Siste hele måned]` med
-`MAX(Kalender[Dato])` i en kopi av `Fristprosent 12 mnd`, og vis bare hele måneder.
-
-### Visualforslag (leder)
-- **KPI-kort:** `[Fristprosent 12 mnd]` med `[Endring mot i fjor (pp)]` som undertekst,
-  og `[Trendretning (12 mnd)]` som ett ord
-- **Linje:** rullerende 12 måneder per måned, siste 36 måneder, med endringsloggen som
-  markører når den finnes
-
-## Del 2 — p-kort per måned (analytiker-rapport)
-
-Et p-kort viser hver måneds `Fristprosent` mot kontrollgrenser som tar hensyn til hvor mange
-faser måneden hadde: en måned med 20 faser kan svinge langt mer enn en med 400 uten at noe
-har endret seg. Senterlinjen er **samme kalendermåned de tre foregående årene** (summerte
-tellinger, ikke snitt av andeler), så juli måles mot tidligere juli-måneder.
 
 ```DAX
 p-kort senterlinje =
@@ -132,32 +114,89 @@ p-kort nedre grense =
 MAX(0, [p-kort senterlinje] - 3 * [p-kort sigma])
 ```
 
+**Løpsregelen:** åtte måneder på rad under midtlinjen betyr et vedvarende skift nedover,
+selv om ingen av dem er under båndet. Dette er det CUSUM skulle fange. Målet ser på denne
+måneden og de sju før den:
+
 ```DAX
-p-kort utenfor =
-VAR V = [Faser innen frist %]
+p-kort 8 under på rad =
+VAR Slutt = EOMONTH(MAX(Kalender[Dato]), 0)
+VAR Maaneder =
+    ADDCOLUMNS(
+        GENERATESERIES(0, 7, 1),
+        "@Verdi",
+            VAR Til = EOMONTH(Slutt, -[Value])
+            VAR Fra = EOMONTH(Til, -1) + 1
+            RETURN
+                CALCULATE(
+                    [p-kort verdi],
+                    REMOVEFILTERS(Kalender),
+                    FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)
+                ),
+        "@Senter",
+            VAR Til = EOMONTH(Slutt, -[Value])
+            VAR Fra = EOMONTH(Til, -1) + 1
+            RETURN
+                CALCULATE(
+                    [p-kort senterlinje],
+                    REMOVEFILTERS(Kalender),
+                    FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)
+                )
+    )
+RETURN
+    COUNTROWS(
+        FILTER(Maaneder, NOT ISBLANK([@Verdi]) && NOT ISBLANK([@Senter]) && [@Verdi] < [@Senter])
+    ) = 8
+```
+
+**Punktfargen** — det eneste leseren trenger å se etter:
+
+```DAX
+p-kort punktfarge =
+VAR V = [p-kort verdi]
 RETURN
     SWITCH(
         TRUE(),
         ISBLANK(V) || ISBLANK([p-kort sigma]), BLANK(),
-        V < [p-kort nedre grense], "Under",
-        V > [p-kort øvre grense], "Over",
-        "Innenfor"
+        V < [p-kort nedre grense] || [p-kort 8 under på rad], "#B00020",   -- rød: reager
+        V > [p-kort øvre grense], "#1565C0",                               -- blå: uvanlig god
+        "#9E9E9E"                                                          -- grå: normal variasjon
     )
 ```
 
-### Visualforslag (analytiker)
-- **Linje** per måned (`Kalender[Dato]` på månedsnivå, bare hele måneder — bruk
-  `[Faser innen frist % (lukket)]` for selve verdien): `Fristprosent`, senterlinje,
-  øvre og nedre grense. Farg punktene med `[p-kort utenfor]`.
-- **Filter:** `indikator`. Et p-kort per indikator; ikke bland indikatorer med ulikt nivå.
+```DAX
+p-kort signal =
+IF([p-kort punktfarge] = "#B00020", [p-kort verdi])
+```
+
+### Slik bygges kortet for ledere
+1. **Linjediagram**, x-akse `Kalender[Dato]` på månedsnivå (kontinuerlig), siste 36
+   måneder. Én indikator om gangen: slicer på `indikator`, eller små multipler per indikator.
+   Ikke bland indikatorer med ulikt nivå i samme kort.
+2. **Linjer:** `[p-kort verdi]` (grå, med markører) og `[p-kort senterlinje]` (tynn,
+   stiplet).
+3. **Båndet:** under *Analyse → Feilfelt (error bars)* på `[p-kort senterlinje]`, sett øvre
+   grense til `[p-kort øvre grense]` og nedre til `[p-kort nedre grense]`, og velg skyggelagt
+   område i lys grå. Har ikke versjonen deres skyggelagt feilfelt, bruk to tynne, lyse
+   linjer.
+4. **Røde punkter:** sett markørfargen med betinget formatering (*fx*) på
+   `[p-kort punktfarge]`. Går ikke det i deres versjon, legg til `[p-kort signal]` som egen
+   serie: røde markører, ingen linje.
+5. **Skjul tallene** for grensene og sigma. Ledere trenger båndet, ikke formelen.
+6. **Lesehjelp** som tekst rett under kortet:
+   > *Det grå båndet viser normal variasjon for antall saker den måneden. Reager bare på
+   > røde punkter: en måned under båndet, eller åtte måneder på rad under midtlinjen.*
 
 ## Tolkning
-- **Ett punkt under nedre grense:** uvanlig dårlig måned for det volumet. Se etter årsak.
-- **Mange punkter på samme side av senterlinjen** (tommelfingerregel: 8 på rad) betyr et
-  vedvarende skift, selv om ingen er utenfor grensene. Det er dette CUSUM skulle fange.
-- **Mange punkter utenfor grensene også i rolige perioder** betyr at variasjonen er større
-  enn binomisk (overdispersjon — f.eks. saker som kommer i klumper). Da er grensene for
-  trange; bruk Laneys p′-kort (grensene skaleres med variasjonen i z-verdiene) — eller
-  vurder grensene som veiledende.
-- **Brudd i nivået som ikke har en forklaring i endringsloggen:** kjør `PELT_Changepoint.py`
-  for å tidfeste det og bryte det ned på enhet/fasetittel.
+- **Grå punkter, også når de er lavere enn forrige måned:** normal variasjon. Ikke reager —
+  det er dette kortet er til for å unngå.
+- **Rødt punkt under båndet:** uvanlig dårlig måned for det volumet. Se etter årsak.
+- **Røde punkter fra løpsregelen:** nivået har sunket over tid. Det er en sak for
+  styringsdialogen, ikke for én enkelt måned.
+- **Blått punkt:** uvanlig god måned. Verdt å forstå hva som skjedde.
+- **Mange røde punkter også i rolige perioder** (analytiker): variasjonen er større enn
+  båndet antar (overdispersjon, f.eks. saker som kommer i klumper). Da er båndet for smalt;
+  bruk Laneys p′-kort, der grensene skaleres med den faktiske variasjonen, eller les båndet
+  som veiledende.
+- **Brudd i nivået uten forklaring:** kjør `PELT_Changepoint.py` for å tidfeste det og
+  bryte det ned på enhet/fasetittel.
