@@ -43,14 +43,14 @@ self-explanatory labels with numbers that need a briefing:
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
 step removed from the raw quantity, and needs someone who can defend the method:
-- `PELT_Changepoint` (on demand) — when an unexplained shift in the average happened and which team/phase it came from; always shown with its run date
+- `PELT_Changepoint` — when an unexplained shift in the average happened and which team/phase it came from; look at it when needed
 - `Seasonal_YTD_ratio_extrapolation` — the forecast range reads fine, but trusting the number means trusting the seasonal-ratio method behind it
 
 ## Scripts — the addon signal DAX can't produce
 
 | File | Output table(s) | What it computes |
 |---|---|---|
-| `PELT_Changepoint.py` | `pelt_analyse`, `pelt_analyse_detaljer` — **on demand, not scheduled** | PELT changepoints + drill-down — segmentation math |
+| `PELT_Changepoint.py` | `pelt_analyse`, `pelt_analyse_detaljer` | PELT changepoints + drill-down — segmentation math |
 | `Seasonal_YTD_ratio_extrapolation.py` | `frist_prognose` | Year-end forecast + confidence interval — a statistical model |
 | `Phase_Bottleneck_Detector.py` | `fase_flaskehals_enhet` | Phase-level queue pressure + phase-time deviation vs. baseline, with a plain-language reason |
 | `Kostra.py` | `kostra_*` (one table per SSB series) | External data sync — not a governance algorithm |
@@ -76,7 +76,7 @@ Three things that used to be here were retired:
   monthly data) and, with a recent same-month baseline, raised frequent false alarms; a
   leader also couldn't see why the word on the card changed. Replaced by live DAX
   (`Fristprosent_Kontrollkort_POWERBI_DAX.md`: control charts for production and frist%,
-  rolling 12 months, change vs. last year) and by the leading indicators. PELT, which shared the script, stays on demand
+  rolling 12 months, change vs. last year) and by the leading indicators. PELT, which shared the script, stays
   as `PELT_Changepoint.py`. See git history for `CUSUM_Changepoint.py`.
 - `Throughput_Pressure_Monitor.py` (`gjennomstroemming_press_enhet`/`_fase`, retired
   October 2026) — its team-level flow (intake vs. completions, open queue) is now plain
@@ -84,8 +84,7 @@ Three things that used to be here were retired:
   of a five-factor score.
   Its fase table duplicated `Phase_Bottleneck_Detector`. See git history.
 
-All (except `Kostra.py` and `PELT_Changepoint.py`) run nightly after the main data
-pipeline. `PELT_Changepoint.py` is run by hand when needed (e.g. quarterly).
+All (except `Kostra.py`) run nightly after the main data pipeline.
 
 `PELT_Changepoint` and `Phase_Bottleneck_Detector` score
 only **complete** periods: the current calendar month (and the current ISO week for
@@ -114,15 +113,14 @@ before frist% does, so side by side the charts show cause and effect. Headline c
 `Fristprosent 12 mnd` with `Endring mot i fjor (pp)`. Both charts confirm a shift after the
 fact; the early warning is the red/yellow open faser (see Leading indicator).
 
-### PELT_Changepoint.py (on demand)
+### PELT_Changepoint.py
 
 Finds structural breakpoints (PELT) in the average of each indicator's series, monthly and
-weekly, and breaks the latest one down by team and phase. **Not scheduled** — run by hand,
-e.g. quarterly. It looks backwards: it finds breaks nobody logged (registration practice,
+weekly, and breaks the latest one down by team and phase. Runs nightly; look at it when
+needed (e.g. quarterly). It looks backwards: it finds breaks nobody logged (registration practice,
 system migration, rule change) and needs ~6 periods after a break to see it, so it is not
 an early warning. To evaluate a *known* organisational change, use an interrupted time
-series at the known date, not PELT. The `pelt_*` tables keep the last manual run; show
-`kjoert_tidspunkt` on those pages.
+series at the known date, not PELT.
 
 - **Måltall:** `Fristprosent`, `Behandlingstid`, `Produksjonsdifferanse`
 - `Fristprosent` has one official definition across the repo: produced faser (start and

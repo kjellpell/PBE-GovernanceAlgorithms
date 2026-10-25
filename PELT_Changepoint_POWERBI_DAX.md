@@ -1,6 +1,6 @@
 # PELT_Changepoint.py — Power BI and DAX
 
-**Målgruppe:** Analytiker-rapport. **Kjøres ved behov, ikke hver natt.**
+**Målgruppe:** Analytiker-rapport. Kjøres hver natt; se på siden ved behov.
 
 ## Formål
 Finne strukturelle skift i gjennomsnittet av `Fristprosent`, `Behandlingstid` og
@@ -10,16 +10,13 @@ regelendring — og bryte siste skift ned på enhet og fasetittel.
 PELT ser **bakover**. Den trenger ca. seks perioder etter et brudd før den ser det, så den
 er ikke et tidlig varsel. Den er heller ikke riktig verktøy for å evaluere en *kjent*
 organisasjonsendring: da kjenner dere datoen, og avbrutt tidsserie (segmentert regresjon)
-på den datoen gir et tydeligere svar. Kjør PELT f.eks. kvartalsvis, og sjekk hvert funnet
+på den datoen gir et tydeligere svar. Se på siden f.eks. kvartalsvis, og sjekk hvert funnet
 brudd mot endringsloggen: hvert brudd skal enten ha en forklaring der, eller utløse
 spørsmålet «hva skjedde her?».
 
-Datakilder (overskrives ved hver manuelle kjøring):
+Datakilder (overskrives hver natt):
 - `analyser.pelt_analyse`
 - `analyser.pelt_analyse_detaljer`
-
-**Vis alltid `kjoert_tidspunkt`** på PELT-sidene, så ingen leser en gammel kjøring som
-nattens tall.
 
 CUSUM-driftdeteksjon (`cusum_analyse`, `Trendretning (CUSUM)`) lå tidligere i samme
 skript og ble pensjonert i oktober 2026 — se `README.md`. Erstatning: rullerende

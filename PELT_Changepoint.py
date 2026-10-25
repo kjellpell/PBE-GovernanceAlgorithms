@@ -1,8 +1,9 @@
 # =============================================================================
-# PELT changepoint detection per indicator — ON DEMAND, not scheduled.
+# PELT changepoint detection per indicator.
+# Runs nightly after the main data pipeline, so the report is always current
+# and can be looked at whenever someone asks "did something change?".
 #
-# Run this notebook by hand (e.g. quarterly, or when someone asks "did
-# something change?"). It looks BACKWARDS: it finds structural shifts in the
+# It looks BACKWARDS: it finds structural shifts in the
 # average of Fristprosent, Behandlingstid and Produksjonsdifferanse that
 # nobody logged — a registration-practice change, a system migration, a rule
 # change. It is not an early warning (it needs ~6 periods after a break to see
@@ -19,8 +20,7 @@
 #   Saksbehandler is deliberately excluded — too thin per-segment volume,
 #   and individual-level automated flagging is out of scope for this layer.
 #
-# Output tables (overwritten on each manual run — show kjoert_tidspunkt in
-# reports so nobody reads an old run as last night's):
+# Output tables (overwritten nightly):
 #   pelt_analyse          — oppdagede endringspunkter med gjennomsnitt før/etter
 #   pelt_analyse_detaljer — nedbryting av siste endringspunkt per enhet/fasetittel
 #
