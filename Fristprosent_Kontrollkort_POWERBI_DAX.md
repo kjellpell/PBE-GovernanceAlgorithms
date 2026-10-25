@@ -67,12 +67,14 @@ p-kortet under som viser.
 
 ## Del 2 — p-kortet
 
-Hver måned får et punkt og et bånd. **Midtlinjen** er normalen for den kalendermåneden:
-samme måned de tre foregående årene (summerte tellinger, ikke snitt av andeler), så juli
-måles mot tidligere juli-måneder. **Båndet** er hvor langt måneden kan avvike fra normalen
-bare på grunn av tilfeldigheter, gitt hvor mange faser den hadde. En måned med 25 faser kan
-svinge mye; en med 400 nesten ikke. Derfor er båndet bredt for små indikatorer og smalt for
-store.
+Hver måned får et punkt og et bånd. **Midtlinjen** er normalen, og **båndet** er normal
+variasjon rundt den. Kortet bruker **båndet dere allerede har**: snittet for måneden de tre
+siste årene, ± 0,5 standardavvik. Det er kalibrert på deres data (1 standardavvik ga et for
+bredt bånd, fordi standardavviket også fanger sesong og forskjeller mellom år), og det ser
+likt ut som i rapportene ledere allerede kjenner.
+
+Koble målene under til de eksisterende formlene. **Bytt navnene i hakeparentes** til målene
+dere har:
 
 ```DAX
 p-kort verdi =
@@ -81,6 +83,27 @@ IF(MAX(Kalender[Dato]) <= EOMONTH(TODAY(), -1), [Faser innen frist %])
 
 ```DAX
 p-kort senterlinje =
+[Snitt siste 3 år]                -- eksisterende mål: snittet for måneden de tre siste årene
+```
+
+```DAX
+p-kort øvre grense =
+[Øvre grense (0,5 SD)]            -- eksisterende mål
+```
+
+```DAX
+p-kort nedre grense =
+[Nedre grense (0,5 SD)]           -- eksisterende mål
+```
+
+**Sesong:** fristprosent svinger med årstiden (bekreftet). Midtlinjen bør derfor være
+snittet for **samme kalendermåned** de tre siste årene (juli mot tidligere juli-måneder),
+ikke snittet av alle måneder. Er den eksisterende midtlinjen snittet av alle måneder, vil de
+svake sesongmånedene jevnlig bli gule eller røde uten at noe er galt. Bytt da
+`p-kort senterlinje` til samme-måned-snittet under, og behold deres 0,5 SD-bånd rundt den:
+
+```DAX
+p-kort senterlinje (samme måned) =
 VAR D = MAX(Kalender[Dato])
 VAR M = MONTH(D)
 VAR Y = YEAR(D)
@@ -96,23 +119,12 @@ RETURN
     )
 ```
 
-```DAX
-p-kort sigma =
-VAR P = [p-kort senterlinje]
-VAR N = [Produserte faser]
-RETURN
-    IF(N > 0 && NOT ISBLANK(P), SQRT(P * (1 - P) / N))
-```
+Når midtlinjen følger sesongen, blir avvikene rundt den mindre, så 0,5 SD kan da bli et
+smalere bånd enn i dag. Kalibreringskontrollen under viser om det blir for smalt.
 
-```DAX
-p-kort øvre grense =
-MIN(1, [p-kort senterlinje] + 3 * [p-kort sigma])
-```
-
-```DAX
-p-kort nedre grense =
-MAX(0, [p-kort senterlinje] - 3 * [p-kort sigma])
-```
+Båndet må gjelde **fristprosent per måned**, samme tall som punktene. Gjelder de eksisterende
+formlene produksjonsvolum (antall saker), er det et annet kort — nyttig for kapasitet, men
+ikke dette.
 
 **Løpsregelen:** åtte måneder på rad under midtlinjen betyr et vedvarende skift nedover,
 selv om ingen av dem er under båndet. Dette er det CUSUM skulle fange. Målet ser på denne
@@ -149,18 +161,62 @@ RETURN
     ) = 8
 ```
 
+**Kalibreringskontroll:** hvor ofte har måneden ligget under båndet de siste 36
+månedene? Med et bånd som er justert på øyemål vet vi ikke det på forhånd, så kortet
+måler det selv, per indikator:
+
+```DAX
+p-kort andel under båndet (36 mnd) =
+VAR Slutt = EOMONTH(TODAY(), -1)
+VAR Maaneder =
+    ADDCOLUMNS(
+        GENERATESERIES(0, 35, 1),
+        "@Verdi",
+            VAR Til = EOMONTH(Slutt, -[Value])
+            VAR Fra = EOMONTH(Til, -1) + 1
+            RETURN
+                CALCULATE(
+                    [p-kort verdi],
+                    REMOVEFILTERS(Kalender),
+                    FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)
+                ),
+        "@Nedre",
+            VAR Til = EOMONTH(Slutt, -[Value])
+            VAR Fra = EOMONTH(Til, -1) + 1
+            RETURN
+                CALCULATE(
+                    [p-kort nedre grense],
+                    REMOVEFILTERS(Kalender),
+                    FILTER(ALL(Kalender[Dato]), Kalender[Dato] >= Fra && Kalender[Dato] <= Til)
+                )
+    )
+VAR Med = FILTER(Maaneder, NOT ISBLANK([@Verdi]) && NOT ISBLANK([@Nedre]))
+RETURN
+    DIVIDE(COUNTROWS(FILTER(Med, [@Verdi] < [@Nedre])), COUNTROWS(Med))
+```
+
+- **Opptil ca. 10 %** (rundt én måned i året under båndet): et punkt under båndet er et
+  reelt varsel og vises **rødt**.
+- **Mer enn 10 %:** båndet er for smalt for den indikatoren til at hvert punkt under det
+  kan være et varsel. Da vises punktet **gult** («følg med»), og bare løpsregelen gir rødt.
+  Det skjer automatisk i punktfargen under.
+
 **Punktfargen** — det eneste leseren trenger å se etter:
 
 ```DAX
 p-kort punktfarge =
 VAR V = [p-kort verdi]
+VAR Nedre = [p-kort nedre grense]
+VAR BaandHolder = [p-kort andel under båndet (36 mnd)] <= 0.10
 RETURN
     SWITCH(
         TRUE(),
-        ISBLANK(V) || ISBLANK([p-kort sigma]), BLANK(),
-        V < [p-kort nedre grense] || [p-kort 8 under på rad], "#B00020",   -- rød: reager
-        V > [p-kort øvre grense], "#1565C0",                               -- blå: uvanlig god
-        "#9E9E9E"                                                          -- grå: normal variasjon
+        ISBLANK(V) || ISBLANK(Nedre), BLANK(),
+        [p-kort 8 under på rad], "#B00020",              -- rød: vedvarende nedgang
+        V < Nedre && BaandHolder, "#B00020",             -- rød: uvanlig dårlig måned
+        V < Nedre, "#F9A825",                            -- gul: følg med
+        V > [p-kort øvre grense], "#1565C0",             -- blå: uvanlig god
+        "#9E9E9E"                                        -- grå: normal variasjon
     )
 ```
 
@@ -182,21 +238,24 @@ IF([p-kort punktfarge] = "#B00020", [p-kort verdi])
 4. **Røde punkter:** sett markørfargen med betinget formatering (*fx*) på
    `[p-kort punktfarge]`. Går ikke det i deres versjon, legg til `[p-kort signal]` som egen
    serie: røde markører, ingen linje.
-5. **Skjul tallene** for grensene og sigma. Ledere trenger båndet, ikke formelen.
+5. **Skjul tallene** for grensene. Ledere trenger båndet, ikke formelen.
 6. **Lesehjelp** som tekst rett under kortet:
-   > *Det grå båndet viser normal variasjon for antall saker den måneden. Reager bare på
-   > røde punkter: en måned under båndet, eller åtte måneder på rad under midtlinjen.*
+   > *Det grå båndet viser normal variasjon de tre siste årene. Reager på røde punkter
+   > (uvanlig dårlig måned, eller åtte måneder på rad under midtlinjen); følg med på gule.*
 
 ## Tolkning
 - **Grå punkter, også når de er lavere enn forrige måned:** normal variasjon. Ikke reager —
   det er dette kortet er til for å unngå.
-- **Rødt punkt under båndet:** uvanlig dårlig måned for det volumet. Se etter årsak.
+- **Rødt punkt under båndet:** uvanlig dårlig måned. Se etter årsak.
+- **Gult punkt under båndet:** svakere enn normalt, men for den indikatoren skjer det for
+  ofte til at én måned alene er et varsel. Følg med; blir det åtte på rad under midtlinjen,
+  blir det rødt.
 - **Røde punkter fra løpsregelen:** nivået har sunket over tid. Det er en sak for
   styringsdialogen, ikke for én enkelt måned.
 - **Blått punkt:** uvanlig god måned. Verdt å forstå hva som skjedde.
-- **Mange røde punkter også i rolige perioder** (analytiker): variasjonen er større enn
-  båndet antar (overdispersjon, f.eks. saker som kommer i klumper). Da er båndet for smalt;
-  bruk Laneys p′-kort, der grensene skaleres med den faktiske variasjonen, eller les båndet
-  som veiledende.
+- **Alternativ for analytikere — binomiske grenser:** grensene kan også regnes fra antall
+  faser i måneden, ± 3·√(p(1−p)/n) rundt midtlinjen. Da blir båndet smalere i måneder med
+  mange saker og bredere i måneder med få. Det er standard p-kort, men undervurderer ofte
+  variasjonen når saker kommer i klumper; det empiriske båndet over gjør ikke det.
 - **Brudd i nivået uten forklaring:** kjør `PELT_Changepoint.py` for å tidfeste det og
   bryte det ned på enhet/fasetittel.
