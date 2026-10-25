@@ -38,7 +38,7 @@ self-explanatory labels with numbers that need a briefing:
 **Leder-rapport** — reads cold, no explanation needed:
 - `Fristprosent 12 mnd` with `Endring mot i fjor (pp)` and `Trendretning (12 mnd)` — a percentage, a change in points and one word (`Fristprosent_Kontrollkort_POWERBI_DAX.md`, live DAX)
 - `Phase_Bottleneck_Detector` — `alvorlighet` plus `arsak_tekst`, a full plain-language sentence explaining the flag, not just a code
-- `At_Risk_Open_Cases` (Del 1) — faser **with us** (`Status = "Under behandling"`) whose deadline clock (`tidsbruk`) has used ≥ 75 % of `frist_dager` or is past it, the share waiting on the applicant, and implied processing time (queue with us ÷ recent completions) vs. the deadline: plain counts, shares and days, live DAX
+- `At_Risk_Open_Cases` (Del 1) — open faser by the report's existing deadline colour code (red = past deadline, yellow = close to it, threshold per case type, green = the rest), with `Status` alongside: counts and shares, live DAX
 - `At_Risk_Open_Cases` (Del 2) — intake, completions and open cases per month back to 2015, live DAX
 
 **Analytiker-rapport** — the label is fine, but the "why" is a statistical construct one
@@ -202,24 +202,22 @@ explaining the flag.
 
 Every other signal here is computed on **closed** faser, so it lags: a fase that will
 breach its deadline only shows up when it closes. `At_Risk_Open_Cases_POWERBI_DAX.md`
-counts open faser **with us** (`Faser[Status] = "Under behandling"`) whose deadline clock
-has used at least a threshold share of `frist_dager` (what-if parameter, default 0.75),
-plus those already past it. The clock is `Faser[tidsbruk]`, a live accumulator of days on
-our side that stands still while the applicant completes documentation (that time goes to
-`bransjetid`), so a fase that waited a month for drawings is not a month closer to its
-deadline. Earlier versions of this page, and the retired `Inflight_SLA_Risk_Monitor`, used
-calendar age and over-flagged. Waiting faser are shown as a separate share, never as at
-risk. `Implisitt behandlingstid` (Little's law: queue with us ÷ completions in the last 28
-days × 28) compared with the typical deadline is the earliest quantitative warning.
-Entirely live DAX. Same scope as the official `Fristprosent` (`%avtalt%` included).
+(Del 1) counts **open** faser by the colour code the case overview already uses for time
+left to the deadline: red = past it, yellow = within a threshold that depends on the case
+type (1–4 weeks before a 3- or 12-week deadline), green = the rest. It reuses that rule
+rather than inventing a new "danger zone", so the numbers match what caseworkers and leaders
+already see. The colour ignores `Status` by design; `Status` is a slicer/column next to it,
+so the same measures answer "all open" and "only those with us". Entirely live DAX; today
+only (the colour depends on today's date). Earlier versions of this page (a 75 % threshold
+on `tidsbruk`, and the retired `Inflight_SLA_Risk_Monitor`) were dropped in favour of the
+existing code.
 
 ### Flow over time (live DAX)
 
 Del 2 of the same doc: `Mottatt (periode)`, `Ferdigstilt (periode)`, `Netto flyt` and
 `Åpne ved periodeslutt` per month back to 2015, from start and end dates alone (`TREATAS`
-onto the right date column, so no inactive relationships are needed). The danger-zone
-counts are today only: `Status` and `tidsbruk` are current values, and no table keeps
-yesterday's. A trend for those would need a small nightly snapshot. That was considered and
+onto the right date column, so no inactive relationships are needed). The colour
+counts are today only: the colour depends on today's date, and no table keeps yesterday's. A trend for those would need a small nightly snapshot. That was considered and
 not added; reconstructing it from the completion milestones was tried and dropped
 (October 2026), because the milestones only cover ~12 months and the system's own
 `tidsbruk` already gives the clock for today.
